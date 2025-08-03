@@ -4378,6 +4378,9 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     const int64_t n_expert_used   = hparams.n_expert_used;
                     const int64_t n_expert_shared = hparams.n_expert_shared;
 
+                    GGML_ASSERT(hparams.n_expert > 0 && "n_expert must be > 0 for GLM4_MOE MoE layers");
+                    GGML_ASSERT(hparams.n_expert_used > 0 && "n_expert_used must be > 0 for GLM4_MOE MoE layers");
+
                     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
 
                     // output
@@ -4431,14 +4434,6 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                             layer.ffn_gate_inp =
                                 create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", i), { n_embd, n_expert }, 0);
                             layer.ffn_exp_probs_b = create_tensor(tn(LLM_TENSOR_FFN_EXP_PROBS_B, "bias", i), { n_expert }, 0);
-
-                            if (n_expert == 0) {
-                                GGML_ASSERT(hparams.n_expert > 0 && "n_expert must be > 0 for GLM4_MOE MoE layers");
-                            }
-                            if (n_expert_used == 0) {
-                                GGML_ASSERT(hparams.n_expert_used > 0 &&
-                                            "n_expert_used must be > 0 for GLM4_MOE MoE layers");
-                            }
 
                             // MoE branch
                             const int64_t n_ff_exp = hparams.n_ff_exp ? hparams.n_ff_exp : n_ff / n_expert_used;
