@@ -6724,17 +6724,8 @@ class Glm4MoeModel(TextModel):
             else:
                 return []
 
-        # Handle expert gating input (routing gate) - routed experts only
-        if ".mlp.gate.e_score_correction_bias" in name:
-            new_name = name.replace("model.layers.", "blk.").replace(
-                ".mlp.gate.e_score_correction_bias", ".exp_probs_b"
-            )
-            return [(new_name, data_torch)]
-        elif ".mlp.gate.weight" in name:
-            new_name = name.replace("model.layers.", "blk.").replace(
-                ".mlp.gate.weight", ".ffn_gate_inp.weight"
-            )
-            return [(new_name, data_torch)]
+        if name.endswith("e_score_correction_bias"):
+            name = name.replace("e_score_correction_bias", "e_score_correction.bias")
 
         # Handle special NextN tensors - preserve for future MTP support
         if (
