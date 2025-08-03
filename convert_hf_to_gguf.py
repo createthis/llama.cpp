@@ -6696,10 +6696,6 @@ class Glm4MoeModel(TextModel):
             if self._experts is None:
                 self._experts = [{} for _ in range(self.block_count)]
 
-            # Extend experts array if needed (for models where actual layers > num_hidden_layers)
-            while len(self._experts) <= bid:
-                self._experts.append({})
-
             self._experts[bid][name] = data_torch
 
             if len(self._experts[bid]) >= n_experts * 3:
