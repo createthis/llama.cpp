@@ -6776,27 +6776,9 @@ class Glm4MoeModel(TextModel):
             new_name = name.replace("model.layers.", "blk.").replace("model.", "").replace(".weight", "")
             return [(new_name, data_torch)]
 
-        # GLM tensor mapping - handle directly without map_tensor_name
-        if ".input_layernorm." in name:
-            new_name = name.replace("model.layers.", "blk.").replace(".input_layernorm.", ".attn_norm.")
-            return [(new_name, data_torch)]
-        elif ".post_attention_layernorm." in name:
-            new_name = name.replace("model.layers.", "blk.").replace(".post_attention_layernorm.", ".ffn_norm.")
-            return [(new_name, data_torch)]
-        elif ".self_attn." in name:
-            # Map GLM self_attn to standard attention naming
-            new_name = name.replace("model.layers.", "blk.").replace(".self_attn.", ".attn_")
-            if "q_proj" in new_name:
-                new_name = new_name.replace("q_proj", "q")
-            elif "k_proj" in new_name:
-                new_name = new_name.replace("k_proj", "k")
-            elif "v_proj" in new_name:
-                new_name = new_name.replace("v_proj", "v")
-            elif "o_proj" in new_name:
-                new_name = new_name.replace("o_proj", "output")
-            return [(new_name, data_torch)]
+        new_name = self.map_tensor_name(name)
 
-        return super().modify_tensors(data_torch, name, bid)
+        return [(new_name, data_torch)]
 
     def prepare_tensors(self):
         super().prepare_tensors()
