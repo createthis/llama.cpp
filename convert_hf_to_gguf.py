@@ -6674,7 +6674,6 @@ class Glm4MoeModel(TextModel):
             self.gguf_writer.add_expert_weights_norm(norm_topk_prob)
 
     _experts: list[dict[str, Tensor]] | None = None
-    _shared_experts: list[dict[str, Tensor]] | None = None
 
     def modify_tensors(
         self, data_torch: Tensor, name: str, bid: int | None
