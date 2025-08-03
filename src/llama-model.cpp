@@ -18074,7 +18074,6 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_PLM:
         case LLM_ARCH_CHATGLM:
         case LLM_ARCH_GLM4:
-        case LLM_ARCH_GLM4_MOE:
         case LLM_ARCH_GRANITE:
         case LLM_ARCH_GRANITE_MOE:
         case LLM_ARCH_GRANITE_HYBRID:
@@ -18127,6 +18126,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_HUNYUAN_MOE:
         case LLM_ARCH_LFM2:
         case LLM_ARCH_SMALLTHINKER:
+        case LLM_ARCH_GLM4_MOE:
             return LLAMA_ROPE_TYPE_NEOX;
 
         case LLM_ARCH_QWEN2VL:
