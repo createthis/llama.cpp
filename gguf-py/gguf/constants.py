@@ -2129,7 +2129,6 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.ATTN_OUT,
         MODEL_TENSOR.ATTN_Q_NORM,
         MODEL_TENSOR.ATTN_K_NORM,
-        MODEL_TENSOR.FFN_NORM,
         MODEL_TENSOR.FFN_GATE,          # dense layers
         MODEL_TENSOR.FFN_DOWN,          # dense layers
         MODEL_TENSOR.FFN_UP,            # dense layers
