@@ -6673,9 +6673,6 @@ class Glm4MoeModel(TextModel):
         if (norm_topk_prob := self.hparams.get("norm_topk_prob")) is not None:
             self.gguf_writer.add_expert_weights_norm(norm_topk_prob)
 
-        # GLM models should not prepend BOS token
-        self.gguf_writer.add_add_bos_token(False)
-
     _experts: list[dict[str, Tensor]] | None = None
     _shared_experts: list[dict[str, Tensor]] | None = None
 
