@@ -13557,15 +13557,12 @@ struct llm_build_glm4_moe : public llm_graph_context {
                 inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
             }
 
-            // Post-attention norm
-            cur = build_norm(cur,
-                    model.layers[il].attn_post_norm,
-                    NULL,
-                    LLM_NORM_RMS, il);
-            cb(cur, "post_attn_norm", il);
-
             ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
             cb(ffn_inp, "ffn_inp", il);
+
+            // Post-attention norm
+            cur = build_norm(ffn_inp, model.layers[il].attn_post_norm, NULL, LLM_NORM_RMS, il);
+            cb(cur, "post_attn_norm", il);
 
             // Check if this is a dense layer (n_layer_dense_lead=1, so layer 0 is dense)
             if (static_cast<uint32_t>(il) < hparams.n_layer_dense_lead) {
@@ -13582,9 +13579,6 @@ struct llm_build_glm4_moe : public llm_graph_context {
                 const int64_t n_expert      = hparams.n_expert;
                 const int64_t n_expert_used = hparams.n_expert_used;
 
-                // Save original input for shared expert
-                ggml_tensor * residuals = cur;
-
                 // Process routed experts using existing MoE infrastructure
                 ggml_tensor * routed_out = build_moe_ffn(cur,
                         model.layers[il].ffn_gate_inp,
@@ -13600,7 +13594,7 @@ struct llm_build_glm4_moe : public llm_graph_context {
                 cb(routed_out, "ffn_moe_out", il);
 
                 // Process shared expert on original input
-                ggml_tensor * shared_out = build_ffn(residuals,
+                ggml_tensor * shared_out = build_ffn(cur,
                         model.layers[il].ffn_up_shexp,   NULL, NULL,
                         model.layers[il].ffn_gate_shexp, NULL, NULL,
                         model.layers[il].ffn_down_shexp, NULL, NULL,
