@@ -6736,35 +6736,6 @@ class Glm4MoeModel(TextModel):
             )
             return [(new_name, data_torch)]
 
-        # Handle shared expert tensors
-        if ".mlp.shared_experts." in name:
-            new_name = name.replace("model.layers.", "blk.").replace(".mlp.shared_experts.", ".ffn_")
-            if "gate_proj" in new_name:
-                new_name = new_name.replace("gate_proj", "gate_shexp")
-            elif "down_proj" in new_name:
-                new_name = new_name.replace("down_proj", "down_shexp")
-            elif "up_proj" in new_name:
-                new_name = new_name.replace("up_proj", "up_shexp")
-            return [(new_name, data_torch)]
-
-        # Handle regular dense FFN layers (for hybrid dense/MoE architecture)
-        if ".mlp." in name and "experts" not in name and "_shexp" not in name:
-            if "gate_proj" in name:
-                new_name = name.replace("model.layers.", "blk.").replace(
-                    ".mlp.gate_proj.weight", ".ffn_gate.weight"
-                )
-            elif "up_proj" in name:
-                new_name = name.replace("model.layers.", "blk.").replace(
-                    ".mlp.up_proj.weight", ".ffn_up.weight"
-                )
-            elif "down_proj" in name:
-                new_name = name.replace("model.layers.", "blk.").replace(
-                    ".mlp.down_proj.weight", ".ffn_down.weight"
-                )
-            else:
-                new_name = name
-            return [(self.map_tensor_name(new_name), data_torch)]
-
         # Handle special NextN tensors - preserve for future MTP support
         if (
             ".embed_tokens." in name
