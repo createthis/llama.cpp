@@ -4424,8 +4424,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
                         // Check if this layer uses MoE or dense FFN based on n_layer_dense_lead
                         // GLM 4.5 uses hybrid architecture: layer 0 is dense, layers 1+ are MoE
-                        const bool use_moe =
-                            (hparams.n_expert > 0) && (static_cast<uint32_t>(i) >= hparams.n_layer_dense_lead);
+                        const bool use_moe = (static_cast<uint32_t>(i) >= hparams.n_layer_dense_lead);
 
                         if (use_moe) {
                             // MoE layers
