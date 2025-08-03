@@ -6689,7 +6689,7 @@ class Glm4MoeModel(TextModel):
             return [(self.map_tensor_name("token_embd.weight"), data_torch)]
 
         # Handle routed experts
-        if name.find("mlp.experts") != -1 and "shared_experts" not in name:
+        if name.find("mlp.experts") != -1:
             n_experts = self.hparams["n_routed_experts"]
             assert bid is not None
 
