@@ -679,7 +679,7 @@ class TextModel(ModelBase):
             # ref: https://huggingface.co/THUDM/glm-4-9b-hf
             res = "glm4"
         if chkhsh == "9ca2dd618e8afaf09731a7cf6e2105b373ba6a1821559f258b272fe83e6eb902":
-            # ref: https://huggingface.co/zai-org/GLM-4.5-Air, https://huggingface.co/zai-org/GLM-4.5
+            # ref: https://huggingface.co/zai-org/GLM-4.5-Air
             res = "glm4"
         if chkhsh == "1431a23e583c97432bc230bff598d103ddb5a1f89960c8f1d1051aaa944d0b35":
             # ref: https://huggingface.co/sapienzanlp/Minerva-7B-base-v1.0
@@ -6622,8 +6622,6 @@ class Glm4MoeModel(TextModel):
             special_vocab._set_special_token("sop", tokenizer.get_added_vocab()["<sop>"])  # 151333
         if "<eop>" in tokenizer.get_added_vocab():
             special_vocab._set_special_token("eop", tokenizer.get_added_vocab()["<eop>"])  # 151334
-        if "[sMASK]" in tokenizer.get_added_vocab():
-            special_vocab._set_special_token("smask", tokenizer.get_added_vocab()["[sMASK]"])  # 151332
 
         # TODO: clean up once decided on an approach to think and /nothink
         #
@@ -6762,7 +6760,7 @@ class ChatGLMModel(TextModel):
         vocab_size = hparams.get("padded_vocab_size", len(tokenizer.get_vocab()))
         assert max(tokenizer.get_vocab().values()) < vocab_size
         role_special_tokens = ["<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]
-        special_tokens = ["[MASK]", "[gMASK]", "[sMASK]", "sop", "eop"] + role_special_tokens
+        special_tokens = ["[MASK]", "[gMASK]", "sop", "eop"] + role_special_tokens
         for token_id in range(vocab_size):
             piece = tokenizer._convert_id_to_token(token_id)
             if token_id == 0:
