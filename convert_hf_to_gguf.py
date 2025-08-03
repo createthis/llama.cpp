@@ -6718,16 +6718,10 @@ class Glm4MoeModel(TextModel):
                         del self._experts[bid][ename]
 
                     data_torch = torch.stack(datas, dim=0)
-                    # Generate GGUF tensor names for merged experts
-                    if w_name == "down_proj":
-                        new_name = f"blk.{bid}.ffn_down_exps.weight"
-                    elif w_name == "gate_proj":
-                        new_name = f"blk.{bid}.ffn_gate_exps.weight"
-                    elif w_name == "up_proj":
-                        new_name = f"blk.{bid}.ffn_up_exps.weight"
-                    else:
-                        merged_name = f"model.layers.{bid}.mlp.experts.{w_name}.weight"
-                        new_name = self.map_tensor_name(merged_name)
+
+                    merged_name = f"model.layers.{bid}.mlp.experts.{w_name}.weight"
+
+                    new_name = self.map_tensor_name(merged_name)
                     tensors.append((new_name, data_torch))
                 return tensors
             else:
