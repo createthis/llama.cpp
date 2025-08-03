@@ -13564,12 +13564,15 @@ struct llm_build_glm4_moe : public llm_graph_context {
                 inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
             }
 
+            // Post-attention norm
+            cur = build_norm(cur,
+                    model.layers[il].attn_post_norm,
+                    NULL,
+                    LLM_NORM_RMS, il);
+            cb(cur, "post_attn_norm", il);
+
             ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
             cb(ffn_inp, "ffn_inp", il);
-
-            // FFN - hybrid dense/MoE layers
-            cur = build_norm(ffn_inp, model.layers[il].ffn_norm, NULL, LLM_NORM_RMS, il);
-            cb(cur, "ffn_norm", il);
 
             // Check if this is a dense layer (n_layer_dense_lead=1, so layer 0 is dense)
             if (static_cast<uint32_t>(il) < hparams.n_layer_dense_lead) {
