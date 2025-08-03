@@ -423,9 +423,6 @@ class MODEL_TENSOR(IntEnum):
     FFN_GATE_EXP         = auto()
     FFN_DOWN_EXP         = auto()
     FFN_UP_EXP           = auto()
-    FFN_GATE_EXPS        = auto()  # merged experts
-    FFN_DOWN_EXPS        = auto()  # merged experts
-    FFN_UP_EXPS          = auto()  # merged experts
     FFN_GATE_SHEXP       = auto()
     FFN_DOWN_SHEXP       = auto()
     FFN_UP_SHEXP         = auto()
