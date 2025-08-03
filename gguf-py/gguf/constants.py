@@ -755,9 +755,6 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.FFN_GATE_EXP:              "blk.{bid}.ffn_gate_exps",
     MODEL_TENSOR.FFN_DOWN_EXP:              "blk.{bid}.ffn_down_exps",
     MODEL_TENSOR.FFN_UP_EXP:                "blk.{bid}.ffn_up_exps",
-    MODEL_TENSOR.FFN_GATE_EXPS:             "blk.{bid}.ffn_gate_exps",  # merged experts
-    MODEL_TENSOR.FFN_DOWN_EXPS:             "blk.{bid}.ffn_down_exps",  # merged experts
-    MODEL_TENSOR.FFN_UP_EXPS:               "blk.{bid}.ffn_up_exps",    # merged experts
     MODEL_TENSOR.FFN_EXP_PROBS_B:           "blk.{bid}.exp_probs_b",
     MODEL_TENSOR.LAYER_OUT_NORM:            "blk.{bid}.layer_output_norm",
     MODEL_TENSOR.PER_LAYER_TOKEN_EMBD:      "per_layer_token_embd",           # gemma3n
