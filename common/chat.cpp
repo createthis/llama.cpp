@@ -699,7 +699,10 @@ static void parse_json_tool_calls(
     auto parse_tool_calls = [&]() {
         size_t from = std::string::npos;
         auto first = true;
+        LOG_ERR("%s: input = %s\n", __func__, builder.input().c_str());
+        
         while (true) {
+            LOG_ERR("%s: while first = %d, from = %lu, pos=%lu\n", __func__, first, from, builder.pos());
             auto res = function_regex_start_only && first
                 ? builder.try_consume_regex(*function_regex_start_only)
                 : function_regex
@@ -707,53 +710,70 @@ static void parse_json_tool_calls(
                     : std::nullopt;
 
             if (res) {
+                LOG_ERR("%s: function_regex matched, pos=%lu\n", __func__, builder.pos());
                 std::string name;
                 if (get_function_name) {
                     name = get_function_name(*res);
+                    LOG_ERR("%s: get_function_name name=%s\n", __func__, name.c_str());
                 } else {
                     GGML_ASSERT(res->groups.size() == 2);
                     name = builder.str(res->groups[1]);
+                    LOG_ERR("%s: group 1 name=%s\n", __func__, name.c_str());
                 }
                 first = false;
                 if (name.empty()) {
                     // get_function_name signalled us that we should skip this match and treat it as content.
                     from = res->groups[0].begin + 1;
+                    LOG_ERR("%s: name empty, continue\n", __func__);
                     continue;
                 }
                 if (update_cursor) {
                     builder.move_to(res->groups[0].end);
                     from = builder.pos();
+                    LOG_ERR("%s: update_cursor move_to=%lu,from=%lu\n", __func__, (unsigned long)res->groups[0].end,from);
                 } else {
                     from = std::string::npos;
+                    LOG_ERR("%s: from=npos\n", __func__);
                 }
 
                 auto maybe_raw_python = name == "python" && allow_raw_python;
                 if (builder.input()[builder.pos()] == '{' || !maybe_raw_python) {
+                    LOG_ERR("%s: detected '{' pos=%lu,from=%lu\n", __func__, builder.pos(),from);
                     if (auto arguments = builder.try_consume_json_with_dumped_args({{}})) {
+                        LOG_ERR("%s: arguments exist, pos=%lu\n", __func__, builder.pos());
                         if (!builder.add_tool_call(name, "", arguments->value) || arguments->is_partial) {
+                            LOG_ERR("%s: not add_tool_call or is_partial=%d throwing incomplete tool call\n", __func__, arguments->is_partial);
                             throw common_chat_msg_partial_exception("incomplete tool call");
                         }
                         builder.consume_regex(close_regex);
+                        LOG_ERR("%s: consumed close_regex, pos=%lu\n", __func__, builder.pos());
                         if (update_cursor) {
                             from = builder.pos(); // continue after this call
+                            LOG_ERR("%s: update_cursor from=%lu\n", __func__, builder.pos());
                             continue;
                         }
                     }
                     if (update_cursor) {
+                        LOG_ERR("%s: update_cursor throwing incomplete tool call\n", __func__);
                         throw common_chat_msg_partial_exception("incomplete tool call");
                     } else {
+                        LOG_ERR("%s: continue\n", __func__);
                         continue;
                     }
                 }
                 if (maybe_raw_python) {
                     auto arguments = wrap_code_as_arguments(builder, builder.consume_rest());
                     if (!builder.add_tool_call(name, "", arguments)) {
+                        LOG_ERR("%s: maybe_raw_python throwing incomplete tool call\n", __func__);
                         throw common_chat_msg_partial_exception("incomplete tool call");
                     }
+                    LOG_ERR("%s: maybe_raw_python return\n", __func__);
                     return;
                 }
+                LOG_ERR("%s: throwing incomplete tool call\n", __func__);
                 throw common_chat_msg_partial_exception("incomplete tool call");
             }
+            LOG_ERR("%s: break\n", __func__);
             break;
         }
         if (block_close) {
@@ -761,16 +781,21 @@ static void parse_json_tool_calls(
                 // ensure we’re right after the last call header/close
                 if (from != std::string::npos) builder.move_to(from);
             }
+            LOG_ERR("%s: attempting to consume block_close, pos=%lu\n", __func__, builder.pos());
             builder.consume_regex(*block_close);
         }
+        LOG_ERR("%s: consume_spaces, pos=%lu\n", __func__, builder.pos());
         builder.consume_spaces();
+        LOG_ERR("%s: add_content, pos=%lu\n", __func__, builder.pos());
         builder.add_content(builder.consume_rest());
     };
     if (block_open) {
         if (auto res = builder.try_find_regex(*block_open)) {
+            LOG_DBG("%s: block_open matched, pos=%lu\n", __func__, builder.pos());
             if (update_cursor) builder.move_to(res->groups[0].end); // consume opener
             parse_tool_calls();
         } else {
+            LOG_DBG("%s: block_open match failed, pos=%lu\n", __func__, builder.pos());
             builder.add_content(builder.consume_rest());
         }
     } else {
@@ -1509,6 +1534,7 @@ static void common_chat_parse_deepseek_v3_1_content(common_chat_msg_parser & bui
     }
 
     LOG_DBG("%s: parse_tool_calls\n", __func__);
+    LOG_DBG("%s: pos=%lu\n", __func__, builder.pos());
 
     parse_json_tool_calls(
         builder,
@@ -1516,20 +1542,19 @@ static void common_chat_parse_deepseek_v3_1_content(common_chat_msg_parser & bui
         /* function_regex_start_only= */ std::nullopt,
         function_regex,
         close_regex,
-        tool_calls_end,
-        false,
-        nullptr,
-        true);
+        tool_calls_end);
 }
 
 static void common_chat_parse_deepseek_v3_1(common_chat_msg_parser & builder) {
     // DeepSeek V3.1 outputs reasoning content between "<think>" and "</think>" tags, followed by regular content
     // First try to parse using the standard reasoning parsing method
-    LOG_DBG("%s: thinking_forced_open: %s\n", __func__, std::to_string(builder.syntax().thinking_forced_open).c_str());
+    LOG_DBG("%s: thinking_forced_open: %s, pos=%lu\n", __func__, std::to_string(builder.syntax().thinking_forced_open).c_str(), builder.pos());
 
     auto start_pos = builder.pos();
     auto found_end_think = builder.try_find_literal("</think>");
+    LOG_DBG("%s: pos=%lu, start_pos=%lu\n", __func__, builder.pos(), start_pos);
     builder.move_to(start_pos);
+    LOG_DBG("%s: pos=%lu\n", __func__, builder.pos());
 
     if (builder.syntax().thinking_forced_open && !builder.is_partial() && !found_end_think) {
         LOG_DBG("%s: no end_think, not partial, adding content\n", __func__);
@@ -1540,6 +1565,7 @@ static void common_chat_parse_deepseek_v3_1(common_chat_msg_parser & builder) {
         // </think><｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME\n```json\nJSON\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
         common_chat_parse_deepseek_v3_1_content(builder);
     } else {
+        LOG_DBG("%s: try_parse_reasoning failed, pos=%lu\n", __func__, builder.pos());
         if (builder.syntax().reasoning_format == COMMON_REASONING_FORMAT_NONE) {
           LOG_DBG("%s: reasoning_format none, adding content\n", __func__);
           common_chat_parse_deepseek_v3_1_content(builder);

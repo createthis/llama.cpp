@@ -52,7 +52,7 @@ static void assert_throws(const std::function<void()> & fn, const std::string & 
 }
 
 static void test_reasoning() {
-  //common_log_set_verbosity_thold(LOG_DEFAULT_DEBUG);
+  common_log_set_verbosity_thold(LOG_DEFAULT_DEBUG);
   {
     common_chat_msg_parser builder("<tnk>Cogito</tnk>Ergo sum", /* is_partial= */ false, {
         /* .format = */ COMMON_CHAT_FORMAT_CONTENT_ONLY,
@@ -225,7 +225,8 @@ static void test(const std::string & input, bool is_partial, const std::vector<s
 }
 
 static void test_deepseek_v3_1_tool_calls() {
-    //common_log_set_verbosity_thold(LOG_DEFAULT_DEBUG);
+    common_log_set_verbosity_thold(LOG_DEFAULT_DEBUG);
+    LOG_DBG("%s: ==================== start simple\n", __func__);
     // variant: happy path for when it works as the model card says it should
     const std::string variant("simple");
     common_chat_syntax syntax = {
@@ -243,6 +244,7 @@ static void test_deepseek_v3_1_tool_calls() {
     assert_equals(variant, std::string("{\"city\":\"Tokyo\"}"), msg.tool_calls[0].arguments);
     assert_equals(variant, std::string(""), msg.content);
     assert_equals(variant, std::string(""), msg.reasoning_content);
+    LOG_DBG("%s: ==================== end simple\n", __func__);
 
     // variant: simple + thinking open
     {

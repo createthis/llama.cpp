@@ -47,7 +47,7 @@ bool common_chat_msg_parser::add_tool_call(const std::string & name, const std::
     tool_call.arguments = arguments;
     tool_call.id = id;
 
-    // LOG_DBG("Tool call arguments:\n\traw: %s\n\tresult: %s\n", arguments.c_str(), tool_call.arguments.c_str());
+    LOG_DBG("Tool call arguments:\n\traw: %s\n\tresult: %s\n", arguments.c_str(), tool_call.arguments.c_str());
     result_.tool_calls.emplace_back(tool_call);
 
     return true;
@@ -181,12 +181,15 @@ std::string common_chat_msg_parser::consume_rest() {
 
 // Tries to find the regex, consumes it (pos right after it) and gives the prelude (right before it) and the groups to the callback.
 std::optional<common_chat_msg_parser::find_regex_result> common_chat_msg_parser::try_find_regex(const common_regex & regex, size_t from, bool add_prelude_to_content) {
+    LOG_ERR("%s: search, input_=%s, from=%lu, pos_=%lu\n", __func__, input_.c_str(), from, pos_);
     auto m = regex.search(input_, from == std::string::npos ? pos_ : from);
+    LOG_ERR("%s: after search, input_=%s, from=%lu, pos_=%lu\n", __func__, input_.c_str(), from, pos_);
     if (m.type == COMMON_REGEX_MATCH_TYPE_NONE) {
         return std::nullopt;
     }
     auto prelude = input_.substr(pos_, m.groups[0].begin - pos_);
     pos_ = m.groups[0].end;
+    LOG_ERR("%s: after setting pos_ to m.groups[0].end, pos_=%lu\n", __func__, pos_);
 
     if (add_prelude_to_content) {
         add_content(prelude);
@@ -208,7 +211,9 @@ common_chat_msg_parser::find_regex_result common_chat_msg_parser::consume_regex(
 }
 
 std::optional<common_chat_msg_parser::find_regex_result> common_chat_msg_parser::try_consume_regex(const common_regex & regex) {
+    LOG_ERR("%s: search, input_=%s, pos_=%lu\n", __func__, input_.c_str(), pos_);
     auto m = regex.search(input_, pos_);
+    LOG_ERR("%s: after search, pos_=%lu\n", __func__, pos_);
     if (m.type == COMMON_REGEX_MATCH_TYPE_NONE) {
         return std::nullopt;
     }
