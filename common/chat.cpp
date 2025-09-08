@@ -703,12 +703,14 @@ static void parse_json_tool_calls(
         
         while (true) {
             LOG_ERR("%s: while first = %d, from = %lu, pos=%lu\n", __func__, first, from, builder.pos());
+            auto start_pos = builder.pos();
             auto res = function_regex_start_only && first
                 ? builder.try_consume_regex(*function_regex_start_only)
                 : function_regex
                     ? builder.try_find_regex(*function_regex, from)
                     : std::nullopt;
 
+            LOG_ERR("%s: after function_regex, pos=%lu\n", __func__, builder.pos());
             if (res) {
                 LOG_ERR("%s: function_regex matched, pos=%lu\n", __func__, builder.pos());
                 std::string name;
