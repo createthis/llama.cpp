@@ -47,7 +47,7 @@ bool common_chat_msg_parser::add_tool_call(const std::string & name, const std::
     tool_call.arguments = arguments;
     tool_call.id = id;
 
-    LOG_DBG("Tool call arguments:\n\traw: %s\n\tresult: %s\n", arguments.c_str(), tool_call.arguments.c_str());
+    // LOG_DBG("Tool call arguments:\n\traw: %s\n\tresult: %s\n", arguments.c_str(), tool_call.arguments.c_str());
     result_.tool_calls.emplace_back(tool_call);
 
     return true;
