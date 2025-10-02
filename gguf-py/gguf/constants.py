@@ -461,10 +461,10 @@ class MODEL_TENSOR(IntEnum):
     FFN_EXP_PROBS_B      = auto()
     ATTN_Q_NORM          = auto()
     ATTN_K_NORM          = auto()
-    ATTN_INDEXER_K_NORM  = auto() # deepseek3-2
-    ATTN_INDEXER_WEIGHTS_PROJ  = auto() # deepseek3-2
-    ATTN_INDEXER_WK      = auto() # deepseek3-2
-    ATTN_INDEXER_WQ_B    = auto() # deepseek3-2
+    ATTN_INDEXER_K_NORM  = auto() # deepseek3_2
+    ATTN_INDEXER_WEIGHTS_PROJ  = auto() # deepseek3_2
+    ATTN_INDEXER_WK      = auto() # deepseek3_2
+    ATTN_INDEXER_WQ_B    = auto() # deepseek3_2
     LAYER_OUT_NORM       = auto()
     PER_LAYER_TOKEN_EMBD = auto() # gemma3n
     PER_LAYER_MODEL_PROJ = auto() # gemma3n
