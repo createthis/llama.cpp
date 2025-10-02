@@ -462,6 +462,7 @@ class MODEL_TENSOR(IntEnum):
     ATTN_Q_NORM          = auto()
     ATTN_K_NORM          = auto()
     ATTN_INDEXER_K_NORM  = auto()
+    ATTN_INDEXER_WEIGHTS_PROJ  = auto()
     LAYER_OUT_NORM       = auto()
     PER_LAYER_TOKEN_EMBD = auto() # gemma3n
     PER_LAYER_MODEL_PROJ = auto() # gemma3n
@@ -783,6 +784,7 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.ATTN_Q_NORM:               "blk.{bid}.attn_q_norm",
     MODEL_TENSOR.ATTN_K_NORM:               "blk.{bid}.attn_k_norm",
     MODEL_TENSOR.ATTN_INDEXER_K_NORM:       "blk.{bid}.attn_indexer_k_norm",
+    MODEL_TENSOR.ATTN_INDEXER_WEIGHTS_PROJ: "blk.{bid}.attn_indexer_weights_proj",
     MODEL_TENSOR.ATTN_OUT_NORM:             "blk.{bid}.attn_output_norm",
     MODEL_TENSOR.ATTN_POST_NORM:            "blk.{bid}.post_attention_norm",
     MODEL_TENSOR.FFN_GATE_INP:              "blk.{bid}.ffn_gate_inp",
@@ -2753,6 +2755,7 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
 MODEL_TENSORS[MODEL_ARCH.DEEPSEEK3_2] = [
     *MODEL_TENSORS[MODEL_ARCH.DEEPSEEK2],
     MODEL_TENSOR.ATTN_INDEXER_K_NORM,
+    MODEL_TENSOR.ATTN_INDEXER_WEIGHTS_PROJ,
 ]
 
 # tensors that will not be serialized
