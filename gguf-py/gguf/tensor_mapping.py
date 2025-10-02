@@ -562,6 +562,10 @@ class TensorNameMap:
             "layers.{bid}.self_attn.k_norm",                                  # qwen3-embedding
         ),
 
+        MODEL_TENSOR.ATTN_INDEXER_K_NORM: (
+            "model.layers.{bid}.self_attn.indexer.k_norm",                    # deepseek3-2
+        ),
+
         MODEL_TENSOR.ROPE_FREQS: (
             "language_model.encoder.layers.{bid}.self_attention.rotary_emb.inv_freq",  # persimmon
         ),
