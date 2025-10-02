@@ -574,6 +574,10 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.indexer.wk",                        # deepseek3-2
         ),
 
+        MODEL_TENSOR.ATTN_INDEXER_WQ_B: (
+            "model.layers.{bid}.self_attn.indexer.wq_b",                      # deepseek3-2
+        ),
+
         MODEL_TENSOR.ROPE_FREQS: (
             "language_model.encoder.layers.{bid}.self_attention.rotary_emb.inv_freq",  # persimmon
         ),
