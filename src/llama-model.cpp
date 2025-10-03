@@ -1491,6 +1491,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 }
             } break;
         case LLM_ARCH_DEEPSEEK2:
+        case LLM_ARCH_DEEPSEEK3_2:
             {
                 bool is_lite = (hparams.n_layer == 27);
                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
@@ -4382,6 +4383,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     }
                 } break;
             case LLM_ARCH_DEEPSEEK2:
+            case LLM_ARCH_DEEPSEEK3_2:
                 {
                     const bool is_lite = (hparams.n_layer == 27);
 
@@ -6202,7 +6204,7 @@ void llama_model::print_info() const {
         LLAMA_LOG_INFO("%s: expert_weights_scale = %.1f\n",   __func__, hparams.expert_weights_scale);
     }
 
-    if (arch == LLM_ARCH_DEEPSEEK2) {
+    if (arch == LLM_ARCH_DEEPSEEK2 || arch == LLM_ARCH_DEEPSEEK3_2) {
         LLAMA_LOG_INFO("%s: n_layer_dense_lead   = %d\n",     __func__, hparams.n_layer_dense_lead);
         LLAMA_LOG_INFO("%s: n_lora_q             = %d\n",     __func__, hparams.n_lora_q);
         LLAMA_LOG_INFO("%s: n_lora_kv            = %d\n",     __func__, hparams.n_lora_kv);
@@ -19462,6 +19464,7 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
                 llm = std::make_unique<llm_build_deepseek>(*this, params);
             } break;
         case LLM_ARCH_DEEPSEEK2:
+        case LLM_ARCH_DEEPSEEK3_2:
             {
                 llm = std::make_unique<llm_build_deepseek2>(*this, params);
             } break;
@@ -19765,6 +19768,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_ARCTIC:
         case LLM_ARCH_DEEPSEEK:
         case LLM_ARCH_DEEPSEEK2:
+        case LLM_ARCH_DEEPSEEK3_2:
         case LLM_ARCH_PLM:
         case LLM_ARCH_CHATGLM:
         case LLM_ARCH_GLM4:
