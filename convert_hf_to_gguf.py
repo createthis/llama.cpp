@@ -6509,7 +6509,7 @@ class DeepseekModel(TextModel):
 @ModelBase.register(
     "DeepseekV32ForCausalLM",
 )
-class DeepseekV2Model(TextModel):
+class DeepseekV3_2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.DEEPSEEK3_2
 
     def set_vocab(self):
