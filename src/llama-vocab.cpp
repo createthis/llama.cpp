@@ -307,6 +307,7 @@ struct llm_tokenizer_bpe : llm_tokenizer {
                 };
                 break;
             case LLAMA_VOCAB_PRE_TYPE_DEEPSEEK3_LLM:
+            case LLAMA_VOCAB_PRE_TYPE_DEEPSEEK3_2_LLM:
             case LLAMA_VOCAB_PRE_TYPE_HUNYUAN_DENSE:
                 regex_exprs = {
                     "\\p{N}{1,3}",
@@ -1845,6 +1846,10 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
             } else if (
                     tokenizer_pre == "deepseek-v3") {
                 pre_type = LLAMA_VOCAB_PRE_TYPE_DEEPSEEK3_LLM;
+                clean_spaces = false;
+            } else if (
+                    tokenizer_pre == "deepseek-v3.2") {
+                pre_type = LLAMA_VOCAB_PRE_TYPE_DEEPSEEK3_2_LLM;
                 clean_spaces = false;
             } else if (
                     tokenizer_pre == "falcon") {
