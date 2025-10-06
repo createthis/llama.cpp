@@ -1491,6 +1491,23 @@ class TensorNameMap:
         MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM: (
             "model.layers.{bid}.shared_head.norm",
         ),
+
+        # DeepSeek V3.2 sparse attention indexer tensors
+        MODEL_TENSOR.ATTN_INDEXER_K_NORM: (
+            "model.layers.{bid}.self_attn.indexer.k_norm",                    # deepseek3_2
+        ),
+
+        MODEL_TENSOR.ATTN_INDEXER_WEIGHTS_PROJ: (
+            "model.layers.{bid}.self_attn.indexer.weights_proj",              # deepseek3_2
+        ),
+
+        MODEL_TENSOR.ATTN_INDEXER_WK: (
+            "model.layers.{bid}.self_attn.indexer.wk",                        # deepseek3_2
+        ),
+
+        MODEL_TENSOR.ATTN_INDEXER_WQ_B: (
+            "model.layers.{bid}.self_attn.indexer.wq_b",                      # deepseek3_2
+        ),
     }
 
     # architecture-specific block mappings
