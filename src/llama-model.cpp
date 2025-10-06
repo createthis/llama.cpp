@@ -4552,6 +4552,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         const int64_t index_head_dim = 128; // From VLLM: config.index_head_dim
                         const int64_t index_n_heads = 64;   // From VLLM: config.index_n_heads
                         layer.attn_indexer_k_norm       = create_tensor(tn(LLM_TENSOR_ATTN_INDEXER_K_NORM, "weight", i), {index_head_dim}, 0);
+                        layer.attn_indexer_k_norm_bias  = create_tensor(tn(LLM_TENSOR_ATTN_INDEXER_K_NORM, "bias", i), {index_head_dim}, TENSOR_NOT_REQUIRED);
                         layer.attn_indexer_weights_proj = create_tensor(tn(LLM_TENSOR_ATTN_INDEXER_WEIGHTS_PROJ, "weight", i), {n_embd, index_n_heads}, 0);
                         layer.attn_indexer_wk           = create_tensor(tn(LLM_TENSOR_ATTN_INDEXER_WK, "weight", i), {n_embd, index_head_dim}, 0);
                         layer.attn_indexer_wq_b         = create_tensor(tn(LLM_TENSOR_ATTN_INDEXER_WQ_B, "weight", i), {q_lora_rank, index_n_heads * index_head_dim}, 0);

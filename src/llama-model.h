@@ -382,6 +382,7 @@ struct llama_layer {
 
     // deepseek3_2 sparse attention
     struct ggml_tensor * attn_indexer_k_norm       = nullptr;
+    struct ggml_tensor * attn_indexer_k_norm_bias  = nullptr;
     struct ggml_tensor * attn_indexer_weights_proj = nullptr;
     struct ggml_tensor * attn_indexer_wk           = nullptr;
     struct ggml_tensor * attn_indexer_wq_b         = nullptr;
