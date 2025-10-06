@@ -278,6 +278,11 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
             {
                 op_tensor = ggml_scale(ctx, w, 1.0f);
             } break;
+        case GGML_OP_NORM:
+            {
+                ggml_tensor * a = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, w->ne[0], w->ne[1], w->ne[2], w->ne[3]);
+                op_tensor = ggml_norm(ctx, a, 1e-5f);
+            } break;
         default:
             GGML_ABORT("%s: missing test for op %s for tensor %s", __func__, ggml_op_name(op), w->name);
     }
@@ -13875,6 +13880,56 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     cur = build_attn(inp_attn,
                             model.layers[il].wo, NULL,
                             Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+                }
+
+                // Sparse attention indexer for DeepSeek V3.2
+                if (model.layers[il].attn_indexer_k_norm != nullptr) {
+                    // Indexer query projection (wq_b)
+                    ggml_tensor * qr = NULL;
+                    if (!is_lite) {
+                        qr = ggml_mul_mat(ctx0, model.layers[il].wq_a, cur);
+                        cb(qr, "indexer_qr", il);
+
+                        qr = build_norm(qr,
+                                model.layers[il].attn_q_a_norm, nullptr,
+                                LLM_NORM_RMS, il);
+                        cb(qr, "indexer_qr_norm", il);
+                    } else {
+                        qr = cur; // For lite version, use the current hidden state directly
+                    }
+
+                    // Indexer key projection (wk)
+                    ggml_tensor * k_indexer = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_wk, cur);
+                    cb(k_indexer, "indexer_k", il);
+
+                    // Indexer key normalization (k_norm)
+                    k_indexer = ggml_norm(ctx0, k_indexer, 1e-5f);
+                    if (model.layers[il].attn_indexer_k_norm_bias != nullptr) {
+                        k_indexer = ggml_add(ctx0, k_indexer, model.layers[il].attn_indexer_k_norm_bias);
+                    }
+                    cb(k_indexer, "indexer_k_norm", il);
+
+                    // Indexer weights projection
+                    ggml_tensor * weights = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_weights_proj, cur);
+                    cb(weights, "indexer_weights", il);
+
+                    // Indexer query projection (wq_b)
+                    ggml_tensor * q_indexer = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_wq_b, qr);
+                    cb(q_indexer, "indexer_q", il);
+
+                    // Reshape q_indexer to [n_tokens, index_n_heads, index_head_dim]
+                    const int64_t index_n_heads = 64;   // From VLLM: config.index_n_heads
+                    const int64_t index_head_dim = 128; // From VLLM: config.index_head_dim
+                    q_indexer = ggml_reshape_3d(ctx0, q_indexer, index_head_dim, index_n_heads, n_tokens);
+                    cb(q_indexer, "indexer_q_reshape", il);
+
+                    // TODO: Implement sparse attention computation using the indexer tensors
+                    // This would involve:
+                    // 1. Computing sparse attention scores using q_indexer, k_indexer, and weights
+                    // 2. Applying softmax to the weights
+                    // 3. Combining with the regular attention output
+                    // For now, we'll just pass through the regular attention output
+                    LLAMA_LOG_INFO("Sparse attention indexer implemented for layer %d, but sparse computation not yet integrated", il);
                 }
             }
 
