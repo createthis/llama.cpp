@@ -13929,7 +13929,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     // 2. Applying softmax to the weights
                     // 3. Combining with the regular attention output
                     // For now, we'll just pass through the regular attention output
-                    LLAMA_LOG_INFO("Sparse attention indexer implemented for layer %d, but sparse computation not yet integrated", il);
+                    //LLAMA_LOG_INFO("Sparse attention indexer implemented for layer %d, but sparse computation not yet integrated", il);
                 }
             }
 
