@@ -13884,12 +13884,15 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
 
                 // Sparse attention indexer for DeepSeek V3.2
                 if (model.layers[il].attn_indexer_k_norm != nullptr) {
-                    // Indexer query projection (wq_b)
+                    // Indexer query projection (wq_a)
                     ggml_tensor * qr = NULL;
                     if (!is_lite) {
+                        // vllm equivalent (maybe): https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/layers/mla.py#L137
+                        // FIXME: Low degree of confidence on this by human auditor. Is this correct?
                         qr = ggml_mul_mat(ctx0, model.layers[il].wq_a, cur);
                         cb(qr, "indexer_qr", il);
 
+                        // vllm equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/layers/mla.py#L142
                         qr = build_norm(qr,
                                 model.layers[il].attn_q_a_norm, nullptr,
                                 LLM_NORM_RMS, il);
@@ -13899,6 +13902,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     }
 
                     // Indexer key projection (wk)
+                    // vllm equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L848
                     ggml_tensor * k_indexer = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_wk, cur);
                     cb(k_indexer, "indexer_k", il);
 
@@ -13910,10 +13914,12 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     cb(k_indexer, "indexer_k_norm", il);
 
                     // Indexer weights projection
+                    // vllm equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L869
                     ggml_tensor * weights = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_weights_proj, cur);
                     cb(weights, "indexer_weights", il);
 
                     // Indexer query projection (wq_b)
+                    // vllm equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L842
                     ggml_tensor * q_indexer = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_wq_b, qr);
                     cb(q_indexer, "indexer_q", il);
 
