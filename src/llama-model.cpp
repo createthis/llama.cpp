@@ -13907,6 +13907,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     cb(k_indexer, "indexer_k", il);
 
                     // Indexer key normalization (k_norm)
+                    // vllm equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L849
                     k_indexer = ggml_norm(ctx0, k_indexer, 1e-5f);
                     if (model.layers[il].attn_indexer_k_norm_bias != nullptr) {
                         k_indexer = ggml_add(ctx0, k_indexer, model.layers[il].attn_indexer_k_norm_bias);
