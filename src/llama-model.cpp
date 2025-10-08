@@ -13935,24 +13935,30 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     
                     // 1. Compute token importance scores using the indexer
                     // The weights projection gives us importance scores per token and head
+                    // vllm equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L871
                     weights = ggml_reshape_3d(ctx0, weights, 1, index_n_heads, n_tokens);
                     cb(weights, "indexer_weights_reshaped", il);
                     
                     // Sum across heads to get overall token importance [n_tokens]
+                    // VLLM Equivalent: This operation is handled internally by the sparse_attn_indexer operation in VLLM.
+                    // The equivalent logic is in the custom CUDA kernel that processes the weights to determine token importance.
                     ggml_tensor * token_importance = ggml_sum(ctx0, weights);
                     token_importance = ggml_reshape_1d(ctx0, token_importance, n_tokens);
                     cb(token_importance, "token_importance", il);
                     
                     // 2. Identify top-k important tokens for sparse attention
+                    // VLLM Equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L794
                     const int64_t top_k = (64 < n_tokens) ? 64 : n_tokens;  // Configurable, but don't exceed n_tokens
                     
                     // Get indices of top-k important tokens
+                    // VLLM Equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L822
                     ggml_tensor * topk_indices = ggml_top_k(ctx0, token_importance, top_k);
                     cb(topk_indices, "topk_indices", il);
                     
                     // 3. Create a sparse attention mask
                     // This would be used to modify the regular attention mechanism
                     // For now, we'll just demonstrate the concept
+                    // VLLM Equivalent: https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/mla/flashmla_sparse.py
                     ggml_tensor * sparse_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_tokens, n_tokens);
                     sparse_mask = ggml_set_zero(sparse_mask);
                     cb(sparse_mask, "sparse_mask_placeholder", il);
@@ -13963,8 +13969,8 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     GGML_UNUSED(topk_indices);
                     
                     // 5. Log debug information
-                    LLAMA_LOG_INFO("Sparse attention indexer computation completed for layer %d. Top-k: %d tokens", 
-                                  il, (int)top_k);
+                    //LLAMA_LOG_INFO("Sparse attention indexer computation completed for layer %d. Top-k: %d tokens", 
+                    //              il, (int)top_k);
                     
                     // Note: This is a conceptual implementation. A full sparse attention system would:
                     // - Modify the build_attn function to use sparse patterns
