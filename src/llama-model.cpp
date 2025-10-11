@@ -13942,7 +13942,10 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     // Sum across heads to get overall token importance [n_tokens]
                     // VLLM Equivalent: This operation is handled internally by the sparse_attn_indexer operation in VLLM.
                     // The equivalent logic is in the custom CUDA kernel that processes the weights to determine token importance.
-                    ggml_tensor * token_importance = ggml_sum(ctx0, weights);
+                    
+                    // Reshape weights to [index_n_heads, n_tokens] and sum across heads
+                    ggml_tensor * weights_2d = ggml_reshape_2d(ctx0, weights, index_n_heads, n_tokens);
+                    ggml_tensor * token_importance = ggml_sum_rows(ctx0, weights_2d); // Sum along rows (heads dimension)
                     token_importance = ggml_reshape_1d(ctx0, token_importance, n_tokens);
                     cb(token_importance, "token_importance", il);
                     
