@@ -13963,7 +13963,6 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     // For now, we'll just demonstrate the concept
                     // VLLM Equivalent: https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/mla/flashmla_sparse.py
                     ggml_tensor * sparse_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_tokens, n_tokens);
-                    sparse_mask = ggml_set_zero(sparse_mask);
                     cb(sparse_mask, "sparse_mask_placeholder", il);
                     
                     // 4. Store the sparse attention information for potential use
