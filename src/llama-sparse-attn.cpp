@@ -90,30 +90,41 @@ ggml_tensor * sparse_attn_indexer::select_topk_tokens(
     return topk_indices;
 }
 
-ggml_tensor * sparse_attn_indexer::create_sparse_mask(
+ggml_tensor * sparse_attn_indexer::apply_sparse_attention(
     ggml_context * ctx,
+    ggml_tensor * q_cur,
+    ggml_tensor * k_cur,
+    ggml_tensor * v_cur,
     ggml_tensor * topk_indices,
     int64_t n_tokens,
     int64_t top_k,
     const std::function<void(ggml_tensor *, const char *, int)> & cb) {
     
-    // Create a sparse attention mask that only allows attention to top-k tokens
-    ggml_tensor * sparse_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_tokens, n_tokens);
+    // Select only the top-k key-value pairs for sparse attention
+    ggml_tensor * k_sparse = ggml_get_rows(ctx, k_cur, topk_indices);
+    ggml_tensor * v_sparse = ggml_get_rows(ctx, v_cur, topk_indices);
     
-    // Initialize mask with -inf (no attention allowed)
-    // Note: In a real implementation, we would need to properly initialize the mask values
-    // For now, we create the tensor but the actual initialization would need to be done differently
+    cb(k_sparse, "k_sparse", -1);
+    cb(v_sparse, "v_sparse", -1);
     
-    // For each query position, allow attention to the top-k key positions
-    // This is a simplified approach - a real implementation would be more sophisticated
+    // Compute attention scores with sparse keys
+    ggml_tensor * attn_scores = ggml_mul_mat(ctx, q_cur, k_sparse);
+    cb(attn_scores, "attn_scores_sparse", -1);
     
-    // Create a mask that allows each query to attend to its top-k selected keys
-    // Note: This is a conceptual implementation - actual implementation would be more complex
-    // In a real implementation, we would need to properly set the mask values
+    // Apply attention scaling
+    const float kq_scale = 1.0f / sqrtf((float)q_cur->ne[0]); // Use same scaling as dense attention
+    attn_scores = ggml_scale(ctx, attn_scores, kq_scale);
+    cb(attn_scores, "attn_scores_scaled", -1);
     
-    cb(sparse_mask, "sparse_mask", -1);
+    // Apply softmax to sparse attention scores
+    ggml_tensor * attn_weights = ggml_soft_max(ctx, attn_scores);
+    cb(attn_weights, "attn_weights_sparse", -1);
     
-    return sparse_mask;
+    // Compute output using sparse attention
+    ggml_tensor * output = ggml_mul_mat(ctx, attn_weights, v_sparse);
+    cb(output, "sparse_attn_out", -1);
+    
+    return output;
 }
 
 } // namespace llama

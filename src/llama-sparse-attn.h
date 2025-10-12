@@ -27,9 +27,12 @@ struct sparse_attn_indexer {
         int64_t n_tokens,
         const std::function<void(ggml_tensor *, const char *, int)> & cb);
 
-    // Create sparse attention mask based on top-k indices
-    static ggml_tensor * create_sparse_mask(
+    // Apply sparse attention using top-k indices
+    static ggml_tensor * apply_sparse_attention(
         ggml_context * ctx,
+        ggml_tensor * q_cur,
+        ggml_tensor * k_cur,
+        ggml_tensor * v_cur,
         ggml_tensor * topk_indices,
         int64_t n_tokens,
         int64_t top_k,

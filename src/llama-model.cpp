@@ -13891,32 +13891,36 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                 // Sparse attention indexer for DeepSeek V3.2
                 if (model.layers[il].attn_indexer_k_norm != nullptr) {
                     // Use the new sparse attention implementation for indexer computation
+                    auto cb_wrapper = [this](ggml_tensor * cur, const char * name, int il) {
+                        this->cb(cur, name, il);
+                    };
+                    
                     ggml_tensor * token_importance = llama::sparse_attn_indexer::compute_token_importance(
-                        ctx0, model, il, cur, is_lite, cb);
+                        ctx0, model, il, cur, is_lite, cb_wrapper);
                     
                     const int64_t top_k = (64 < n_tokens) ? 64 : n_tokens;  // Use top-64 tokens for sparse attention
                     
                     ggml_tensor * topk_indices = llama::sparse_attn_indexer::select_topk_tokens(
-                        ctx0, token_importance, n_tokens, cb);
-                    
-                    ggml_tensor * sparse_mask = llama::sparse_attn_indexer::create_sparse_mask(
-                        ctx0, topk_indices, n_tokens, top_k, cb);
+                        ctx0, token_importance, n_tokens, cb_wrapper);
                     
                     // Check if we should use sparse attention (only when we have valid indices)
                     bool use_sparse_attention = (top_k > 0) && (top_k < n_tokens);
                     
                     if (use_sparse_attention) {
-                        // Use sparse attention with the custom mask
+                        // Use sparse attention with top-k tokens
+                        cur = llama::sparse_attn_indexer::apply_sparse_attention(
+                            ctx0, Qcur, Kcur, Vcur, topk_indices, n_tokens, top_k, cb_wrapper);
+                        
+                        // Apply output projection for sparse attention
                         if (is_mla) {
                             // MLA with absorption optimization
-                            cur = build_attn(inp_attn,
-                                    model.layers[il].wo, NULL,
-                                    Qcur, Kcur, Vcur, nullptr, sparse_mask, model.layers[il].wv_b, kq_scale, il);
+                            cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur);
+                            if (model.layers[il].wv_b != nullptr) {
+                                cur = ggml_add(ctx0, cur, model.layers[il].wv_b);
+                            }
                         } else {
                             // Regular MHA
-                            cur = build_attn(inp_attn,
-                                    model.layers[il].wo, NULL,
-                                    Qcur, Kcur, Vcur, nullptr, sparse_mask, nullptr, kq_scale, il);
+                            cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur);
                         }
                         cb(cur, "sparse_attn_out", il);
                         
