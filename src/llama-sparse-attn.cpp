@@ -6,13 +6,15 @@
 
 namespace llama {
 
+using std::function;
+
 ggml_tensor * sparse_attn_indexer::compute_token_importance(
     ggml_context * ctx,
     const llama_model & model,
     int layer_idx,
     ggml_tensor * cur,
     bool is_lite,
-    const std::function<void(ggml_tensor *, const char *, int)> & cb) {
+    const function<void(ggml_tensor *, const char *, int)> & cb) {
     
     // Indexer query projection (wq_a)
     ggml_tensor * qr = nullptr;
@@ -76,7 +78,7 @@ ggml_tensor * sparse_attn_indexer::select_topk_tokens(
     ggml_context * ctx,
     ggml_tensor * token_importance,
     int64_t n_tokens,
-    const std::function<void(ggml_tensor *, const char *, int)> & cb) {
+    const function<void(ggml_tensor *, const char *, int)> & cb) {
     
     // Identify top-k important tokens for sparse attention
     // VLLM Equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L794
@@ -98,7 +100,7 @@ ggml_tensor * sparse_attn_indexer::apply_sparse_attention(
     ggml_tensor * topk_indices,
     int64_t n_tokens,
     int64_t top_k,
-    const std::function<void(ggml_tensor *, const char *, int)> & cb) {
+    const function<void(ggml_tensor *, const char *, int)> & cb) {
     
     // Select only the top-k key-value pairs for sparse attention
     ggml_tensor * k_sparse = ggml_get_rows(ctx, k_cur, topk_indices);
