@@ -10,6 +10,7 @@
 #include "llama-kv-cache-iswa.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
+#include "llama-sparse-attn.h"
 
 #include "ggml-cpp.h"
 
@@ -13889,108 +13890,17 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
 
                 // Sparse attention indexer for DeepSeek V3.2
                 if (model.layers[il].attn_indexer_k_norm != nullptr) {
-                    // Indexer query projection (wq_a)
-                    ggml_tensor * qr = NULL;
-                    if (!is_lite) {
-                        // vllm equivalent (maybe): https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/layers/mla.py#L137
-                        // FIXME: Low degree of confidence on this by human auditor. Is this correct?
-                        qr = ggml_mul_mat(ctx0, model.layers[il].wq_a, cur);
-                        cb(qr, "indexer_qr", il);
-
-                        // vllm equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/layers/mla.py#L142
-                        qr = build_norm(qr,
-                                model.layers[il].attn_q_a_norm, nullptr,
-                                LLM_NORM_RMS, il);
-                        cb(qr, "indexer_qr_norm", il);
-                    } else {
-                        qr = cur; // For lite version, use the current hidden state directly
-                    }
-
-                    // Indexer key projection (wk)
-                    // vllm equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L848
-                    ggml_tensor * k_indexer = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_wk, cur);
-                    cb(k_indexer, "indexer_k", il);
-
-                    // Indexer key normalization (k_norm)
-                    // vllm equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L849
-                    k_indexer = ggml_norm(ctx0, k_indexer, 1e-5f);
-                    if (model.layers[il].attn_indexer_k_norm_bias != nullptr) {
-                        k_indexer = ggml_add(ctx0, k_indexer, model.layers[il].attn_indexer_k_norm_bias);
-                    }
-                    cb(k_indexer, "indexer_k_norm", il);
-
-                    // Indexer weights projection
-                    // vllm equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L869
-                    ggml_tensor * weights = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_weights_proj, cur);
-                    cb(weights, "indexer_weights", il);
-
-                    // Indexer query projection (wq_b)
-                    // vllm equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L842
-                    ggml_tensor * q_indexer = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_wq_b, qr);
-                    cb(q_indexer, "indexer_q", il);
-
-                    // Reshape q_indexer to [n_tokens, index_n_heads, index_head_dim]
-                    const int64_t index_n_heads = 64;   // From VLLM: config.index_n_heads
-                    const int64_t index_head_dim = 128; // From VLLM: config.index_head_dim
-                    q_indexer = ggml_reshape_3d(ctx0, q_indexer, index_head_dim, index_n_heads, n_tokens);
-                    cb(q_indexer, "indexer_q_reshape", il);
-
-                    // Sparse attention implementation for DeepSeek V3.2
-                    // Based on the tilelang implementation and PDF description
+                    // Use the new sparse attention implementation for indexer computation
+                    ggml_tensor * token_importance = llama::sparse_attn_indexer::compute_token_importance(
+                        ctx0, model, il, cur, is_lite, cb);
                     
-                    // 1. Compute token importance scores using the indexer
-                    // The weights projection gives us importance scores per token and head
-                    // vllm equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L871
-                    weights = ggml_reshape_3d(ctx0, weights, 1, index_n_heads, n_tokens);
-                    cb(weights, "indexer_weights_reshaped", il);
-                    
-                    // Reshape weights to [index_n_heads, n_tokens] and sum across heads
-                    ggml_tensor * weights_2d = ggml_reshape_2d(ctx0, weights, index_n_heads, n_tokens);
-                    ggml_tensor * token_importance = ggml_sum_rows(ctx0, weights_2d); // Sum along rows (heads dimension)
-                    token_importance = ggml_reshape_1d(ctx0, token_importance, n_tokens);
-                    cb(token_importance, "token_importance", il);
-                    
-                    // 2. Identify top-k important tokens for sparse attention
-                    // VLLM Equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L794
                     const int64_t top_k = (64 < n_tokens) ? 64 : n_tokens;  // Use top-64 tokens for sparse attention
                     
-                    // Get indices of top-k important tokens
-                    // VLLM Equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L822
-                    ggml_tensor * topk_indices = ggml_top_k(ctx0, token_importance, top_k);
-                    cb(topk_indices, "topk_indices", il);
+                    ggml_tensor * topk_indices = llama::sparse_attn_indexer::select_topk_tokens(
+                        ctx0, token_importance, n_tokens, cb);
                     
-                    // 3. Implement sparse attention by selecting only top-k KV entries
-                    // Based on tilelang sparse_mla_fwd.py implementation
-                    
-                    // Create a sparse attention mask that only allows attention to top-k tokens
-                    ggml_tensor * sparse_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_tokens, n_tokens);
-                    
-                    // Initialize mask with -inf (no attention allowed)
-                    sparse_mask = ggml_set_f32(sparse_mask, -INFINITY);
-                    
-                    // For each query position, allow attention to the top-k key positions
-                    // This is a simplified approach - a real implementation would be more sophisticated
-                    
-                    // Create a mask that allows each query to attend to its top-k selected keys
-                    for (int64_t query_pos = 0; query_pos < n_tokens; ++query_pos) {
-                        for (int64_t k = 0; k < top_k; ++k) {
-                            // Get the k-th top index for this query position
-                            ggml_tensor * idx_val = ggml_get_rows(ctx0, topk_indices, 
-                                ggml_new_i32(ctx0, query_pos * top_k + k));
-                            
-                            // Convert to integer index
-                            ggml_tensor * key_pos = ggml_cast(ctx0, idx_val, GGML_TYPE_I32);
-                            
-                            // Set the mask value to 0 (allowed attention) at [query_pos, key_pos]
-                            // Note: This is a conceptual implementation - actual implementation would be more complex
-                            GGML_UNUSED(key_pos); // Placeholder for actual implementation
-                        }
-                    }
-                    
-                    cb(sparse_mask, "sparse_mask", il);
-                    
-                    // 4. Use sparse attention with the custom mask
-                    // We need to modify the attention computation to use our sparse mask
+                    ggml_tensor * sparse_mask = llama::sparse_attn_indexer::create_sparse_mask(
+                        ctx0, topk_indices, n_tokens, top_k, cb);
                     
                     // Check if we should use sparse attention (only when we have valid indices)
                     bool use_sparse_attention = (top_k > 0) && (top_k < n_tokens);
@@ -14034,7 +13944,6 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             LLAMA_LOG_INFO("DeepSeek V3.2: Using dense attention (fallback) for layer %d", il);
                         }
                     }
-                    
                 }
             }
 
