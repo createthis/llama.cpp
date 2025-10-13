@@ -85,12 +85,13 @@ ggml_tensor * sparse_attn_indexer::select_topk_tokens(
     
     // Identify top-k important tokens for sparse attention
     // VLLM Equivalent: https://github.com/vllm-project/vllm/blob/067da2d1df141363f0ad65939049709b2dbd5080/vllm/model_executor/models/deepseek_v2.py#L794
-    const int64_t top_k = (64 < n_tokens) ? 64 : n_tokens;  // Use top-64 tokens for sparse attention
+    const int64_t actual_n_tokens = ggml_nelements(token_importance); // Extract actual number of tokens from tensor
+    const int64_t top_k = (64 < actual_n_tokens) ? 64 : actual_n_tokens;  // Use top-64 tokens for sparse attention
     
     // Ensure token_importance has the correct dimensions for ggml_top_k
-    // It should be a 2D tensor with dimensions [n_tokens, 1]
-    if (token_importance->ne[0] != n_tokens || token_importance->ne[1] != 1) {
-        token_importance = ggml_reshape_2d(ctx, token_importance, n_tokens, 1);
+    // It should be a 2D tensor with dimensions [actual_n_tokens, 1]
+    if (token_importance->ne[0] != actual_n_tokens || token_importance->ne[1] != 1) {
+        token_importance = ggml_reshape_2d(ctx, token_importance, actual_n_tokens, 1);
         cb(token_importance, "token_importance_reshaped", -1);
     }
     
@@ -124,17 +125,18 @@ ggml_tensor * sparse_attn_indexer::apply_sparse_attention(
     // Extract dimensions from the tensors
     const int64_t n_embd_head = k_cur->ne[0];
     const int64_t n_head_kv = k_cur->ne[1];
+    const int64_t actual_n_tokens = k_cur->ne[2]; // Extract actual n_tokens from tensor
     
     // We need to select specific tokens (along the n_tokens dimension)
-    // k_cur has dimensions [n_embd_head, n_head_kv, n_tokens]
-    // We want to reshape it to [n_embd_head, n_head_kv * n_tokens] to use ggml_get_rows
+    // k_cur has dimensions [n_embd_head, n_head_kv, actual_n_tokens]
+    // We want to reshape it to [n_embd_head, n_head_kv * actual_n_tokens] to use ggml_get_rows
     
-    // First, reshape k_cur to [n_embd_head, n_head_kv * n_tokens] to treat tokens as "rows"
-    ggml_tensor * k_cur_2d = ggml_reshape_2d(ctx, k_cur, n_embd_head, n_head_kv * n_tokens);
+    // First, reshape k_cur to [n_embd_head, n_head_kv * actual_n_tokens] to treat tokens as "rows"
+    ggml_tensor * k_cur_2d = ggml_reshape_2d(ctx, k_cur, n_embd_head, n_head_kv * actual_n_tokens);
     cb(k_cur_2d, "k_cur_2d", -1);
     
     // Similarly for v_cur
-    ggml_tensor * v_cur_2d = ggml_reshape_2d(ctx, v_cur, n_embd_head, n_head_kv * n_tokens);
+    ggml_tensor * v_cur_2d = ggml_reshape_2d(ctx, v_cur, n_embd_head, n_head_kv * actual_n_tokens);
     cb(v_cur_2d, "v_cur_2d", -1);
     
     // Now we need to create indices that select the sparse tokens
@@ -144,14 +146,14 @@ ggml_tensor * sparse_attn_indexer::apply_sparse_attention(
     // Create indices that account for the head dimension: index = token_index * n_head_kv + head_offset
     // But since we want to select entire tokens (across all heads), we need a different approach
     
-    // Instead, let's use a simpler approach: reshape to [n_embd_head * n_head_kv, n_tokens] and transpose
-    ggml_tensor * k_cur_flat = ggml_reshape_2d(ctx, k_cur, n_embd_head * n_head_kv, n_tokens);
+    // Instead, let's use a simpler approach: reshape to [n_embd_head * n_head_kv, actual_n_tokens] and transpose
+    ggml_tensor * k_cur_flat = ggml_reshape_2d(ctx, k_cur, n_embd_head * n_head_kv, actual_n_tokens);
     cb(k_cur_flat, "k_cur_flat", -1);
     
-    ggml_tensor * v_cur_flat = ggml_reshape_2d(ctx, v_cur, n_embd_head * n_head_kv, n_tokens);
+    ggml_tensor * v_cur_flat = ggml_reshape_2d(ctx, v_cur, n_embd_head * n_head_kv, actual_n_tokens);
     cb(v_cur_flat, "v_cur_flat", -1);
     
-    // Transpose to [n_tokens, n_embd_head * n_head_kv] so tokens become rows
+    // Transpose to [actual_n_tokens, n_embd_head * n_head_kv] so tokens become rows
     ggml_tensor * k_cur_transposed = ggml_cont(ctx, ggml_transpose(ctx, k_cur_flat));
     cb(k_cur_transposed, "k_cur_transposed", -1);
     
@@ -183,10 +185,11 @@ ggml_tensor * sparse_attn_indexer::apply_sparse_attention(
     // Extract dimensions from q_cur
     const int64_t n_embd_head_q = q_cur->ne[0];
     const int64_t n_head_q = q_cur->ne[1];
+    const int64_t actual_n_tokens_q = q_cur->ne[2]; // Extract actual n_tokens from query tensor
     
-    // Reshape q_cur to [n_head_q * n_tokens, n_embd_head_q]
-    ggml_tensor * q_2d = ggml_reshape_2d(ctx, q_cur, n_embd_head_q, n_head_q * n_tokens);
-    q_2d = ggml_cont(ctx, ggml_transpose(ctx, q_2d)); // Transpose to [n_head_q * n_tokens, n_embd_head_q]
+    // Reshape q_cur to [n_head_q * actual_n_tokens_q, n_embd_head_q]
+    ggml_tensor * q_2d = ggml_reshape_2d(ctx, q_cur, n_embd_head_q, n_head_q * actual_n_tokens_q);
+    q_2d = ggml_cont(ctx, ggml_transpose(ctx, q_2d)); // Transpose to [n_head_q * actual_n_tokens_q, n_embd_head_q]
     cb(q_2d, "q_2d", -1);
     
     // Reshape k_sparse to [n_head_kv * top_k, n_embd_head]
@@ -194,7 +197,7 @@ ggml_tensor * sparse_attn_indexer::apply_sparse_attention(
     k_sparse_2d = ggml_cont(ctx, ggml_transpose(ctx, k_sparse_2d)); // Transpose to [n_head_kv * top_k, n_embd_head]
     cb(k_sparse_2d, "k_sparse_2d", -1);
     
-    // Compute Q @ K^T to get [n_head_q * n_tokens, n_head_kv * top_k]
+    // Compute Q @ K^T to get [n_head_q * actual_n_tokens_q, n_head_kv * top_k]
     ggml_tensor * attn_scores = ggml_mul_mat(ctx, q_2d, k_sparse_2d);
     cb(attn_scores, "attn_scores_sparse", -1);
     
@@ -212,16 +215,16 @@ ggml_tensor * sparse_attn_indexer::apply_sparse_attention(
     v_sparse_2d = ggml_cont(ctx, ggml_transpose(ctx, v_sparse_2d)); // Transpose to [n_head_kv * top_k, n_embd_head]
     cb(v_sparse_2d, "v_sparse_2d", -1);
     
-    // Compute attention weights @ V to get [n_head_q * n_tokens, n_embd_head]
+    // Compute attention weights @ V to get [n_head_q * actual_n_tokens_q, n_embd_head]
     ggml_tensor * output_2d = ggml_mul_mat(ctx, attn_weights, v_sparse_2d);
     cb(output_2d, "output_2d", -1);
     
-    // Transpose back to [n_embd_head, n_head_q * n_tokens]
+    // Transpose back to [n_embd_head, n_head_q * actual_n_tokens_q]
     ggml_tensor * output_transposed = ggml_cont(ctx, ggml_transpose(ctx, output_2d));
     cb(output_transposed, "output_transposed", -1);
     
-    // Reshape back to original dimensions [n_embd_head, n_head_q, n_tokens]
-    ggml_tensor * output = ggml_reshape_3d(ctx, output_transposed, n_embd_head_q, n_head_q, n_tokens);
+    // Reshape back to original dimensions [n_embd_head, n_head_q, actual_n_tokens_q]
+    ggml_tensor * output = ggml_reshape_3d(ctx, output_transposed, n_embd_head_q, n_head_q, actual_n_tokens_q);
     cb(output, "sparse_attn_out", -1);
     
     return output;
