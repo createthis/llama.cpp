@@ -1,6 +1,6 @@
-#include "llama-sparse-attn.h"
-#include "llama-model.h"
-#include "llama-impl.h"
+#include "../src/llama-sparse-attn.h"
+#include "../src/llama-model.h"
+#include "../src/llama-impl.h"
 
 #include <ggml-alloc.h>
 #include <ggml-backend-impl.h>
@@ -26,11 +26,11 @@ struct TestContext {
         backend = ggml_backend_cpu_init();
         
         // Create a context with reasonable size
-        ctx = ggml_init(ggml_init_params{
-            .mem_size = 16 * 1024 * 1024, // 16MB
-            .mem_buffer = nullptr,
-            .no_alloc = false
-        });
+        ggml_init_params p{};
+        p.mem_size   = 16 * 1024 * 1024; // 16MB
+        p.mem_buffer = nullptr;
+        p.no_alloc   = false;
+        ctx = ggml_init(p);
         
         // Create a buffer
         buffer = ggml_backend_alloc_buffer(backend, 16 * 1024 * 1024);
