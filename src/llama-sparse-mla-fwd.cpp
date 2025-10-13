@@ -16,6 +16,7 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     int64_t n_tokens,
     int64_t top_k,
     const function<void(ggml_tensor *, const char *, int)> & cb) {
+    (void)n_tokens; // Unused parameter
     
     // DeepSeek V3.2 Sparse Attention Application
     // Applies attention only to the top-k selected tokens

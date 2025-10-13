@@ -12,6 +12,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
     ggml_tensor * token_importance,
     int64_t n_tokens,
     const function<void(ggml_tensor *, const char *, int)> & cb) {
+    (void)n_tokens; // Unused parameter
     
     // DeepSeek V3.2 Top-k Selector implementation
     // Selects the top-k most important tokens for sparse attention
@@ -32,9 +33,14 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
     // We need to extract the diagonal or specific rows depending on the current token
     // For simplicity, let's use the last row (current token's view of all previous tokens)
     
+    // Create a tensor for the row index (last row)
+    ggml_tensor * row_index = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+    // Set the row index value to the last row
+    int32_t * row_data = (int32_t *)row_index->data;
+    row_data[0] = actual_n_tokens - 1;
+    
     // Extract the importance scores for the current token (last row)
-    ggml_tensor * current_importance = ggml_get_rows(ctx, token_importance, 
-        ggml_new_i32(ctx, actual_n_tokens - 1));
+    ggml_tensor * current_importance = ggml_get_rows(ctx, token_importance, row_index);
     cb(current_importance, "current_importance", -1);
     
     // Reshape to [actual_n_tokens, 1] for ggml_top_k
