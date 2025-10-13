@@ -1,4 +1,6 @@
-#include "../src/llama-sparse-attn.h"
+#include "../src/llama-sparse-indexer.h"
+#include "../src/llama-sparse-mla-fwd.h"
+#include "../src/llama-sparse-topk.h"
 #include "../src/llama-model.h"
 #include "../src/llama-impl.h"
 
@@ -229,7 +231,7 @@ void test_select_topk_tokens() {
     };
     
     try {
-        ggml_tensor * topk_indices = llama::sparse_attn_indexer::select_topk_tokens(
+        ggml_tensor * topk_indices = llama::sparse_attn_topk::select_topk_tokens(
             test_ctx.ctx, token_importance, n_tokens, cb);
         
         if (topk_indices) {
@@ -301,7 +303,7 @@ void test_apply_sparse_attention_simple() {
     };
     
     try {
-        ggml_tensor * result = llama::sparse_attn_indexer::apply_sparse_attention(
+        ggml_tensor * result = llama::sparse_mla_fwd::apply_sparse_attention(
             test_ctx.ctx, q_cur, k_cur, v_cur, topk_indices, n_tokens, top_k, cb);
         
         if (result) {

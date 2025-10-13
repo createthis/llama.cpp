@@ -31,7 +31,9 @@ add_library(llama
             llama-model.cpp
             llama-quant.cpp
             llama-sampling.cpp
-            llama-sparse-attn.cpp
+            llama-sparse-indexer.cpp
+            llama-sparse-mla-fwd.cpp
+            llama-sparse-topk.cpp
             llama-vocab.cpp
             unicode-data.cpp
             unicode.cpp

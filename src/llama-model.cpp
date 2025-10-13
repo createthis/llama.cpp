@@ -10,7 +10,9 @@
 #include "llama-kv-cache-iswa.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
-#include "llama-sparse-attn.h"
+#include "llama-sparse-indexer.h"
+#include "llama-sparse-mla-fwd.h"
+#include "llama-sparse-topk.h"
 
 #include "ggml-cpp.h"
 
@@ -13900,7 +13902,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     
                     const int64_t top_k = (64 < n_tokens) ? 64 : n_tokens;  // Use top-64 tokens for sparse attention
                     
-                    ggml_tensor * topk_indices = llama::sparse_attn_indexer::select_topk_tokens(
+                    ggml_tensor * topk_indices = llama::sparse_attn_topk::select_topk_tokens(
                         ctx0, token_importance, n_tokens, cb_wrapper);
                     
                     // Check if we should use sparse attention (only when we have valid indices)
@@ -13908,7 +13910,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     
                     if (use_sparse_attention) {
                         // Use sparse attention with top-k tokens
-                        cur = llama::sparse_attn_indexer::apply_sparse_attention(
+                        cur = llama::sparse_mla_fwd::apply_sparse_attention(
                             ctx0, Qcur, Kcur, Vcur, topk_indices, n_tokens, top_k, cb_wrapper);
                         
                         // Apply output projection for sparse attention
