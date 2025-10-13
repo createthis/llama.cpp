@@ -12,9 +12,18 @@
 #include <cstdio>
 #include <vector>
 #include <memory>
+#include <stdexcept>
 
 // Simple test to verify sparse attention tensor operations
 // This test focuses on the core operations without loading a full model
+
+// Function declarations
+void test_compute_token_importance();
+void test_select_topk_tokens();
+void test_apply_sparse_attention_simple();
+void test_reshape_assertion_fix();
+void test_problematic_reshape();
+void test_fixed_reshape_operation();
 
 struct TestContext {
     ggml_context * ctx;
@@ -53,7 +62,7 @@ struct TestContext {
         // Allocate it to the backend buffer
         if (!ggml_backend_buffer_is_host(buffer)) {
             // For non-host buffers, we need to manually allocate
-            ggml_backend_tensor_alloc(buffer, tensor);
+            ggml_backend_tensor_alloc(buffer, tensor, nullptr);
         }
         // For host buffers, the tensor should already be allocated by ggml_backend_alloc_ctx_tensors
         
@@ -68,7 +77,7 @@ struct TestContext {
         // Allocate it to the backend buffer
         if (!ggml_backend_buffer_is_host(buffer)) {
             // For non-host buffers, we need to manually allocate
-            ggml_backend_tensor_alloc(buffer, tensor);
+            ggml_backend_tensor_alloc(buffer, tensor, nullptr);
         }
         // For host buffers, the tensor should already be allocated by ggml_backend_alloc_ctx_tensors
         
@@ -83,7 +92,7 @@ struct TestContext {
         // Allocate it to the backend buffer
         if (!ggml_backend_buffer_is_host(buffer)) {
             // For non-host buffers, we need to manually allocate
-            ggml_backend_tensor_alloc(buffer, tensor);
+            ggml_backend_tensor_alloc(buffer, tensor, nullptr);
         }
         // For host buffers, the tensor should already be allocated by ggml_backend_alloc_ctx_tensors
         
@@ -98,7 +107,7 @@ struct TestContext {
         // Allocate it to the backend buffer
         if (!ggml_backend_buffer_is_host(buffer)) {
             // For non-host buffers, we need to manually allocate
-            ggml_backend_tensor_alloc(buffer, tensor);
+            ggml_backend_tensor_alloc(buffer, tensor, nullptr);
         }
         // For host buffers, the tensor should already be allocated by ggml_backend_alloc_ctx_tensors
         
@@ -213,6 +222,7 @@ void test_compute_token_importance() {
     
     // Create a simple callback function
     auto cb = [](ggml_tensor * tensor, const char * name, int layer_idx) {
+        (void)layer_idx; // Unused parameter
         printf("Tensor '%s' (layer %d): shape [", name, layer_idx);
         for (int i = 0; i < GGML_MAX_DIMS; i++) {
             if (tensor->ne[i] > 1) {
@@ -265,6 +275,7 @@ void test_select_topk_tokens() {
     ggml_backend_tensor_set(token_importance, importance_data.data(), 0, importance_data.size() * sizeof(float));
     
     auto cb = [](ggml_tensor * tensor, const char * name, int layer_idx) {
+        (void)layer_idx; // Unused parameter
         printf("Tensor '%s': shape [", name);
         for (int i = 0; i < GGML_MAX_DIMS; i++) {
             if (tensor->ne[i] > 1) {
@@ -336,6 +347,7 @@ void test_apply_sparse_attention_simple() {
     ggml_backend_tensor_set(topk_indices, indices_data.data(), 0, indices_data.size() * sizeof(int32_t));
     
     auto cb = [](ggml_tensor * tensor, const char * name, int layer_idx) {
+        (void)layer_idx; // Unused parameter
         printf("Tensor '%s': shape [", name);
         for (int i = 0; i < GGML_MAX_DIMS; i++) {
             if (tensor->ne[i] > 1) {
@@ -373,7 +385,6 @@ void test_reshape_assertion_fix() {
     
     // Create tensors with dimensions that should trigger the assertion
     const int64_t n_tokens = 10;
-    const int64_t top_k = 5;
     const int64_t n_embd_head = 64;
     const int64_t n_head_kv = 2;
     
