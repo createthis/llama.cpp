@@ -27,13 +27,13 @@ struct TestContext {
         
         // Create a context with reasonable size
         ggml_init_params p{};
-        p.mem_size   = 16 * 1024 * 1024; // 16MB
+        p.mem_size   = 64 * 1024 * 1024; // 16MB
         p.mem_buffer = nullptr;
         p.no_alloc   = false;
         ctx = ggml_init(p);
         
         // Create a buffer
-        buffer = ggml_backend_alloc_buffer(backend, 16 * 1024 * 1024);
+        buffer = ggml_backend_alloc_buffer(backend, 64 * 1024 * 1024);
     }
     
     ~TestContext() {
