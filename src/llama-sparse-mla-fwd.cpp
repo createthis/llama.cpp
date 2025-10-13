@@ -1,4 +1,4 @@
-#include "llama-sparse-attn.h"
+#include "llama-sparse-mla-fwd.h"
 #include "llama-impl.h"
 
 #include <cmath>
