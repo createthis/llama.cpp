@@ -29,17 +29,80 @@ struct TestContext {
         ggml_init_params p{};
         p.mem_size   = 64 * 1024 * 1024; // 16MB
         p.mem_buffer = nullptr;
-        p.no_alloc   = false;
+        p.no_alloc   = true; // Required for ggml_backend_alloc_ctx_tensors
         ctx = ggml_init(p);
         
-        // Create a buffer
-        buffer = ggml_backend_alloc_buffer(backend, 64 * 1024 * 1024);
+        // Allocate all tensors in the context to the backend buffer
+        buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+        if (buffer == nullptr) {
+            throw std::runtime_error("Failed to allocate tensors to backend buffer");
+        }
     }
     
     ~TestContext() {
         if (ctx) ggml_free(ctx);
         if (buffer) ggml_backend_buffer_free(buffer);
         if (backend) ggml_backend_free(backend);
+    }
+    
+    // Helper method to create a 2D tensor and allocate it to the backend buffer
+    ggml_tensor * create_tensor_2d(ggml_context * ctx, ggml_type type, int64_t ne0, int64_t ne1) {
+        // Create the tensor
+        ggml_tensor * tensor = ggml_new_tensor_2d(ctx, type, ne0, ne1);
+        
+        // Allocate it to the backend buffer
+        if (!ggml_backend_buffer_is_host(buffer)) {
+            // For non-host buffers, we need to manually allocate
+            ggml_backend_tensor_alloc(buffer, tensor);
+        }
+        // For host buffers, the tensor should already be allocated by ggml_backend_alloc_ctx_tensors
+        
+        return tensor;
+    }
+    
+    // Helper method to create a 1D tensor and allocate it to the backend buffer
+    ggml_tensor * create_tensor_1d(ggml_context * ctx, ggml_type type, int64_t ne0) {
+        // Create the tensor
+        ggml_tensor * tensor = ggml_new_tensor_1d(ctx, type, ne0);
+        
+        // Allocate it to the backend buffer
+        if (!ggml_backend_buffer_is_host(buffer)) {
+            // For non-host buffers, we need to manually allocate
+            ggml_backend_tensor_alloc(buffer, tensor);
+        }
+        // For host buffers, the tensor should already be allocated by ggml_backend_alloc_ctx_tensors
+        
+        return tensor;
+    }
+    
+    // Helper method to create a 3D tensor and allocate it to the backend buffer
+    ggml_tensor * create_tensor_3d(ggml_context * ctx, ggml_type type, int64_t ne0, int64_t ne1, int64_t ne2) {
+        // Create the tensor
+        ggml_tensor * tensor = ggml_new_tensor_3d(ctx, type, ne0, ne1, ne2);
+        
+        // Allocate it to the backend buffer
+        if (!ggml_backend_buffer_is_host(buffer)) {
+            // For non-host buffers, we need to manually allocate
+            ggml_backend_tensor_alloc(buffer, tensor);
+        }
+        // For host buffers, the tensor should already be allocated by ggml_backend_alloc_ctx_tensors
+        
+        return tensor;
+    }
+    
+    // Helper method to create a 4D tensor and allocate it to the backend buffer
+    ggml_tensor * create_tensor_4d(ggml_context * ctx, ggml_type type, int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3) {
+        // Create the tensor
+        ggml_tensor * tensor = ggml_new_tensor_4d(ctx, type, ne0, ne1, ne2, ne3);
+        
+        // Allocate it to the backend buffer
+        if (!ggml_backend_buffer_is_host(buffer)) {
+            // For non-host buffers, we need to manually allocate
+            ggml_backend_tensor_alloc(buffer, tensor);
+        }
+        // For host buffers, the tensor should already be allocated by ggml_backend_alloc_ctx_tensors
+        
+        return tensor;
     }
 };
 
@@ -51,7 +114,7 @@ struct MockLayer {
     ggml_tensor * attn_indexer_k_norm_bias;
     ggml_tensor * wq_a;
     
-    MockLayer(ggml_context * ctx) {
+    MockLayer(TestContext & test_ctx) {
         // Create mock tensors with appropriate dimensions
         // Based on DeepSeek V3.2-Exp architecture
         const int64_t hidden_dim = 512;
@@ -59,19 +122,19 @@ struct MockLayer {
         const int64_t index_head_dim = 128;
         
         // Indexer key projection
-        attn_indexer_wk = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden_dim, index_head_dim * index_n_heads);
+        attn_indexer_wk = test_ctx.create_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, index_head_dim * index_n_heads);
         
         // Indexer query projection (wq_b)
-        attn_indexer_wq_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden_dim, index_head_dim * index_n_heads);
+        attn_indexer_wq_b = test_ctx.create_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, index_head_dim * index_n_heads);
         
         // Indexer weights projection
-        attn_indexer_weights_proj = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden_dim, index_n_heads);
+        attn_indexer_weights_proj = test_ctx.create_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, index_n_heads);
         
         // Indexer normalization bias
-        attn_indexer_k_norm_bias = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, index_head_dim * index_n_heads);
+        attn_indexer_k_norm_bias = test_ctx.create_tensor_1d(test_ctx.ctx, GGML_TYPE_F32, index_head_dim * index_n_heads);
         
         // Query projection (wq_a) for non-lite version
-        wq_a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden_dim, hidden_dim);
+        wq_a = test_ctx.create_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, hidden_dim);
     }
 };
 
@@ -79,9 +142,9 @@ struct MockLayer {
 struct MockModel {
     std::vector<MockLayer> layers;
     
-    MockModel(ggml_context * ctx, int num_layers = 1) {
+    MockModel(TestContext & test_ctx, int num_layers = 1) {
         for (int i = 0; i < num_layers; i++) {
-            layers.emplace_back(ctx);
+            layers.emplace_back(test_ctx);
         }
     }
 };
@@ -91,13 +154,13 @@ void test_compute_token_importance() {
     printf("Testing compute_token_importance...\n");
     
     TestContext test_ctx;
-    MockModel model(test_ctx.ctx);
+    MockModel model(test_ctx);
     
     // Create a mock current hidden state tensor
     const int64_t n_tokens = 16;
     const int64_t hidden_dim = 512;
     
-    ggml_tensor * cur = ggml_new_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, n_tokens);
+    ggml_tensor * cur = test_ctx.create_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, n_tokens);
     
     // Initialize with random values
     std::vector<float> cur_data(hidden_dim * n_tokens);
@@ -105,6 +168,48 @@ void test_compute_token_importance() {
         cur_data[i] = (float)rand() / RAND_MAX;
     }
     ggml_backend_tensor_set(cur, cur_data.data(), 0, cur_data.size() * sizeof(float));
+    
+    // Initialize mock model tensors with random data
+    for (auto & layer : model.layers) {
+        // Initialize attn_indexer_wk
+        std::vector<float> wk_data(ggml_nelements(layer.attn_indexer_wk));
+        for (size_t i = 0; i < wk_data.size(); i++) {
+            wk_data[i] = (float)rand() / RAND_MAX;
+        }
+        ggml_backend_tensor_set(layer.attn_indexer_wk, wk_data.data(), 0, wk_data.size() * sizeof(float));
+        
+        // Initialize attn_indexer_wq_b
+        std::vector<float> wq_b_data(ggml_nelements(layer.attn_indexer_wq_b));
+        for (size_t i = 0; i < wq_b_data.size(); i++) {
+            wq_b_data[i] = (float)rand() / RAND_MAX;
+        }
+        ggml_backend_tensor_set(layer.attn_indexer_wq_b, wq_b_data.data(), 0, wq_b_data.size() * sizeof(float));
+        
+        // Initialize attn_indexer_weights_proj
+        std::vector<float> weights_proj_data(ggml_nelements(layer.attn_indexer_weights_proj));
+        for (size_t i = 0; i < weights_proj_data.size(); i++) {
+            weights_proj_data[i] = (float)rand() / RAND_MAX;
+        }
+        ggml_backend_tensor_set(layer.attn_indexer_weights_proj, weights_proj_data.data(), 0, weights_proj_data.size() * sizeof(float));
+        
+        // Initialize attn_indexer_k_norm_bias (if present)
+        if (layer.attn_indexer_k_norm_bias != nullptr) {
+            std::vector<float> bias_data(ggml_nelements(layer.attn_indexer_k_norm_bias));
+            for (size_t i = 0; i < bias_data.size(); i++) {
+                bias_data[i] = (float)rand() / RAND_MAX;
+            }
+            ggml_backend_tensor_set(layer.attn_indexer_k_norm_bias, bias_data.data(), 0, bias_data.size() * sizeof(float));
+        }
+        
+        // Initialize wq_a for non-lite version
+        if (layer.wq_a != nullptr) {
+            std::vector<float> wq_a_data(ggml_nelements(layer.wq_a));
+            for (size_t i = 0; i < wq_a_data.size(); i++) {
+                wq_a_data[i] = (float)rand() / RAND_MAX;
+            }
+            ggml_backend_tensor_set(layer.wq_a, wq_a_data.data(), 0, wq_a_data.size() * sizeof(float));
+        }
+    }
     
     // Create a simple callback function
     auto cb = [](ggml_tensor * tensor, const char * name, int layer_idx) {
@@ -150,7 +255,7 @@ void test_select_topk_tokens() {
     
     // Create a mock token importance tensor
     const int64_t n_tokens = 32;
-    ggml_tensor * token_importance = ggml_new_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, n_tokens, 1);
+    ggml_tensor * token_importance = test_ctx.create_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, n_tokens, 1);
     
     // Initialize with random importance scores
     std::vector<float> importance_data(n_tokens);
@@ -203,16 +308,16 @@ void test_apply_sparse_attention_simple() {
     const int64_t n_head_kv = 1;
     
     // Create query tensor [n_embd_head, n_head_q, n_tokens]
-    ggml_tensor * q_cur = ggml_new_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_q, n_tokens);
+    ggml_tensor * q_cur = test_ctx.create_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_q, n_tokens);
     
     // Create key tensor [n_embd_head, n_head_kv, n_tokens]
-    ggml_tensor * k_cur = ggml_new_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, n_tokens);
+    ggml_tensor * k_cur = test_ctx.create_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, n_tokens);
     
     // Create value tensor [n_embd_head, n_head_kv, n_tokens]
-    ggml_tensor * v_cur = ggml_new_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, n_tokens);
+    ggml_tensor * v_cur = test_ctx.create_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, n_tokens);
     
     // Create topk indices tensor [top_k, 1, 1, 1]
-    ggml_tensor * topk_indices = ggml_new_tensor_4d(test_ctx.ctx, GGML_TYPE_I32, top_k, 1, 1, 1);
+    ggml_tensor * topk_indices = test_ctx.create_tensor_4d(test_ctx.ctx, GGML_TYPE_I32, top_k, 1, 1, 1);
     
     // Initialize tensors with simple values
     std::vector<float> q_data(n_embd_head * n_head_q * n_tokens, 1.0f);
@@ -273,7 +378,7 @@ void test_reshape_assertion_fix() {
     const int64_t n_head_kv = 2;
     
     // Create key tensor [n_embd_head, n_head_kv, n_tokens]
-    ggml_tensor * k_cur = ggml_new_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, n_tokens);
+    ggml_tensor * k_cur = test_ctx.create_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, n_tokens);
     
     // Test the problematic reshape operation from apply_sparse_attention
     // This is the operation that's likely causing the assertion failure
@@ -319,7 +424,7 @@ void test_problematic_reshape() {
     const int64_t n_head_kv = 1;   // MQA configuration
     
     // Create key tensor with exact same dimensions as in the real model
-    ggml_tensor * k_cur = ggml_new_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, n_tokens);
+    ggml_tensor * k_cur = test_ctx.create_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, n_tokens);
     
     printf("Created Kcur tensor with dimensions: [%ld, %ld, %ld]\n", 
            k_cur->ne[0], k_cur->ne[1], k_cur->ne[2]);
@@ -377,7 +482,7 @@ void test_fixed_reshape_operation() {
     const int64_t n_head_kv = 1;
     
     // Create key tensor with actual dimensions
-    ggml_tensor * k_cur = ggml_new_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, actual_n_tokens);
+    ggml_tensor * k_cur = test_ctx.create_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, actual_n_tokens);
     
     printf("Created Kcur tensor with dimensions: [%ld, %ld, %ld]\n", 
            k_cur->ne[0], k_cur->ne[1], k_cur->ne[2]);
