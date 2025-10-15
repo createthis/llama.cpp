@@ -10,6 +10,9 @@
 #include <ggml-impl.h>
 #include <ggml.h>
 
+// Include llama.h for model parameter functions
+#include "../include/llama.h"
+
 #include <cmath>
 #include <cstdio>
 #include <cinttypes>
@@ -50,52 +53,90 @@ struct TestContext {
     }
 };
 
-// Mock model layer for testing sparse attention
-struct MockLayer {
-    ggml_tensor * attn_indexer_wk = nullptr;
-    ggml_tensor * attn_indexer_wq_b = nullptr;
-    ggml_tensor * attn_indexer_weights_proj = nullptr;
-    ggml_tensor * attn_indexer_k_norm_bias = nullptr;
-    ggml_tensor * wq_a = nullptr;
+// Helper function to create a minimal llama_model instance for testing
+// This creates a real llama_model instance and populates the sparse attention tensors
+llama_model* create_test_model(TestContext & test_ctx, int num_layers = 1) {
+    // Create model parameters with default values
+    llama_model_params params = llama_model_default_params();
     
-    void create_tensors(TestContext & test_ctx) {
-        // Create mock tensors with appropriate dimensions
+    // Create a real llama_model instance
+    llama_model* model = new llama_model(params);
+    
+    // Set the architecture to DeepSeek3_2
+    model->arch = LLM_ARCH_DEEPSEEK3_2;
+    
+    // Initialize the layers vector
+    model->layers.resize(num_layers);
+    
+    // Create and populate sparse attention tensors for each layer
+    for (int i = 0; i < num_layers; i++) {
+        llama_layer& layer = model->layers[i];
+        
         // Based on DeepSeek V3.2-Exp architecture
         const int64_t hidden_dim = 512;
         const int64_t index_n_heads = 64;
         const int64_t index_head_dim = 128;
         
         // Indexer key projection
-        attn_indexer_wk = ggml_new_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, index_head_dim * index_n_heads);
+        layer.attn_indexer_wk = ggml_new_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, index_head_dim * index_n_heads);
         
         // Indexer query projection (wq_b)
-        attn_indexer_wq_b = ggml_new_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, index_head_dim * index_n_heads);
+        layer.attn_indexer_wq_b = ggml_new_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, index_head_dim * index_n_heads);
         
         // Indexer weights projection
-        attn_indexer_weights_proj = ggml_new_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, index_n_heads);
+        layer.attn_indexer_weights_proj = ggml_new_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, index_n_heads);
         
         // Indexer normalization bias
-        attn_indexer_k_norm_bias = ggml_new_tensor_1d(test_ctx.ctx, GGML_TYPE_F32, index_head_dim * index_n_heads);
+        layer.attn_indexer_k_norm_bias = ggml_new_tensor_1d(test_ctx.ctx, GGML_TYPE_F32, index_head_dim * index_n_heads);
         
         // Query projection (wq_a) for non-lite version
-        wq_a = ggml_new_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, hidden_dim);
-    }
-};
-
-// Mock model for testing
-struct MockModel {
-    std::vector<MockLayer> layers;
-    
-    MockModel(int num_layers = 1) : layers(num_layers) {
-        // Layers are default-constructed, tensors will be created later
-    }
-    
-    void create_tensors(TestContext & test_ctx) {
-        for (auto & layer : layers) {
-            layer.create_tensors(test_ctx);
+        layer.wq_a = ggml_new_tensor_2d(test_ctx.ctx, GGML_TYPE_F32, hidden_dim, hidden_dim);
+        
+        // Initialize tensors with random data
+        std::vector<float> wk_data(ggml_nelements(layer.attn_indexer_wk));
+        for (size_t j = 0; j < wk_data.size(); j++) {
+            wk_data[j] = (float)rand() / RAND_MAX;
+        }
+        memcpy(layer.attn_indexer_wk->data, wk_data.data(), wk_data.size() * sizeof(float));
+        
+        std::vector<float> wq_b_data(ggml_nelements(layer.attn_indexer_wq_b));
+        for (size_t j = 0; j < wq_b_data.size(); j++) {
+            wq_b_data[j] = (float)rand() / RAND_MAX;
+        }
+        memcpy(layer.attn_indexer_wq_b->data, wq_b_data.data(), wq_b_data.size() * sizeof(float));
+        
+        std::vector<float> weights_proj_data(ggml_nelements(layer.attn_indexer_weights_proj));
+        for (size_t j = 0; j < weights_proj_data.size(); j++) {
+            weights_proj_data[j] = (float)rand() / RAND_MAX;
+        }
+        memcpy(layer.attn_indexer_weights_proj->data, weights_proj_data.data(), weights_proj_data.size() * sizeof(float));
+        
+        if (layer.attn_indexer_k_norm_bias != nullptr) {
+            std::vector<float> bias_data(ggml_nelements(layer.attn_indexer_k_norm_bias));
+            for (size_t j = 0; j < bias_data.size(); j++) {
+                bias_data[j] = (float)rand() / RAND_MAX;
+            }
+            memcpy(layer.attn_indexer_k_norm_bias->data, bias_data.data(), bias_data.size() * sizeof(float));
+        }
+        
+        if (layer.wq_a != nullptr) {
+            std::vector<float> wq_a_data(ggml_nelements(layer.wq_a));
+            for (size_t j = 0; j < wq_a_data.size(); j++) {
+                wq_a_data[j] = (float)rand() / RAND_MAX;
+            }
+            memcpy(layer.wq_a->data, wq_a_data.data(), wq_a_data.size() * sizeof(float));
         }
     }
-};
+    
+    return model;
+}
+
+// Helper function to cleanup the test model
+void cleanup_test_model(llama_model* model) {
+    if (model) {
+        delete model;
+    }
+}
 
 // Test the compute_token_importance function
 void test_compute_token_importance() {
@@ -103,10 +144,9 @@ void test_compute_token_importance() {
     fflush(stdout);
     
     TestContext test_ctx;
-    MockModel model;
     
-    // Create model tensors after TestContext is fully constructed
-    model.create_tensors(test_ctx);
+    // Create a real llama_model instance instead of mocking
+    llama_model* model = create_test_model(test_ctx, 1);
     
     // Create a mock current hidden state tensor
     const int64_t n_tokens = 16;
@@ -121,48 +161,6 @@ void test_compute_token_importance() {
     }
     // Copy data directly to tensor memory
     memcpy(cur->data, cur_data.data(), cur_data.size() * sizeof(float));
-    
-    // Initialize mock model tensors with random data
-    for (auto & layer : model.layers) {
-        // Initialize attn_indexer_wk
-        std::vector<float> wk_data(ggml_nelements(layer.attn_indexer_wk));
-        for (size_t i = 0; i < wk_data.size(); i++) {
-            wk_data[i] = (float)rand() / RAND_MAX;
-        }
-        memcpy(layer.attn_indexer_wk->data, wk_data.data(), wk_data.size() * sizeof(float));
-        
-        // Initialize attn_indexer_wq_b
-        std::vector<float> wq_b_data(ggml_nelements(layer.attn_indexer_wq_b));
-        for (size_t i = 0; i < wq_b_data.size(); i++) {
-            wq_b_data[i] = (float)rand() / RAND_MAX;
-        }
-        memcpy(layer.attn_indexer_wq_b->data, wq_b_data.data(), wq_b_data.size() * sizeof(float));
-        
-        // Initialize attn_indexer_weights_proj
-        std::vector<float> weights_proj_data(ggml_nelements(layer.attn_indexer_weights_proj));
-        for (size_t i = 0; i < weights_proj_data.size(); i++) {
-            weights_proj_data[i] = (float)rand() / RAND_MAX;
-        }
-        memcpy(layer.attn_indexer_weights_proj->data, weights_proj_data.data(), weights_proj_data.size() * sizeof(float));
-        
-        // Initialize attn_indexer_k_norm_bias (if present)
-        if (layer.attn_indexer_k_norm_bias != nullptr) {
-            std::vector<float> bias_data(ggml_nelements(layer.attn_indexer_k_norm_bias));
-            for (size_t i = 0; i < bias_data.size(); i++) {
-                bias_data[i] = (float)rand() / RAND_MAX;
-            }
-            memcpy(layer.attn_indexer_k_norm_bias->data, bias_data.data(), bias_data.size() * sizeof(float));
-        }
-        
-        // Initialize wq_a for non-lite version
-        if (layer.wq_a != nullptr) {
-            std::vector<float> wq_a_data(ggml_nelements(layer.wq_a));
-            for (size_t i = 0; i < wq_a_data.size(); i++) {
-                wq_a_data[i] = (float)rand() / RAND_MAX;
-            }
-            memcpy(layer.wq_a->data, wq_a_data.data(), wq_a_data.size() * sizeof(float));
-        }
-    }
     
     // Create a simple callback function
     auto cb = [](ggml_tensor * tensor, const char * name, int layer_idx) {
@@ -187,7 +185,7 @@ void test_compute_token_importance() {
         
         try {
             ggml_tensor * token_importance = llama::sparse_attn_indexer::compute_token_importance(
-                test_ctx.ctx, reinterpret_cast<const llama_model&>(model), 0, cur, is_lite, cb);
+                test_ctx.ctx, *model, 0, cur, is_lite, cb);
             
             if (token_importance) {
                 printf("Success: token_importance tensor created with shape [%" PRId64 ", %" PRId64 "]\n", 
@@ -202,6 +200,9 @@ void test_compute_token_importance() {
             fflush(stdout);
         }
     }
+    
+    // Cleanup the model
+    cleanup_test_model(model);
     
     printf("compute_token_importance test completed\n\n");
     fflush(stdout);
