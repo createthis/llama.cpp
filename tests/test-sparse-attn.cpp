@@ -12,6 +12,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cinttypes>
 #include <vector>
 #include <memory>
 #include <stdexcept>
@@ -169,7 +170,7 @@ void test_compute_token_importance() {
         printf("Tensor '%s' (layer %d): shape [", name, layer_idx);
         for (int i = 0; i < GGML_MAX_DIMS; i++) {
             if (tensor->ne[i] > 1) {
-                printf("%ld", tensor->ne[i]);
+                printf("%" PRId64, tensor->ne[i]);
                 if (i < GGML_MAX_DIMS - 1 && tensor->ne[i+1] > 1) {
                     printf(", ");
                 }
@@ -189,7 +190,7 @@ void test_compute_token_importance() {
                 test_ctx.ctx, reinterpret_cast<const llama_model&>(model), 0, cur, is_lite, cb);
             
             if (token_importance) {
-                printf("Success: token_importance tensor created with shape [%ld, %ld]\n", 
+                printf("Success: token_importance tensor created with shape [%" PRId64 ", %" PRId64 "]\n", 
                        token_importance->ne[0], token_importance->ne[1]);
                 fflush(stdout);
             } else {
@@ -229,7 +230,7 @@ void test_select_topk_tokens() {
         printf("Tensor '%s': shape [", name);
         for (int i = 0; i < GGML_MAX_DIMS; i++) {
             if (tensor->ne[i] > 1) {
-                printf("%ld", tensor->ne[i]);
+                printf("%" PRId64, tensor->ne[i]);
                 if (i < GGML_MAX_DIMS - 1 && tensor->ne[i+1] > 1) {
                     printf(", ");
                 }
@@ -244,7 +245,7 @@ void test_select_topk_tokens() {
             test_ctx.ctx, token_importance, n_tokens, cb);
         
         if (topk_indices) {
-            printf("Success: topk_indices tensor created with shape [%ld, %ld, %ld, %ld]\n", 
+            printf("Success: topk_indices tensor created with shape [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
                    topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);
             fflush(stdout);
         } else {
@@ -307,7 +308,7 @@ void test_apply_sparse_attention_simple() {
         printf("Tensor '%s': shape [", name);
         for (int i = 0; i < GGML_MAX_DIMS; i++) {
             if (tensor->ne[i] > 1) {
-                printf("%ld", tensor->ne[i]);
+                printf("%" PRId64, tensor->ne[i]);
                 if (i < GGML_MAX_DIMS - 1 && tensor->ne[i+1] > 1) {
                     printf(", ");
                 }
@@ -322,7 +323,7 @@ void test_apply_sparse_attention_simple() {
             test_ctx.ctx, q_cur, k_cur, v_cur, topk_indices, n_tokens, top_k, cb);
         
         if (result) {
-            printf("Success: sparse attention result tensor created with shape [%ld, %ld, %ld]\n", 
+            printf("Success: sparse attention result tensor created with shape [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
                    result->ne[0], result->ne[1], result->ne[2]);
             fflush(stdout);
         } else {
@@ -361,16 +362,15 @@ void test_reshape_assertion_fix() {
     const int64_t n_head_kv_val = k_cur->ne[1];
     const int64_t n_tokens_val = k_cur->ne[2];
     
-    printf("Original tensor dimensions: [%ld, %ld, %ld]\n", n_embd_head_val, n_head_kv_val, n_tokens_val);
-    printf("Total elements: %ld\n", ggml_nelements(k_cur));
+    printf("Original tensor dimensions: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", n_embd_head_val, n_head_kv_val, n_tokens_val);
+    printf("Total elements: %" PRId64 "\n", ggml_nelements(k_cur));
     fflush(stdout);
     
     // Test reshape to 2D: [n_embd_head, n_head_kv * n_tokens]
     const int64_t ne0 = n_embd_head_val;
     const int64_t ne1 = n_head_kv_val * n_tokens_val;
     
-    printf("Attempting reshape to [%ld, %ld] (ne0 * ne1 = %ld)\n", ne0, ne1, ne0 * ne1);
-    fflush(stdout);
+    printf("Attempting reshape to [%" PRId64 ", %" PRId64 "] (ne0 * ne1 = %" PRId64 ")\n", ne0, ne1, ne0 * ne1);
     
     if (ggml_nelements(k_cur) == ne0 * ne1) {
         printf("Reshape dimensions match! This should work.\n");
@@ -378,12 +378,12 @@ void test_reshape_assertion_fix() {
         
         // This should work without assertion
         ggml_tensor * k_cur_2d = ggml_reshape_2d(test_ctx.ctx, k_cur, ne0, ne1);
-        printf("Reshape successful: new shape [%ld, %ld]\n", k_cur_2d->ne[0], k_cur_2d->ne[1]);
-        fflush(stdout);
+        printf("Reshape successful: new shape [%" PRId64 ", %" PRId64 "]\n", k_cur_2d->ne[0], k_cur_2d->ne[1]);
+        printf("Reshape successful: new shape [%" PRId64 ", %" PRId64 "]\n", k_cur_2d->ne[0], k_cur_2d->ne[1]);
     } else {
         printf("ERROR: Reshape dimensions don't match! This will cause assertion.\n");
-        printf("Expected %ld elements, but tensor has %ld elements\n", ne0 * ne1, ggml_nelements(k_cur));
-        fflush(stdout);
+        printf("Expected %" PRId64 " elements, but tensor has %" PRId64 " elements\n", ne0 * ne1, ggml_nelements(k_cur));
+        printf("Expected %" PRId64 " elements, but tensor has %" PRId64 " elements\n", ne0 * ne1, ggml_nelements(k_cur));
     }
     
     printf("reshape assertion test completed\n\n");
@@ -406,9 +406,9 @@ void test_problematic_reshape() {
     // Create key tensor with exact same dimensions as in the real model
     ggml_tensor * k_cur = ggml_new_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, n_tokens);
     
-    printf("Created Kcur tensor with dimensions: [%ld, %ld, %ld]\n", 
+    printf("Created Kcur tensor with dimensions: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
            k_cur->ne[0], k_cur->ne[1], k_cur->ne[2]);
-    printf("Total elements: %ld\n", ggml_nelements(k_cur));
+    printf("Total elements: %" PRId64 "\n", ggml_nelements(k_cur));
     fflush(stdout);
     
     // This is the exact operation from apply_sparse_attention that's failing
@@ -416,7 +416,7 @@ void test_problematic_reshape() {
     const int64_t n_head_kv_extracted = k_cur->ne[1];
     const int64_t n_tokens_extracted = k_cur->ne[2];
     
-    printf("Extracted dimensions: n_embd_head=%ld, n_head_kv=%ld, n_tokens=%ld\n",
+    printf("Extracted dimensions: n_embd_head=%" PRId64 ", n_head_kv=%" PRId64 ", n_tokens=%" PRId64 "\n",
            n_embd_head_extracted, n_head_kv_extracted, n_tokens_extracted);
     fflush(stdout);
     
@@ -424,7 +424,7 @@ void test_problematic_reshape() {
     const int64_t target_ne0 = n_embd_head_extracted;
     const int64_t target_ne1 = n_head_kv_extracted * n_tokens_extracted;
     
-    printf("Attempting to reshape to [%ld, %ld] (expected elements: %ld)\n",
+    printf("Attempting to reshape to [%" PRId64 ", %" PRId64 "] (expected elements: %" PRId64 ")\n",
            target_ne0, target_ne1, target_ne0 * target_ne1);
     fflush(stdout);
     
@@ -434,23 +434,23 @@ void test_problematic_reshape() {
         
         // This should work
         ggml_tensor * k_cur_2d = ggml_reshape_2d(test_ctx.ctx, k_cur, target_ne0, target_ne1);
-        printf("Reshape successful: new shape [%ld, %ld]\n", k_cur_2d->ne[0], k_cur_2d->ne[1]);
+        printf("Reshape successful: new shape [%" PRId64 ", %" PRId64 "]\n", k_cur_2d->ne[0], k_cur_2d->ne[1]);
         fflush(stdout);
     } else {
         printf("ERROR: Dimension mismatch detected!\n");
         fflush(stdout);
-        printf("Tensor has %ld elements, but reshape expects %ld elements\n",
+        printf("Tensor has %" PRId64 " elements, but reshape expects %" PRId64 " elements\n",
                ggml_nelements(k_cur), target_ne0 * target_ne1);
         fflush(stdout);
         
         // Let's debug why this might happen
         printf("Debug info:\n");
-        printf("  k_cur->ne[0] = %ld\n", k_cur->ne[0]);
-        printf("  k_cur->ne[1] = %ld\n", k_cur->ne[1]);
-        printf("  k_cur->ne[2] = %ld\n", k_cur->ne[2]);
-        printf("  k_cur->ne[3] = %ld\n", k_cur->ne[3]);
-        printf("  Product of ne[] = %ld\n", k_cur->ne[0] * k_cur->ne[1] * k_cur->ne[2] * k_cur->ne[3]);
-        printf("  ggml_nelements(k_cur) = %ld\n", ggml_nelements(k_cur));
+        printf("  k_cur->ne[0] = %" PRId64 "\n", k_cur->ne[0]);
+        printf("  k_cur->ne[1] = %" PRId64 "\n", k_cur->ne[1]);
+        printf("  k_cur->ne[2] = %" PRId64 "\n", k_cur->ne[2]);
+        printf("  k_cur->ne[3] = %" PRId64 "\n", k_cur->ne[3]);
+        printf("  Product of ne[] = %" PRId64 "\n", k_cur->ne[0] * k_cur->ne[1] * k_cur->ne[2] * k_cur->ne[3]);
+        printf("  ggml_nelements(k_cur) = %" PRId64 "\n", ggml_nelements(k_cur));
         fflush(stdout);
     }
     
@@ -474,10 +474,10 @@ void test_fixed_reshape_operation() {
     // Create key tensor with actual dimensions
     ggml_tensor * k_cur = ggml_new_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, actual_n_tokens);
     
-    printf("Created Kcur tensor with dimensions: [%ld, %ld, %ld]\n", 
+    printf("Created Kcur tensor with dimensions: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
            k_cur->ne[0], k_cur->ne[1], k_cur->ne[2]);
     fflush(stdout);
-    printf("Total elements: %ld\n", ggml_nelements(k_cur));
+    printf("Total elements: %" PRId64 "\n", ggml_nelements(k_cur));
     fflush(stdout);
     
     // Extract dimensions from tensor (the fix)
@@ -485,16 +485,15 @@ void test_fixed_reshape_operation() {
     const int64_t n_head_kv_extracted = k_cur->ne[1];
     const int64_t actual_n_tokens_extracted = k_cur->ne[2]; // Use actual dimension from tensor
     
-    printf("Extracted dimensions: n_embd_head=%ld, n_head_kv=%ld, actual_n_tokens=%ld\n",
+    printf("Extracted dimensions: n_embd_head=%" PRId64 ", n_head_kv=%" PRId64 ", actual_n_tokens=%" PRId64 "\n",
            n_embd_head_extracted, n_head_kv_extracted, actual_n_tokens_extracted);
-    printf("Wrong parameter n_tokens would have been: %ld\n", wrong_n_tokens);
-    fflush(stdout);
+    printf("Wrong parameter n_tokens would have been: %" PRId64 "\n", wrong_n_tokens);
     
     // Test the fixed reshape operation
     const int64_t target_ne0 = n_embd_head_extracted;
     const int64_t target_ne1 = n_head_kv_extracted * actual_n_tokens_extracted;
     
-    printf("Attempting to reshape to [%ld, %ld] (expected elements: %ld)\n",
+    printf("Attempting to reshape to [%" PRId64 ", %" PRId64 "] (expected elements: %" PRId64 ")\n",
            target_ne0, target_ne1, target_ne0 * target_ne1);
     
     if (ggml_nelements(k_cur) == target_ne0 * target_ne1) {
@@ -503,12 +502,12 @@ void test_fixed_reshape_operation() {
         
         // This should work with the fix
         ggml_tensor * k_cur_2d = ggml_reshape_2d(test_ctx.ctx, k_cur, target_ne0, target_ne1);
-        printf("Reshape successful: new shape [%ld, %ld]\n", k_cur_2d->ne[0], k_cur_2d->ne[1]);
+        printf("Reshape successful: new shape [%" PRId64 ", %" PRId64 "]\n", k_cur_2d->ne[0], k_cur_2d->ne[1]);
         fflush(stdout);
         
         // Show what would have happened with the bug
         const int64_t wrong_target_ne1 = n_head_kv_extracted * wrong_n_tokens;
-        printf("With the bug (using wrong n_tokens=%ld): expected %ld elements, but tensor has %ld elements\n",
+        printf("With the bug (using wrong n_tokens=%" PRId64 "): expected %" PRId64 " elements, but tensor has %" PRId64 " elements\n",
                wrong_n_tokens, target_ne0 * wrong_target_ne1, ggml_nelements(k_cur));
         fflush(stdout);
     } else {
