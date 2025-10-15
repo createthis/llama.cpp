@@ -60,6 +60,9 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     const int64_t index_n_heads = 64;
     const int64_t index_head_dim = 128;
     
+    // Get n_tokens from the weights tensor (moved from later in the function)
+    const int64_t n_tokens = ggml_nelements(weights) / index_n_heads;
+    
     // Reshape q_indexer to [n_tokens, index_n_heads, index_head_dim]
     // q_indexer should have shape [n_tokens, index_n_heads * index_head_dim]
     q_indexer = ggml_reshape_3d(ctx, q_indexer, index_head_dim, index_n_heads, ggml_nelements(q_indexer) / (index_head_dim * index_n_heads));
@@ -74,20 +77,37 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     // q_indexer: [n_tokens, index_n_heads, index_head_dim]
     // k_indexer: [n_tokens, index_head_dim * index_n_heads]
     
-    // First, reshape q_indexer to [n_tokens * index_n_heads, index_head_dim]
+    // Simple approach: reshape both to compatible 2D shapes and compute dot product
+    
+    // Reshape q_indexer to [n_tokens * index_n_heads, index_head_dim]
     ggml_tensor * q_flat = ggml_reshape_2d(ctx, q_indexer, index_head_dim, ggml_nelements(q_indexer) / index_head_dim);
     cb(q_flat, "indexer_q_flat", layer_idx);
-
-    // Compute dot product: q_flat @ k_indexer^T
-    // q_flat: [n_tokens * index_n_heads, index_head_dim]
-    // k_indexer: [n_tokens, index_head_dim * index_n_heads]
     
-    // Transpose k_indexer to [index_head_dim * index_n_heads, n_tokens]
-    ggml_tensor * k_transposed = ggml_cont(ctx, ggml_transpose(ctx, k_indexer));
+    // Transpose q_flat to [n_tokens * index_n_heads, index_head_dim] for proper matmul
+    ggml_tensor * q_transposed = ggml_cont(ctx, ggml_transpose(ctx, q_flat));
+    cb(q_transposed, "indexer_q_transposed", layer_idx);
+
+    // Reshape k_indexer to [n_tokens, index_n_heads, index_head_dim] to match q_indexer structure
+    ggml_tensor * k_reshaped = ggml_reshape_3d(ctx, k_indexer, index_head_dim, index_n_heads, n_tokens);
+    cb(k_reshaped, "indexer_k_reshaped", layer_idx);
+    
+    // Permute k_reshaped to [index_n_heads, n_tokens, index_head_dim]
+    ggml_tensor * k_permuted = ggml_cont(ctx, ggml_permute(ctx, k_reshaped, 1, 2, 0, 3));
+    cb(k_permuted, "indexer_k_permuted", layer_idx);
+    
+    // Reshape k_permuted to [index_n_heads * n_tokens, index_head_dim]
+    ggml_tensor * k_flat = ggml_reshape_2d(ctx, k_permuted, index_head_dim, index_n_heads * n_tokens);
+    cb(k_flat, "indexer_k_flat", layer_idx);
+    
+    // Transpose k_flat to [index_head_dim, index_n_heads * n_tokens] for matrix multiplication
+    ggml_tensor * k_transposed = ggml_cont(ctx, ggml_transpose(ctx, k_flat));
     cb(k_transposed, "indexer_k_transposed", layer_idx);
 
-    // Now compute the dot product
-    ggml_tensor * dot_product = ggml_mul_mat(ctx, q_flat, k_transposed);
+    // Now compute the dot product: q_transposed @ k_transposed
+    // q_transposed: [n_tokens * index_n_heads, index_head_dim] = [M, K]
+    // k_transposed: [index_head_dim, index_n_heads * n_tokens] = [K, N]
+    // Result should be [M, N] = [n_tokens * index_n_heads, index_n_heads * n_tokens]
+    ggml_tensor * dot_product = ggml_mul_mat(ctx, q_transposed, k_transposed);
     cb(dot_product, "indexer_dot_product", layer_idx);
 
     // Apply ReLU activation as per the formula
@@ -95,7 +115,6 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     cb(relu_scores, "indexer_relu_scores", layer_idx);
 
     // Reshape relu_scores to [n_tokens, index_n_heads, n_tokens]
-    const int64_t n_tokens = ggml_nelements(weights) / index_n_heads;
     ggml_tensor * relu_3d = ggml_reshape_3d(ctx, relu_scores, n_tokens, index_n_heads, n_tokens);
     cb(relu_3d, "indexer_relu_3d", layer_idx);
 
@@ -104,8 +123,9 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     cb(relu_permuted, "indexer_relu_permuted", layer_idx);
 
     // Reshape weights to [index_n_heads, n_tokens, 1] for broadcasting
-    ggml_tensor * weights_3d = ggml_reshape_3d(ctx, weights, 1, index_n_heads, n_tokens);
-    weights_3d = ggml_cont(ctx, ggml_permute(ctx, weights_3d, 1, 2, 0, 3)); // [index_n_heads, n_tokens, 1]
+    // weights originally has shape [index_n_heads, n_tokens]
+    ggml_tensor * weights_3d = ggml_reshape_3d(ctx, weights, 1, n_tokens, index_n_heads);
+    weights_3d = ggml_cont(ctx, ggml_permute(ctx, weights_3d, 2, 1, 0, 3)); // [index_n_heads, n_tokens, 1]
     cb(weights_3d, "indexer_weights_3d", layer_idx);
 
     // Multiply ReLU scores by weights: w^I_{t,j} * ReLU(q^I_{t,j} · k^I_s)
@@ -114,9 +134,21 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     cb(weighted_scores, "indexer_weighted_scores", layer_idx);
 
     // Sum across heads to get final importance scores: sum_{j=1}^{H^I}
-    ggml_tensor * token_importance = ggml_sum(ctx, weighted_scores);
+    // weighted_scores has shape [index_n_heads, n_tokens, n_tokens]
+    // We need to sum along dimension 0 (the head dimension)
+    
+    // Permute to [n_tokens, n_tokens, index_n_heads] to make head dimension last
+    ggml_tensor * weighted_permuted = ggml_cont(ctx, ggml_permute(ctx, weighted_scores, 1, 2, 0, 3));
+    cb(weighted_permuted, "weighted_permuted", layer_idx);
+    
+    // Reshape to [n_tokens * n_tokens, index_n_heads]
+    ggml_tensor * weighted_2d = ggml_reshape_2d(ctx, weighted_permuted, index_n_heads, n_tokens * n_tokens);
+    cb(weighted_2d, "weighted_2d", layer_idx);
+    
+    // Sum along columns (head dimension) to get [1, n_tokens * n_tokens]
+    ggml_tensor * token_importance = ggml_sum_rows(ctx, weighted_2d);
     cb(token_importance, "token_importance", layer_idx);
-
+    
     // Reshape to [n_tokens, n_tokens] for compatibility with top-k selection
     token_importance = ggml_reshape_2d(ctx, token_importance, n_tokens, n_tokens);
     cb(token_importance, "token_importance_final", layer_idx);
