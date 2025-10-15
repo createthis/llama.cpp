@@ -99,6 +99,7 @@ struct MockModel {
 // Test the compute_token_importance function
 void test_compute_token_importance() {
     printf("Testing compute_token_importance...\n");
+    fflush(stdout);
     
     TestContext test_ctx;
     MockModel model;
@@ -175,11 +176,13 @@ void test_compute_token_importance() {
             }
         }
         printf("]\n");
+        fflush(stdout);
     };
     
     // Test both lite and non-lite versions
     for (bool is_lite : {false, true}) {
         printf("Testing %s version...\n", is_lite ? "lite" : "non-lite");
+        fflush(stdout);
         
         try {
             ggml_tensor * token_importance = llama::sparse_attn_indexer::compute_token_importance(
@@ -188,20 +191,25 @@ void test_compute_token_importance() {
             if (token_importance) {
                 printf("Success: token_importance tensor created with shape [%ld, %ld]\n", 
                        token_importance->ne[0], token_importance->ne[1]);
+                fflush(stdout);
             } else {
                 printf("Error: token_importance is null\n");
+                fflush(stdout);
             }
         } catch (const std::exception& e) {
             printf("Exception: %s\n", e.what());
+            fflush(stdout);
         }
     }
     
     printf("compute_token_importance test completed\n\n");
+    fflush(stdout);
 }
 
 // Test the select_topk_tokens function
 void test_select_topk_tokens() {
     printf("Testing select_topk_tokens...\n");
+    fflush(stdout);
     
     TestContext test_ctx;
     
@@ -228,6 +236,7 @@ void test_select_topk_tokens() {
             }
         }
         printf("]\n");
+        fflush(stdout);
     };
     
     try {
@@ -237,19 +246,24 @@ void test_select_topk_tokens() {
         if (topk_indices) {
             printf("Success: topk_indices tensor created with shape [%ld, %ld, %ld, %ld]\n", 
                    topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);
+            fflush(stdout);
         } else {
             printf("Error: topk_indices is null\n");
+            fflush(stdout);
         }
     } catch (const std::exception& e) {
         printf("Exception: %s\n", e.what());
+        fflush(stdout);
     }
     
     printf("select_topk_tokens test completed\n\n");
+    fflush(stdout);
 }
 
 // Test the apply_sparse_attention function with simple tensors
 void test_apply_sparse_attention_simple() {
     printf("Testing apply_sparse_attention (simple)...\n");
+    fflush(stdout);
     
     TestContext test_ctx;
     
@@ -300,6 +314,7 @@ void test_apply_sparse_attention_simple() {
             }
         }
         printf("]\n");
+        fflush(stdout);
     };
     
     try {
@@ -309,19 +324,24 @@ void test_apply_sparse_attention_simple() {
         if (result) {
             printf("Success: sparse attention result tensor created with shape [%ld, %ld, %ld]\n", 
                    result->ne[0], result->ne[1], result->ne[2]);
+            fflush(stdout);
         } else {
             printf("Error: result is null\n");
+            fflush(stdout);
         }
     } catch (const std::exception& e) {
         printf("Exception: %s\n", e.what());
+        fflush(stdout);
     }
     
     printf("apply_sparse_attention (simple) test completed\n\n");
+    fflush(stdout);
 }
 
 // Test that reproduces the specific GGML assertion error
 void test_reshape_assertion_fix() {
     printf("Testing reshape assertion fix...\n");
+    fflush(stdout);
     
     TestContext test_ctx;
     
@@ -343,30 +363,37 @@ void test_reshape_assertion_fix() {
     
     printf("Original tensor dimensions: [%ld, %ld, %ld]\n", n_embd_head_val, n_head_kv_val, n_tokens_val);
     printf("Total elements: %ld\n", ggml_nelements(k_cur));
+    fflush(stdout);
     
     // Test reshape to 2D: [n_embd_head, n_head_kv * n_tokens]
     const int64_t ne0 = n_embd_head_val;
     const int64_t ne1 = n_head_kv_val * n_tokens_val;
     
     printf("Attempting reshape to [%ld, %ld] (ne0 * ne1 = %ld)\n", ne0, ne1, ne0 * ne1);
+    fflush(stdout);
     
     if (ggml_nelements(k_cur) == ne0 * ne1) {
         printf("Reshape dimensions match! This should work.\n");
+        fflush(stdout);
         
         // This should work without assertion
         ggml_tensor * k_cur_2d = ggml_reshape_2d(test_ctx.ctx, k_cur, ne0, ne1);
         printf("Reshape successful: new shape [%ld, %ld]\n", k_cur_2d->ne[0], k_cur_2d->ne[1]);
+        fflush(stdout);
     } else {
         printf("ERROR: Reshape dimensions don't match! This will cause assertion.\n");
         printf("Expected %ld elements, but tensor has %ld elements\n", ne0 * ne1, ggml_nelements(k_cur));
+        fflush(stdout);
     }
     
     printf("reshape assertion test completed\n\n");
+    fflush(stdout);
 }
 
 // Test the exact reshape operation that's failing in apply_sparse_attention
 void test_problematic_reshape() {
     printf("Testing the exact problematic reshape operation...\n");
+    fflush(stdout);
     
     TestContext test_ctx;
     
@@ -382,6 +409,7 @@ void test_problematic_reshape() {
     printf("Created Kcur tensor with dimensions: [%ld, %ld, %ld]\n", 
            k_cur->ne[0], k_cur->ne[1], k_cur->ne[2]);
     printf("Total elements: %ld\n", ggml_nelements(k_cur));
+    fflush(stdout);
     
     // This is the exact operation from apply_sparse_attention that's failing
     const int64_t n_embd_head_extracted = k_cur->ne[0];
@@ -390,6 +418,7 @@ void test_problematic_reshape() {
     
     printf("Extracted dimensions: n_embd_head=%ld, n_head_kv=%ld, n_tokens=%ld\n",
            n_embd_head_extracted, n_head_kv_extracted, n_tokens_extracted);
+    fflush(stdout);
     
     // Test the problematic reshape
     const int64_t target_ne0 = n_embd_head_extracted;
@@ -397,17 +426,22 @@ void test_problematic_reshape() {
     
     printf("Attempting to reshape to [%ld, %ld] (expected elements: %ld)\n",
            target_ne0, target_ne1, target_ne0 * target_ne1);
+    fflush(stdout);
     
     if (ggml_nelements(k_cur) == target_ne0 * target_ne1) {
         printf("SUCCESS: Reshape dimensions match!\n");
+        fflush(stdout);
         
         // This should work
         ggml_tensor * k_cur_2d = ggml_reshape_2d(test_ctx.ctx, k_cur, target_ne0, target_ne1);
         printf("Reshape successful: new shape [%ld, %ld]\n", k_cur_2d->ne[0], k_cur_2d->ne[1]);
+        fflush(stdout);
     } else {
         printf("ERROR: Dimension mismatch detected!\n");
+        fflush(stdout);
         printf("Tensor has %ld elements, but reshape expects %ld elements\n",
                ggml_nelements(k_cur), target_ne0 * target_ne1);
+        fflush(stdout);
         
         // Let's debug why this might happen
         printf("Debug info:\n");
@@ -417,14 +451,17 @@ void test_problematic_reshape() {
         printf("  k_cur->ne[3] = %ld\n", k_cur->ne[3]);
         printf("  Product of ne[] = %ld\n", k_cur->ne[0] * k_cur->ne[1] * k_cur->ne[2] * k_cur->ne[3]);
         printf("  ggml_nelements(k_cur) = %ld\n", ggml_nelements(k_cur));
+        fflush(stdout);
     }
     
     printf("problematic reshape test completed\n\n");
+    fflush(stdout);
 }
 
 // Test the fix for the GGML assertion error
 void test_fixed_reshape_operation() {
     printf("Testing the fixed reshape operation...\n");
+    fflush(stdout);
     
     TestContext test_ctx;
     
@@ -439,7 +476,9 @@ void test_fixed_reshape_operation() {
     
     printf("Created Kcur tensor with dimensions: [%ld, %ld, %ld]\n", 
            k_cur->ne[0], k_cur->ne[1], k_cur->ne[2]);
+    fflush(stdout);
     printf("Total elements: %ld\n", ggml_nelements(k_cur));
+    fflush(stdout);
     
     // Extract dimensions from tensor (the fix)
     const int64_t n_embd_head_extracted = k_cur->ne[0];
@@ -449,6 +488,7 @@ void test_fixed_reshape_operation() {
     printf("Extracted dimensions: n_embd_head=%ld, n_head_kv=%ld, actual_n_tokens=%ld\n",
            n_embd_head_extracted, n_head_kv_extracted, actual_n_tokens_extracted);
     printf("Wrong parameter n_tokens would have been: %ld\n", wrong_n_tokens);
+    fflush(stdout);
     
     // Test the fixed reshape operation
     const int64_t target_ne0 = n_embd_head_extracted;
@@ -459,25 +499,31 @@ void test_fixed_reshape_operation() {
     
     if (ggml_nelements(k_cur) == target_ne0 * target_ne1) {
         printf("SUCCESS: Fixed reshape operation works!\n");
+        fflush(stdout);
         
         // This should work with the fix
         ggml_tensor * k_cur_2d = ggml_reshape_2d(test_ctx.ctx, k_cur, target_ne0, target_ne1);
         printf("Reshape successful: new shape [%ld, %ld]\n", k_cur_2d->ne[0], k_cur_2d->ne[1]);
+        fflush(stdout);
         
         // Show what would have happened with the bug
         const int64_t wrong_target_ne1 = n_head_kv_extracted * wrong_n_tokens;
         printf("With the bug (using wrong n_tokens=%ld): expected %ld elements, but tensor has %ld elements\n",
                wrong_n_tokens, target_ne0 * wrong_target_ne1, ggml_nelements(k_cur));
+        fflush(stdout);
     } else {
         printf("ERROR: Fixed reshape operation still fails!\n");
+        fflush(stdout);
     }
     
     printf("fixed reshape operation test completed\n\n");
+    fflush(stdout);
 }
 
 // Main test function
 int main() {
     printf("=== DeepSeek V3.2-Exp Sparse Attention Unit Tests ===\n\n");
+    fflush(stdout);
     
     // Initialize random seed for reproducible tests
     srand(42);
@@ -491,6 +537,7 @@ int main() {
     test_fixed_reshape_operation();
     
     printf("=== All tests completed ===\n");
+    fflush(stdout);
     
     return 0;
 }
