@@ -43,7 +43,7 @@ struct TestContext {
         
         // Create a context with reasonable size and let GGML handle allocation
         ggml_init_params p{};
-        p.mem_size   = 64 * 1024 * 1024; // 16MB
+        p.mem_size   = 100 * 1024 * 1024; // 100MB
         p.mem_buffer = nullptr;
         p.no_alloc   = false; // Let GGML handle allocation
         ctx = ggml_init(p);

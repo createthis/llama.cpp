@@ -3,6 +3,7 @@
 #include "llama-impl.h"
 
 #include <cmath>
+#include <cinttypes>
 
 namespace llama {
 
@@ -83,9 +84,10 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     ggml_tensor * q_flat = ggml_reshape_2d(ctx, q_indexer, index_head_dim, ggml_nelements(q_indexer) / index_head_dim);
     cb(q_flat, "indexer_q_flat", layer_idx);
     
-    // Transpose q_flat to [n_tokens * index_n_heads, index_head_dim] for proper matmul
-    ggml_tensor * q_transposed = ggml_cont(ctx, ggml_transpose(ctx, q_flat));
-    cb(q_transposed, "indexer_q_transposed", layer_idx);
+    // Reshape q_flat to [index_head_dim, n_tokens * index_n_heads] for GGML matrix multiplication
+    // GGML expects the inner dimension (index_head_dim) to be the first dimension
+    ggml_tensor * q_reshaped = ggml_reshape_2d(ctx, q_flat, index_head_dim, n_tokens * index_n_heads);
+    cb(q_reshaped, "indexer_q_reshaped", layer_idx);
 
     // Reshape k_indexer to [n_tokens, index_n_heads, index_head_dim] to match q_indexer structure
     ggml_tensor * k_reshaped = ggml_reshape_3d(ctx, k_indexer, index_head_dim, index_n_heads, n_tokens);
@@ -95,32 +97,56 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     ggml_tensor * k_permuted = ggml_cont(ctx, ggml_permute(ctx, k_reshaped, 1, 2, 0, 3));
     cb(k_permuted, "indexer_k_permuted", layer_idx);
     
-    // Reshape k_permuted to [index_n_heads * n_tokens, index_head_dim]
-    ggml_tensor * k_flat = ggml_reshape_2d(ctx, k_permuted, index_head_dim, index_n_heads * n_tokens);
-    cb(k_flat, "indexer_k_flat", layer_idx);
-    
-    // Transpose k_flat to [index_head_dim, index_n_heads * n_tokens] for matrix multiplication
-    ggml_tensor * k_transposed = ggml_cont(ctx, ggml_transpose(ctx, k_flat));
-    cb(k_transposed, "indexer_k_transposed", layer_idx);
+    // Reshape k_permuted to [index_head_dim, index_n_heads * n_tokens] for matrix multiplication
+    ggml_tensor * k_reshaped_2 = ggml_reshape_2d(ctx, k_permuted, index_head_dim, index_n_heads * n_tokens);
+    cb(k_reshaped_2, "indexer_k_reshaped_2", layer_idx);
 
-    // Now compute the dot product: q_transposed @ k_transposed
-    // q_transposed: [n_tokens * index_n_heads, index_head_dim] = [M, K]
-    // k_transposed: [index_head_dim, index_n_heads * n_tokens] = [K, N]
-    // Result should be [M, N] = [n_tokens * index_n_heads, index_n_heads * n_tokens]
-    ggml_tensor * dot_product = ggml_mul_mat(ctx, q_transposed, k_transposed);
+    // Now compute the dot product using GGML matrix multiplication
+    // GGML mul_mat does: result[I,J,K] = sum_L A[L,I,K] * B[L,J,K]
+    // We want: dot_product[i,j] = sum_k q[i,k] * k[k,j]
+    // So we need:
+    // - A (q_reshaped): [index_head_dim, n_tokens * index_n_heads] = [K, M]
+    // - B (k_reshaped_2): [index_head_dim, index_n_heads * n_tokens] = [K, N]  
+    // - Result: [n_tokens * index_n_heads, index_n_heads * n_tokens] = [M, N]
+    ggml_tensor * dot_product = ggml_mul_mat(ctx, q_reshaped, k_reshaped_2);
     cb(dot_product, "indexer_dot_product", layer_idx);
 
     // Apply ReLU activation as per the formula
     ggml_tensor * relu_scores = ggml_relu(ctx, dot_product);
     cb(relu_scores, "indexer_relu_scores", layer_idx);
 
-    // Reshape relu_scores to [n_tokens, index_n_heads, n_tokens]
-    ggml_tensor * relu_3d = ggml_reshape_3d(ctx, relu_scores, n_tokens, index_n_heads, n_tokens);
-    cb(relu_3d, "indexer_relu_3d", layer_idx);
+    // Reshape relu_scores to [n_tokens, index_n_heads, n_tokens, index_n_heads]
+    // dot_product has shape [n_tokens * index_n_heads, index_n_heads * n_tokens] = [1088, 1088]
+    // We want to reshape to [n_tokens, index_n_heads, n_tokens, index_n_heads] = [17, 64, 17, 64]
+    // Check if the reshape is possible
+    if (ggml_nelements(relu_scores) != n_tokens * index_n_heads * n_tokens * index_n_heads) {
+        printf("Error: Cannot reshape relu_scores from [%" PRId64 ", %" PRId64 "] to [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
+               relu_scores->ne[0], relu_scores->ne[1], n_tokens, index_n_heads, n_tokens, index_n_heads);
+        printf("Expected %" PRId64 " elements, but have %" PRId64 " elements\n",
+               n_tokens * index_n_heads * n_tokens * index_n_heads, ggml_nelements(relu_scores));
+        return nullptr;
+    }
+    
+    // First reshape to 4D: [n_tokens, index_n_heads, n_tokens, index_n_heads]
+    ggml_tensor * relu_4d = ggml_reshape_4d(ctx, relu_scores, n_tokens, index_n_heads, n_tokens, index_n_heads);
+    cb(relu_4d, "indexer_relu_4d", layer_idx);
 
-    // Permute to [index_n_heads, n_tokens, n_tokens]
-    ggml_tensor * relu_permuted = ggml_cont(ctx, ggml_permute(ctx, relu_3d, 1, 0, 2, 3));
+    // Now we need to sum over the last dimension (index_n_heads) to get [n_tokens, index_n_heads, n_tokens]
+    // Permute to [index_n_heads, n_tokens, index_n_heads, n_tokens] to make the reduction dimension last
+    ggml_tensor * relu_permuted = ggml_cont(ctx, ggml_permute(ctx, relu_4d, 1, 0, 3, 2));
     cb(relu_permuted, "indexer_relu_permuted", layer_idx);
+    
+    // Reshape to [n_tokens * index_n_heads * n_tokens, index_n_heads] for reduction
+    ggml_tensor * relu_2d = ggml_reshape_2d(ctx, relu_permuted, index_n_heads, n_tokens * index_n_heads * n_tokens);
+    cb(relu_2d, "indexer_relu_2d", layer_idx);
+    
+    // Sum over the head dimension to get [1, n_tokens * index_n_heads * n_tokens]
+    ggml_tensor * relu_reduced = ggml_sum_rows(ctx, relu_2d);
+    cb(relu_reduced, "indexer_relu_reduced", layer_idx);
+    
+    // Reshape back to [n_tokens, index_n_heads, n_tokens]
+    ggml_tensor * relu_3d = ggml_reshape_3d(ctx, relu_reduced, n_tokens, index_n_heads, n_tokens);
+    cb(relu_3d, "indexer_relu_3d", layer_idx);
 
     // Reshape weights to [index_n_heads, n_tokens, 1] for broadcasting
     // weights originally has shape [index_n_heads, n_tokens]
@@ -134,23 +160,38 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     cb(weighted_scores, "indexer_weighted_scores", layer_idx);
 
     // Sum across heads to get final importance scores: sum_{j=1}^{H^I}
-    // weighted_scores has shape [index_n_heads, n_tokens, n_tokens]
-    // We need to sum along dimension 0 (the head dimension)
+    // weighted_scores has shape [index_n_heads, n_tokens, index_n_heads, n_tokens]
+    // We need to sum along the first head dimension (dimension 0)
     
-    // Permute to [n_tokens, n_tokens, index_n_heads] to make head dimension last
-    ggml_tensor * weighted_permuted = ggml_cont(ctx, ggml_permute(ctx, weighted_scores, 1, 2, 0, 3));
-    cb(weighted_permuted, "weighted_permuted", layer_idx);
+    // The simplest approach: reshape to [index_n_heads, n_tokens * n_tokens * index_n_heads] and sum
+    // Then reshape back to [n_tokens, n_tokens]
     
-    // Reshape to [n_tokens * n_tokens, index_n_heads]
-    ggml_tensor * weighted_2d = ggml_reshape_2d(ctx, weighted_permuted, index_n_heads, n_tokens * n_tokens);
+    // Check if the reshape is possible
+    if (ggml_nelements(weighted_scores) != index_n_heads * n_tokens * n_tokens * index_n_heads) {
+        printf("Error: Cannot reshape weighted_scores to [index_n_heads, n_tokens * n_tokens * index_n_heads]\n");
+        printf("Expected %" PRId64 " elements, but have %" PRId64 " elements\n",
+               index_n_heads * n_tokens * n_tokens * index_n_heads, ggml_nelements(weighted_scores));
+        return nullptr;
+    }
+    
+    // Reshape to [index_n_heads, n_tokens * n_tokens * index_n_heads] for reduction
+    ggml_tensor * weighted_2d = ggml_reshape_2d(ctx, weighted_scores, n_tokens * n_tokens * index_n_heads, index_n_heads);
     cb(weighted_2d, "weighted_2d", layer_idx);
     
-    // Sum along columns (head dimension) to get [1, n_tokens * n_tokens]
-    ggml_tensor * token_importance = ggml_sum_rows(ctx, weighted_2d);
-    cb(token_importance, "token_importance", layer_idx);
+    // Sum along columns (head dimension) to get [1, n_tokens * n_tokens * index_n_heads]
+    ggml_tensor * token_importance_sum = ggml_sum_rows(ctx, weighted_2d);
+    cb(token_importance_sum, "token_importance_sum", layer_idx);
     
     // Reshape to [n_tokens, n_tokens] for compatibility with top-k selection
-    token_importance = ggml_reshape_2d(ctx, token_importance, n_tokens, n_tokens);
+    // We need to check if this reshape is possible
+    if (ggml_nelements(token_importance_sum) != n_tokens * n_tokens) {
+        printf("Error: Cannot reshape token_importance_sum to [n_tokens, n_tokens]\n");
+        printf("Expected %" PRId64 " elements, but have %" PRId64 " elements\n",
+               n_tokens * n_tokens, ggml_nelements(token_importance_sum));
+        return nullptr;
+    }
+    
+    ggml_tensor * token_importance = ggml_reshape_2d(ctx, token_importance_sum, n_tokens, n_tokens);
     cb(token_importance, "token_importance_final", layer_idx);
 
     return token_importance;
