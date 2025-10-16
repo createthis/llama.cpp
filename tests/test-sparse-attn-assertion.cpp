@@ -46,6 +46,13 @@ struct TestContext {
     }
 };
 
+// Function declarations
+llama_model* create_test_model(TestContext & test_ctx, int num_layers);
+void cleanup_test_model(llama_model* model);
+void test_assertion_error_reproduction();
+void test_problematic_reshape_operation();
+void test_various_token_counts();
+
 // Helper function to create a minimal llama_model instance for testing
 llama_model* create_test_model(TestContext & test_ctx, int num_layers = 1) {
     // Create model parameters with default values
