@@ -57,7 +57,7 @@ struct TestContext {
 
 // Helper function to create a minimal llama_model instance for testing
 // This creates a real llama_model instance and populates the sparse attention tensors
-llama_model* create_test_model(TestContext & test_ctx, int num_layers = 1) {
+static llama_model* create_test_model(TestContext & test_ctx, int num_layers = 1) {
     // Create model parameters with default values
     llama_model_params params = llama_model_default_params();
     
@@ -134,7 +134,7 @@ llama_model* create_test_model(TestContext & test_ctx, int num_layers = 1) {
 }
 
 // Helper function to cleanup the test model
-void cleanup_test_model(llama_model* model) {
+static void cleanup_test_model(llama_model* model) {
     if (model) {
         delete model;
     }
