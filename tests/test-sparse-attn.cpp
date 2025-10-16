@@ -10,6 +10,8 @@
 #include <ggml-impl.h>
 #include <ggml.h>
 
+#include <cassert>
+
 // Include llama.h for model parameter functions
 #include "../include/llama.h"
 
@@ -323,7 +325,15 @@ void test_apply_sparse_attention_simple() {
         ggml_tensor * result = llama::sparse_mla_fwd::apply_sparse_attention(
             test_ctx.ctx, q_cur, k_cur, v_cur, topk_indices, n_tokens, top_k, cb);
         
+        // Verify the shapes are correct in the test (only in test builds)
         if (result) {
+            // Validate the final result shape
+            assert(result->ne[0] == n_embd_head);
+            assert(result->ne[1] == n_head_q);
+            assert(result->ne[2] == n_tokens);
+            assert(ggml_nelements(result) == n_embd_head * n_head_q * n_tokens);
+            printf("Shape validation passed: result tensor has correct dimensions\n");
+            
             printf("Success: sparse attention result tensor created with shape [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
                    result->ne[0], result->ne[1], result->ne[2]);
             fflush(stdout);

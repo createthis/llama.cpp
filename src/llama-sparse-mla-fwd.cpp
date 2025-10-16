@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cinttypes>
-#include <cassert>
 
 namespace llama {
 
@@ -79,12 +78,6 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     ggml_tensor * v_sparse = ggml_view_3d(ctx, v_sparse_4d, n_embd_head, n_head_kv, top_k,
                                          v_sparse_4d->nb[1], v_sparse_4d->nb[2], 0);
     cb(v_sparse, "v_sparse", -1);
-    
-    // Verify the shapes are correct
-    assert(k_sparse->ne[0] == n_embd_head);
-    assert(k_sparse->ne[1] == n_head_kv);
-    assert(k_sparse->ne[2] == top_k);
-    assert(ggml_nelements(k_sparse) == n_embd_head * n_head_kv * top_k);
     
     // Make sure the tensors are contiguous
     k_sparse = ggml_cont(ctx, k_sparse);
