@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cinttypes>
+#include <cassert>
 
 namespace llama {
 
@@ -34,51 +35,60 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     const int64_t actual_n_tokens_q = q_cur->ne[2]; // Extract actual n_tokens from query tensor
     
     // Reshape key and value tensors to prepare for sparse selection
-    // We need to flatten the tensors so tokens become rows for ggml_get_rows
+    // We need to reshape the tensors so tokens become rows for ggml_get_rows
     
-    // Reshape k_cur to [n_embd_head * n_head_kv, actual_n_tokens]
-    ggml_tensor * k_cur_flat = ggml_reshape_2d(ctx, k_cur, n_embd_head * n_head_kv, actual_n_tokens);
-    cb(k_cur_flat, "k_cur_flat", -1);
+    // Reshape k_cur to 4D: [n_embd_head * n_head_kv, actual_n_tokens, 1, 1]
+    // This format is required for ggml_get_rows
+    ggml_tensor * k_cur_4d = ggml_reshape_4d(ctx, k_cur, n_embd_head * n_head_kv, actual_n_tokens, 1, 1);
+    cb(k_cur_4d, "k_cur_4d", -1);
     
-    ggml_tensor * v_cur_flat = ggml_reshape_2d(ctx, v_cur, n_embd_head * n_head_kv, actual_n_tokens);
-    cb(v_cur_flat, "v_cur_flat", -1);
+    ggml_tensor * v_cur_4d = ggml_reshape_4d(ctx, v_cur, n_embd_head * n_head_kv, actual_n_tokens, 1, 1);
+    cb(v_cur_4d, "v_cur_4d", -1);
     
-    // Reshape to 4D tensors for ggml_get_rows which expects 4D inputs
-    ggml_tensor * k_cur_4d = ggml_reshape_4d(ctx, k_cur_flat, n_embd_head * n_head_kv, actual_n_tokens, 1, 1);
-    ggml_tensor * v_cur_4d = ggml_reshape_4d(ctx, v_cur_flat, n_embd_head * n_head_kv, actual_n_tokens, 1, 1);
+    // Prepare the indices tensor for ggml_get_rows
+    // ggml_get_rows expects indices to have shape [n_rows, ne2, ne3, 1]
+    // where ne2 == a->ne[2] and ne3 == a->ne[3]
+    // Our topk_indices has shape [top_k, 1, 1, 1], so we need to reshape it to [top_k, 1, 1, 1]
+    // but first ensure it's the right type
     
-    // Transpose to [actual_n_tokens, n_embd_head * n_head_kv] so tokens become rows
-    ggml_tensor * k_cur_transposed = ggml_cont(ctx, ggml_transpose(ctx, k_cur_4d));
-    cb(k_cur_transposed, "k_cur_transposed", -1);
+    // Convert indices to I32 if needed
+    ggml_tensor * indices_i32 = topk_indices;
+    if (topk_indices->type != GGML_TYPE_I32) {
+        indices_i32 = ggml_cast(ctx, topk_indices, GGML_TYPE_I32);
+        cb(indices_i32, "indices_i32", -1);
+    }
     
-    ggml_tensor * v_cur_transposed = ggml_cont(ctx, ggml_transpose(ctx, v_cur_4d));
-    cb(v_cur_transposed, "v_cur_transposed", -1);
+    // Reshape indices to [top_k, 1, 1, 1] for ggml_get_rows
+    ggml_tensor * indices_4d = ggml_reshape_4d(ctx, indices_i32, top_k, 1, 1, 1);
+    cb(indices_4d, "indices_4d", -1);
     
-    // Instead of using ggml_get_rows (which has complex dimension requirements),
-    // we'll manually select the sparse tokens using a simpler approach
+    // Use ggml_get_rows to select the sparse tokens
+    // This will select rows from k_cur_4d based on the indices
+    ggml_tensor * k_sparse_4d = ggml_get_rows(ctx, k_cur_4d, indices_4d);
+    cb(k_sparse_4d, "k_sparse_4d", -1);
     
-    // Extract the indices as a 1D array
-    ggml_tensor * indices_1d = ggml_reshape_1d(ctx, topk_indices, top_k);
-    cb(indices_1d, "indices_1d", -1);
+    ggml_tensor * v_sparse_4d = ggml_get_rows(ctx, v_cur_4d, indices_4d);
+    cb(v_sparse_4d, "v_sparse_4d", -1);
     
-    // For now, let's implement a simplified version that just uses the first 'top_k' tokens
-    // This is a temporary implementation to get the test working
-    
-    // Create sparse key and value tensors by taking the first 'top_k' tokens
-    ggml_tensor * k_sparse_flat = ggml_view_2d(ctx, k_cur_flat, n_embd_head * n_head_kv, top_k, 
-                                               k_cur_flat->nb[1], 0);
-    cb(k_sparse_flat, "k_sparse_flat", -1);
-    
-    ggml_tensor * v_sparse_flat = ggml_view_2d(ctx, v_cur_flat, n_embd_head * n_head_kv, top_k, 
-                                               v_cur_flat->nb[1], 0);
-    cb(v_sparse_flat, "v_sparse_flat", -1);
-    
-    // Reshape back to the original head dimensions [n_embd_head, n_head_kv, top_k]
-    ggml_tensor * k_sparse = ggml_reshape_3d(ctx, k_sparse_flat, n_embd_head, n_head_kv, top_k);
-    ggml_tensor * v_sparse = ggml_reshape_3d(ctx, v_sparse_flat, n_embd_head, n_head_kv, top_k);
-    
+    // The result of ggml_get_rows has shape [n_embd_head * n_head_kv, top_k, 1, 1]
+    // Use view to create a 3D tensor with the correct dimensions
+    ggml_tensor * k_sparse = ggml_view_3d(ctx, k_sparse_4d, n_embd_head, n_head_kv, top_k,
+                                         k_sparse_4d->nb[1], k_sparse_4d->nb[2], 0);
     cb(k_sparse, "k_sparse", -1);
+    
+    ggml_tensor * v_sparse = ggml_view_3d(ctx, v_sparse_4d, n_embd_head, n_head_kv, top_k,
+                                         v_sparse_4d->nb[1], v_sparse_4d->nb[2], 0);
     cb(v_sparse, "v_sparse", -1);
+    
+    // Verify the shapes are correct
+    assert(k_sparse->ne[0] == n_embd_head);
+    assert(k_sparse->ne[1] == n_head_kv);
+    assert(k_sparse->ne[2] == top_k);
+    assert(ggml_nelements(k_sparse) == n_embd_head * n_head_kv * top_k);
+    
+    // Make sure the tensors are contiguous
+    k_sparse = ggml_cont(ctx, k_sparse);
+    v_sparse = ggml_cont(ctx, v_sparse);
     
     // Compute attention scores with sparse keys
     // Reshape q_cur to [n_embd_head_q, n_head_q * actual_n_tokens_q]
