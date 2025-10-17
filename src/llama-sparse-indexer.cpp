@@ -163,22 +163,19 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     // weighted_scores has shape [index_n_heads, n_tokens, index_n_heads, n_tokens]
     // We need to sum along the first head dimension (dimension 0)
     
-    // The simplest approach: reshape to [index_n_heads, n_tokens * n_tokens * index_n_heads] and sum
-    // Then reshape back to [n_tokens, n_tokens]
+    // The correct approach: we need to sum over the head dimensions to get [n_tokens, n_tokens]
+    // weighted_scores has shape [index_n_heads, n_tokens, index_n_heads, n_tokens]
+    // After summing over both head dimensions, we should get [n_tokens, n_tokens]
     
-    // Check if the reshape is possible
-    if (ggml_nelements(weighted_scores) != index_n_heads * n_tokens * n_tokens * index_n_heads) {
-        printf("Error: Cannot reshape weighted_scores to [index_n_heads, n_tokens * n_tokens * index_n_heads]\n");
-        printf("Expected %" PRId64 " elements, but have %" PRId64 " elements\n",
-               index_n_heads * n_tokens * n_tokens * index_n_heads, ggml_nelements(weighted_scores));
-        return nullptr;
-    }
+    // First, permute to bring the token dimensions together: [n_tokens, n_tokens, index_n_heads, index_n_heads]
+    ggml_tensor * weighted_permuted = ggml_cont(ctx, ggml_permute(ctx, weighted_scores, 1, 3, 0, 2));
+    cb(weighted_permuted, "weighted_permuted", layer_idx);
     
-    // Reshape to [index_n_heads, n_tokens * n_tokens * index_n_heads] for reduction
-    ggml_tensor * weighted_2d = ggml_reshape_2d(ctx, weighted_scores, n_tokens * n_tokens * index_n_heads, index_n_heads);
+    // Reshape to [n_tokens * n_tokens, index_n_heads * index_n_heads] for reduction
+    ggml_tensor * weighted_2d = ggml_reshape_2d(ctx, weighted_permuted, index_n_heads * index_n_heads, n_tokens * n_tokens);
     cb(weighted_2d, "weighted_2d", layer_idx);
     
-    // Sum along columns (head dimension) to get [1, n_tokens * n_tokens * index_n_heads]
+    // Sum along rows (head dimensions) to get [1, n_tokens * n_tokens]
     ggml_tensor * token_importance_sum = ggml_sum_rows(ctx, weighted_2d);
     cb(token_importance_sum, "token_importance_sum", layer_idx);
     
@@ -192,7 +189,12 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     }
     
     ggml_tensor * token_importance = ggml_reshape_2d(ctx, token_importance_sum, n_tokens, n_tokens);
-    cb(token_importance, "token_importance_final", layer_idx);
+    if (token_importance) {
+        cb(token_importance, "token_importance_final", layer_idx);
+    } else {
+        printf("Error: token_importance is null after reshape\n");
+        return nullptr;
+    }
 
     return token_importance;
 }
