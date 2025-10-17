@@ -13746,6 +13746,31 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     LLM_NORM_RMS, il);
             cb(cur, "attn_norm", il);
 
+            // Sparse attention indexer for DeepSeek V3.2
+            // This should be computed BEFORE the regular attention using the normalized hidden state
+            ggml_tensor * token_importance = nullptr;
+            ggml_tensor * topk_indices = nullptr;
+            bool use_sparse_attention = false;
+            int64_t top_k = 0;
+            auto cb_wrapper = [this](ggml_tensor * cur, const char * name, int il) {
+                this->cb(cur, name, il);
+            };
+            
+            if (model.layers[il].attn_indexer_k_norm != nullptr) {
+                // Use the new sparse attention implementation for indexer computation
+                
+                token_importance = llama::sparse_attn_indexer::compute_token_importance(
+                    ctx0, model, il, cur, is_lite, cb_wrapper);
+                
+                top_k = (64 < n_tokens) ? 64 : n_tokens;  // Use top-64 tokens for sparse attention
+                
+                topk_indices = llama::sparse_attn_topk::select_topk_tokens(
+                    ctx0, token_importance, n_tokens, cb_wrapper);
+                
+                // Check if we should use sparse attention (only when we have valid indices)
+                use_sparse_attention = (top_k > 0) && (top_k < n_tokens);
+            }
+
             // self_attention
             {
                 ggml_tensor * q = NULL;
@@ -13850,10 +13875,25 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     Vcur = kv_cmpr;
                     cb(Vcur, "Vcur", il);
 
-                    // note: MLA with the absorption optimzation converts into MQA (ie: GQA with 1 group)
-                    cur = build_attn(inp_attn,
-                            model.layers[il].wo, NULL,
-                            Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, kq_scale, il);
+                    // Apply sparse attention if available, otherwise use regular attention
+                    if (use_sparse_attention) {
+                        // Use sparse attention with top-k tokens
+                        cur = llama::sparse_mla_fwd::apply_sparse_attention(
+                            ctx0, Qcur, Kcur, Vcur, topk_indices, n_tokens, top_k, cb_wrapper);
+                        
+                        // Apply output projection for sparse attention
+                        cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur);
+                        cb(cur, "sparse_attn_out", il);
+                        
+                        // Log that we're using sparse attention
+                        LLAMA_LOG_INFO("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d", 
+                                      (int)top_k, il);
+                    } else {
+                        // note: MLA with the absorption optimzation converts into MQA (ie: GQA with 1 group)
+                        cur = build_attn(inp_attn,
+                                model.layers[il].wo, NULL,
+                                Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, kq_scale, il);
+                    }
                 } else {
                     ggml_tensor * kv = ggml_mul_mat(ctx0, model.layers[il].wkv_b, kv_cmpr);
                     cb(kv, "kv", il);
@@ -13884,73 +13924,27 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     Kcur = ggml_concat(ctx0, ggml_repeat(ctx0, k_pe, q_pe), k_nope, 0);
                     cb(Kcur, "Kcur", il);
 
-                    // note: MLA without the absorption optimization converts into MHA (ie: GQA with full n_head groups)
-                    cur = build_attn(inp_attn,
-                            model.layers[il].wo, NULL,
-                            Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
-                }
-
-                // Sparse attention indexer for DeepSeek V3.2
-                if (model.layers[il].attn_indexer_k_norm != nullptr) {
-                    // Use the new sparse attention implementation for indexer computation
-                    auto cb_wrapper = [this](ggml_tensor * cur, const char * name, int il) {
-                        this->cb(cur, name, il);
-                    };
-                    
-                    ggml_tensor * token_importance = llama::sparse_attn_indexer::compute_token_importance(
-                        ctx0, model, il, cur, is_lite, cb_wrapper);
-                    
-                    const int64_t top_k = (64 < n_tokens) ? 64 : n_tokens;  // Use top-64 tokens for sparse attention
-                    
-                    ggml_tensor * topk_indices = llama::sparse_attn_topk::select_topk_tokens(
-                        ctx0, token_importance, n_tokens, cb_wrapper);
-                    
-                    // Check if we should use sparse attention (only when we have valid indices)
-                    bool use_sparse_attention = (top_k > 0) && (top_k < n_tokens);
-                    
+                    // Apply sparse attention if available, otherwise use regular attention
                     if (use_sparse_attention) {
                         // Use sparse attention with top-k tokens
                         cur = llama::sparse_mla_fwd::apply_sparse_attention(
                             ctx0, Qcur, Kcur, Vcur, topk_indices, n_tokens, top_k, cb_wrapper);
                         
                         // Apply output projection for sparse attention
-                        if (is_mla) {
-                            // MLA with absorption optimization
-                            cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur);
-                            if (model.layers[il].wv_b != nullptr) {
-                                cur = ggml_add(ctx0, cur, model.layers[il].wv_b);
-                            }
-                        } else {
-                            // Regular MHA
-                            cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur);
-                        }
+                        cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur);
                         cb(cur, "sparse_attn_out", il);
                         
                         // Log that we're using sparse attention
                         LLAMA_LOG_INFO("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d", 
                                       (int)top_k, il);
                     } else {
-                        // Fall back to regular dense attention
-                        if (is_mla) {
-                            // MLA with absorption optimization
-                            cur = build_attn(inp_attn,
-                                    model.layers[il].wo, NULL,
-                                    Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, kq_scale, il);
-                        } else {
-                            // Regular MHA
-                            cur = build_attn(inp_attn,
-                                    model.layers[il].wo, NULL,
-                                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
-                        }
-                        cb(cur, "dense_attn_out", il);
-                        
-                        if (top_k >= n_tokens) {
-                            LLAMA_LOG_INFO("DeepSeek V3.2: Using dense attention (top-k >= n_tokens) for layer %d", il);
-                        } else {
-                            LLAMA_LOG_INFO("DeepSeek V3.2: Using dense attention (fallback) for layer %d", il);
-                        }
+                        // note: MLA without the absorption optimization converts into MHA (ie: GQA with full n_head groups)
+                        cur = build_attn(inp_attn,
+                                model.layers[il].wo, NULL,
+                                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
                     }
                 }
+
             }
 
             if (il == n_layer - 1 && inp_out_ids) {
