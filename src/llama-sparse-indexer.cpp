@@ -64,19 +64,17 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     // Get n_tokens from the weights tensor (moved from later in the function)
     const int64_t n_tokens = ggml_nelements(weights) / index_n_heads;
     
-    // Reshape q_indexer to [n_tokens, index_n_heads, index_head_dim]
-    // q_indexer should have shape [n_tokens, index_n_heads * index_head_dim]
-    q_indexer = ggml_reshape_3d(ctx, q_indexer, index_head_dim, index_n_heads, ggml_nelements(q_indexer) / (index_head_dim * index_n_heads));
+    // Reshape q_indexer to [index_head_dim, index_n_heads, n_tokens]
+    // q_indexer should have shape [index_n_heads * index_head_dim, n_tokens] from matrix multiplication
+    q_indexer = ggml_reshape_3d(ctx, q_indexer, index_head_dim, index_n_heads, n_tokens);
     cb(q_indexer, "indexer_q_reshape", layer_idx);
 
-    // Reshape k_indexer to [n_tokens, index_head_dim] for compatibility
-    // k_indexer should have shape [n_tokens, index_head_dim * index_n_heads]
-    k_indexer = ggml_reshape_2d(ctx, k_indexer, index_head_dim * index_n_heads, ggml_nelements(k_indexer) / (index_head_dim * index_n_heads));
+    // Reshape k_indexer to [index_head_dim * index_n_heads, n_tokens]
+    // k_indexer should have shape [index_head_dim * index_n_heads, n_tokens] from matrix multiplication
+    k_indexer = ggml_reshape_2d(ctx, k_indexer, index_head_dim * index_n_heads, n_tokens);
     cb(k_indexer, "indexer_k_reshape", layer_idx);
 
     // Compute the dot product between q_indexer and k_indexer
-    // q_indexer: [n_tokens, index_n_heads, index_head_dim]
-    // k_indexer: [n_tokens, index_head_dim * index_n_heads]
     
     // Simple approach: reshape both to compatible 2D shapes and compute dot product
     
@@ -89,7 +87,7 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     ggml_tensor * q_reshaped = ggml_reshape_2d(ctx, q_flat, index_head_dim, n_tokens * index_n_heads);
     cb(q_reshaped, "indexer_q_reshaped", layer_idx);
 
-    // Reshape k_indexer to [n_tokens, index_n_heads, index_head_dim] to match q_indexer structure
+    // Reshape k_indexer to [index_head_dim, index_n_heads, n_tokens] to match q_indexer structure
     ggml_tensor * k_reshaped = ggml_reshape_3d(ctx, k_indexer, index_head_dim, index_n_heads, n_tokens);
     cb(k_reshaped, "indexer_k_reshaped", layer_idx);
     
