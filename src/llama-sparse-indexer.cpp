@@ -103,6 +103,8 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     // q_indexer should have shape [index_n_heads * index_head_dim, n_tokens] from matrix multiplication
     q_indexer = ggml_reshape_3d(ctx, q_indexer, index_n_heads, index_head_dim, n_tokens);
     cb(q_indexer, "indexer_q_reshape", layer_idx);
+    printf("SPARSE INDEXER: after reshape\n"); 
+    fflush(stdout);
 
     // Reshape k_indexer to [index_head_dim, n_tokens]
     k_indexer = ggml_reshape_2d(ctx, k_indexer, index_head_dim, n_tokens);
