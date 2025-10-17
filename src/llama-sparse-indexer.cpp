@@ -101,9 +101,17 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     
     // Reshape q_indexer to [index_n_heads, index_head_dim, n_tokens]
     // q_indexer should have shape [index_n_heads * index_head_dim, n_tokens] from matrix multiplication
+    printf("SPARSE INDEXER: Before reshape - q_indexer shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           q_indexer->ne[0], q_indexer->ne[1], q_indexer->ne[2], q_indexer->ne[3]);
+    printf("SPARSE INDEXER: Before reshape - q_indexer total elements: %" PRId64 "\n", ggml_nelements(q_indexer));
+    printf("SPARSE INDEXER: Reshape target: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", index_n_heads, index_head_dim, n_tokens);
+    printf("SPARSE INDEXER: Expected elements after reshape: %" PRId64 "\n", index_n_heads * index_head_dim * n_tokens);
+    fflush(stdout);
+    
     q_indexer = ggml_reshape_3d(ctx, q_indexer, index_n_heads, index_head_dim, n_tokens);
     cb(q_indexer, "indexer_q_reshape", layer_idx);
-    printf("SPARSE INDEXER: after reshape\n"); 
+    printf("SPARSE INDEXER: After reshape - q_indexer shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           q_indexer->ne[0], q_indexer->ne[1], q_indexer->ne[2], q_indexer->ne[3]);
     fflush(stdout);
 
     // Reshape k_indexer to [index_head_dim, n_tokens]
@@ -116,10 +124,17 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     // Permute q_indexer to [index_head_dim, index_n_heads, n_tokens]
     ggml_tensor * q_permuted = ggml_cont(ctx, ggml_permute(ctx, q_indexer, 1, 0, 2, 3));
     cb(q_permuted, "indexer_q_permuted", layer_idx);
+    printf("SPARSE INDEXER: After permute - q_permuted shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           q_permuted->ne[0], q_permuted->ne[1], q_permuted->ne[2], q_permuted->ne[3]);
+    fflush(stdout);
     
     // Reshape q_permuted to [index_head_dim, index_n_heads * n_tokens]
     ggml_tensor * q_reshaped = ggml_reshape_2d(ctx, q_permuted, index_head_dim, index_n_heads * n_tokens);
     cb(q_reshaped, "indexer_q_reshaped", layer_idx);
+    printf("SPARSE INDEXER: After reshape 2d - q_reshaped shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           q_reshaped->ne[0], q_reshaped->ne[1], q_reshaped->ne[2], q_reshaped->ne[3]);
+    printf("SPARSE INDEXER: q_reshaped total elements: %" PRId64 "\n", ggml_nelements(q_reshaped));
+    fflush(stdout);
     
     // Reshape k_indexer to [index_head_dim, n_tokens] (already done)
     ggml_tensor * k_reshaped = k_indexer;
@@ -129,6 +144,9 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     // This gives us the dot product for each (head, query_token) pair with each key_token
     ggml_tensor * dot_product = ggml_mul_mat(ctx, q_reshaped, k_reshaped);
     cb(dot_product, "indexer_dot_product", layer_idx);
+    printf("SPARSE INDEXER: After dot product - dot_product shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           dot_product->ne[0], dot_product->ne[1], dot_product->ne[2], dot_product->ne[3]);
+    fflush(stdout);
     
     // Apply ReLU activation
     ggml_tensor * relu_scores = ggml_relu(ctx, dot_product);
@@ -137,20 +155,32 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     // Reshape relu_scores to [index_n_heads, n_tokens, n_tokens]
     ggml_tensor * relu_3d = ggml_reshape_3d(ctx, relu_scores, n_tokens, index_n_heads, n_tokens);
     cb(relu_3d, "indexer_relu_3d", layer_idx);
+    printf("SPARSE INDEXER: After relu reshape - relu_3d shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           relu_3d->ne[0], relu_3d->ne[1], relu_3d->ne[2], relu_3d->ne[3]);
+    fflush(stdout);
     
     // Permute to [index_n_heads, n_tokens, n_tokens] for weight multiplication
     ggml_tensor * relu_permuted = ggml_cont(ctx, ggml_permute(ctx, relu_3d, 1, 0, 2, 3));
     cb(relu_permuted, "indexer_relu_permuted", layer_idx);
+    printf("SPARSE INDEXER: After relu permute - relu_permuted shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           relu_permuted->ne[0], relu_permuted->ne[1], relu_permuted->ne[2], relu_permuted->ne[3]);
+    fflush(stdout);
     
     // Reshape weights to [index_n_heads, n_tokens, 1] for broadcasting
     ggml_tensor * weights_3d = ggml_reshape_3d(ctx, weights, 1, n_tokens, index_n_heads);
     weights_3d = ggml_cont(ctx, ggml_permute(ctx, weights_3d, 2, 1, 0, 3)); // [index_n_heads, n_tokens, 1]
     cb(weights_3d, "indexer_weights_3d", layer_idx);
+    printf("SPARSE INDEXER: After weights reshape - weights_3d shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           weights_3d->ne[0], weights_3d->ne[1], weights_3d->ne[2], weights_3d->ne[3]);
+    fflush(stdout);
     
     // Multiply ReLU scores by weights: w^I_{t,j} * ReLU(q^I_{t,j} · k^I_s)
     // We need to broadcast weights across the appropriate dimensions
     ggml_tensor * weighted_scores = ggml_mul(ctx, relu_permuted, weights_3d);
     cb(weighted_scores, "indexer_weighted_scores", layer_idx);
+    printf("SPARSE INDEXER: After weighted scores - weighted_scores shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           weighted_scores->ne[0], weighted_scores->ne[1], weighted_scores->ne[2], weighted_scores->ne[3]);
+    fflush(stdout);
     
     // Sum across heads to get final importance scores: sum_{j=1}^{H^I}
     // weighted_scores has shape [index_n_heads, n_tokens, n_tokens]
@@ -159,11 +189,17 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     // Sum along the head dimension to get [n_tokens, n_tokens]
     ggml_tensor * token_importance = ggml_sum_rows(ctx, ggml_reshape_2d(ctx, weighted_scores, index_n_heads, n_tokens * n_tokens));
     cb(token_importance, "token_importance", layer_idx);
+    printf("SPARSE INDEXER: After sum rows - token_importance shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           token_importance->ne[0], token_importance->ne[1], token_importance->ne[2], token_importance->ne[3]);
+    fflush(stdout);
     
     // Reshape to [n_tokens, n_tokens] if needed
     token_importance = ggml_reshape_2d(ctx, token_importance, n_tokens, n_tokens);
     if (token_importance) {
         cb(token_importance, "token_importance_final", layer_idx);
+        printf("SPARSE INDEXER: Final token_importance shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+               token_importance->ne[0], token_importance->ne[1], token_importance->ne[2], token_importance->ne[3]);
+        fflush(stdout);
     } else {
         printf("Error: token_importance is null after reshape\n");
         return nullptr;

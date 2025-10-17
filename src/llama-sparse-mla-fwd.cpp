@@ -33,6 +33,13 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     const int64_t n_head_q = q_cur->ne[1];
     const int64_t actual_n_tokens_q = q_cur->ne[2]; // Extract actual n_tokens from query tensor
     
+    printf("SPARSE MLA: Starting apply_sparse_attention\n");
+    printf("SPARSE MLA: q_cur shape: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", n_embd_head_q, n_head_q, actual_n_tokens_q);
+    printf("SPARSE MLA: k_cur shape: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", n_embd_head, n_head_kv, actual_n_tokens);
+    printf("SPARSE MLA: v_cur shape: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", v_cur->ne[0], v_cur->ne[1], v_cur->ne[2]);
+    printf("SPARSE MLA: topk_indices shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);
+    fflush(stdout);
+    
     // Reshape key and value tensors to prepare for sparse selection
     // We need to reshape the tensors so tokens become rows for ggml_get_rows
     
@@ -43,6 +50,11 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     
     ggml_tensor * v_cur_4d = ggml_reshape_4d(ctx, v_cur, n_embd_head * n_head_kv, actual_n_tokens, 1, 1);
     cb(v_cur_4d, "v_cur_4d", -1);
+    
+    printf("SPARSE MLA: After reshape to 4D - k_cur_4d shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           k_cur_4d->ne[0], k_cur_4d->ne[1], k_cur_4d->ne[2], k_cur_4d->ne[3]);
+    printf("SPARSE MLA: After reshape to 4D - v_cur_4d shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           v_cur_4d->ne[0], v_cur_4d->ne[1], v_cur_4d->ne[2], v_cur_4d->ne[3]);
     
     // Prepare the indices tensor for ggml_get_rows
     // ggml_get_rows expects indices to have shape [n_rows, ne2, ne3, 1]
@@ -61,6 +73,9 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     ggml_tensor * indices_4d = ggml_reshape_4d(ctx, indices_i32, top_k, 1, 1, 1);
     cb(indices_4d, "indices_4d", -1);
     
+    printf("SPARSE MLA: After indices reshape - indices_4d shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           indices_4d->ne[0], indices_4d->ne[1], indices_4d->ne[2], indices_4d->ne[3]);
+    
     // Use ggml_get_rows to select the sparse tokens
     // This will select rows from k_cur_4d based on the indices
     ggml_tensor * k_sparse_4d = ggml_get_rows(ctx, k_cur_4d, indices_4d);
@@ -75,6 +90,10 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
                                          k_sparse_4d->nb[1], k_sparse_4d->nb[2], 0);
     cb(k_sparse, "k_sparse", -1);
     
+    printf("SPARSE MLA: After get_rows and view - k_sparse shape: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           k_sparse->ne[0], k_sparse->ne[1], k_sparse->ne[2]);
+    fflush(stdout);
+    
     ggml_tensor * v_sparse = ggml_view_3d(ctx, v_sparse_4d, n_embd_head, n_head_kv, top_k,
                                          v_sparse_4d->nb[1], v_sparse_4d->nb[2], 0);
     cb(v_sparse, "v_sparse", -1);
@@ -87,6 +106,10 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     // Reshape q_cur to [n_embd_head_q, n_head_q * actual_n_tokens_q]
     ggml_tensor * q_2d = ggml_reshape_2d(ctx, q_cur, n_embd_head_q, n_head_q * actual_n_tokens_q);
     cb(q_2d, "q_2d", -1);
+    
+    printf("SPARSE MLA: After q_cur reshape - q_2d shape: [%" PRId64 ", %" PRId64 "]\n", 
+           q_2d->ne[0], q_2d->ne[1]);
+    fflush(stdout);
     
     // Reshape k_sparse to [n_embd_head, n_head_kv * top_k]
     ggml_tensor * k_sparse_2d = ggml_reshape_2d(ctx, k_sparse, n_embd_head, n_head_kv * top_k);
@@ -110,6 +133,10 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     v_sparse_2d = ggml_cont(ctx, ggml_transpose(ctx, v_sparse_2d)); // Transpose to [n_head_kv * top_k, n_embd_head]
     cb(v_sparse_2d, "v_sparse_2d", -1);
     
+    printf("SPARSE MLA: After v_sparse reshape and transpose - v_sparse_2d shape: [%" PRId64 ", %" PRId64 "]\n", 
+           v_sparse_2d->ne[0], v_sparse_2d->ne[1]);
+    fflush(stdout);
+    
     // Compute attn_weights @ V to get [n_head_q * actual_n_tokens_q, n_embd_head]
     ggml_tensor * output_2d = ggml_mul_mat(ctx, attn_weights, v_sparse_2d);
     cb(output_2d, "output_2d", -1);
@@ -121,6 +148,11 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     // Reshape back to original dimensions [n_embd_head, n_head_q, actual_n_tokens_q]
     ggml_tensor * output = ggml_reshape_3d(ctx, output_transposed, n_embd_head_q, n_head_q, actual_n_tokens_q);
     cb(output, "sparse_attn_out", -1);
+    
+    printf("SPARSE MLA: Final output shape: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           output->ne[0], output->ne[1], output->ne[2]);
+    printf("SPARSE MLA: apply_sparse_attention completed successfully\n");
+    fflush(stdout);
     
     return output;
 }
