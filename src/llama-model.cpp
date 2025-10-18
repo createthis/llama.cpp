@@ -13876,7 +13876,13 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     cb(Vcur, "Vcur", il);
 
                     // Apply sparse attention if available, otherwise use regular attention
-                    if (use_sparse_attention) {
+                    if (use_sparse_attention) {{
+                            const auto * mctx_cur = inp_attn->mctx;
+                            ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, Kcur, inp_attn->get_k_idxs(), il));
+                            ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
+                            ggml_build_forward_expand(gf, ggml_scale(ctx0, inp_attn->get_kq_mask(), 0.0f));
+                        }
+                        
                         // Use sparse attention with top-k tokens
                         cur = llama::sparse_mla_fwd::apply_sparse_attention(
                             ctx0, Qcur, Kcur, Vcur, topk_indices, n_tokens, top_k, cb_wrapper);
@@ -13939,7 +13945,13 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                     cb(Kcur, "Kcur", il);
 
                     // Apply sparse attention if available, otherwise use regular attention
-                    if (use_sparse_attention) {
+                    if (use_sparse_attention) {{
+                            const auto * mctx_cur = inp_attn->mctx;
+                            ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, Kcur, inp_attn->get_k_idxs(), il));
+                            ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
+                            ggml_build_forward_expand(gf, ggml_scale(ctx0, inp_attn->get_kq_mask(), 0.0f));
+                        }
+                        
                         // Use sparse attention with top-k tokens
                         cur = llama::sparse_mla_fwd::apply_sparse_attention(
                             ctx0, Qcur, Kcur, Vcur, topk_indices, n_tokens, top_k, cb_wrapper);
