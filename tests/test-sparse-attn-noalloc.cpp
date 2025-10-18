@@ -113,6 +113,19 @@ int main() {
         ctx, q_cur, k_cur, v_cur, topk_indices, n_tokens, /*top_k=*/64, cb);
     (void)sparse_out;
 
+
+    // Now simulate the layer output projection WO as in runtime and reproduce the ggml_can_mul_mat assert
+    // In the real model, WO expects input feature size equal to n_embd (e.g., 7168), but our sparse output
+    // currently has ne0 = v_embd_head (=512) without flattening across heads. This mismatch should trigger
+    // GGML_ASSERT(ggml_can_mul_mat(a, b)).
+    const int64_t n_embd_full = n_embd; // 7168
+    ggml_tensor * wo = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd_full, n_embd_full);
+    printf("About to call ggml_mul_mat(wo, sparse_out) to reproduce can_mul_mat assertion...\n");
+    fflush(stdout);
+    // Expected to assert here due to ne0 mismatch: wo->ne0 = 7168, sparse_out->ne0 = 512
+    ggml_tensor * projected = ggml_mul_mat(ctx, wo, sparse_out);
+    (void)projected;
+
     delete model;
     ggml_free(ctx);
 
