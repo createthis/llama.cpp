@@ -13880,12 +13880,17 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             const auto * mctx_cur = inp_attn->mctx;
                             ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, Kcur, inp_attn->get_k_idxs(), il));
                             ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
-                            ggml_build_forward_expand(gf, ggml_scale(ctx0, inp_attn->get_kq_mask(), 0.0f));
+                            ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
                         }
                         
                         // Use sparse attention with top-k tokens
                         cur = llama::sparse_mla_fwd::apply_sparse_attention(
                             ctx0, Qcur, Kcur, Vcur, topk_indices, n_tokens, top_k, cb_wrapper);
+
+                        if (!cparams.offload_kqv) {
+                            /* sparse: follow dense behavior by placing on CPU when not offloading */
+                        ggml_backend_sched_set_tensor_backend(sched, cur, backend_cpu);
+                        }
                         
                         // Project kv_lora_rank -> n_embd_head_v per head using wv_b and flatten heads before WO
                         ggml_tensor * cur_perm = ggml_permute(ctx0, cur, 0, 2, 1, 3); // [kv_lora_rank, n_tokens, n_head]
@@ -13949,12 +13954,17 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             const auto * mctx_cur = inp_attn->mctx;
                             ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, Kcur, inp_attn->get_k_idxs(), il));
                             ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
-                            ggml_build_forward_expand(gf, ggml_scale(ctx0, inp_attn->get_kq_mask(), 0.0f));
+                            ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
                         }
                         
                         // Use sparse attention with top-k tokens
                         cur = llama::sparse_mla_fwd::apply_sparse_attention(
                             ctx0, Qcur, Kcur, Vcur, topk_indices, n_tokens, top_k, cb_wrapper);
+
+                        if (!cparams.offload_kqv) {
+                            /* sparse: follow dense behavior by placing on CPU when not offloading */
+                        ggml_backend_sched_set_tensor_backend(sched, cur, backend_cpu);
+                        }
 
                         // Flatten heads before WO
                         ggml_tensor * cur_perm2 = ggml_permute(ctx0, cur, 0, 2, 1, 3); // [n_embd_head_v, n_tokens, n_head]
