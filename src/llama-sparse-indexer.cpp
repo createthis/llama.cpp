@@ -49,14 +49,14 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     
     // Extract only the last token (t = T-1) to compute I_{t,:} for the last token
     const int64_t n_tokens = cur->ne[1];
-    
-    // Create index tensor for the last token
-    ggml_tensor * t_idx = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
-    int32_t * t_idx_data = (int32_t *)t_idx->data;
-    t_idx_data[0] = n_tokens - 1;
-    
-    // Extract the last token: x_t = cur[:, T-1]
-    ggml_tensor * x_t = ggml_get_rows(ctx, cur, t_idx);
+
+    // IMPORTANT: during graph build, the ggml context is typically created with no_alloc=true,
+    // which means tensor->data is null. Writing directly to tensor->data would segfault.
+    // Instead of creating an index tensor and filling it, take a view into the last column.
+    // cur is [n_embd, n_tokens, 1, 1]; the last token is a 2D slice [n_embd, 1] at offset (n_tokens-1)*nb[1].
+    const size_t nb1   = cur->nb[1];
+    const size_t off   = (n_tokens - 1) * nb1;
+    ggml_tensor * x_t  = ggml_view_2d(ctx, cur, cur->ne[0], /*ne1=*/1, nb1, off);
     cb(x_t, "x_t_last_token", layer_idx);
     printf("SPARSE INDEXER: Extracted last token x_t shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
            x_t->ne[0], x_t->ne[1], x_t->ne[2], x_t->ne[3]);
