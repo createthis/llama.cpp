@@ -1,6 +1,8 @@
 #include "../src/llama-sparse-indexer.h"
 #include "../src/llama-model.h"
 #include "../src/llama-impl.h"
+#include "../src/llama-sparse-topk.h"
+#include "../src/llama-sparse-mla-fwd.h"
 
 #include <ggml.h>
 #include <cstdio>
@@ -81,6 +83,35 @@ int main() {
     } else {
         printf("token_importance null\n");
     }
+
+    // Build top-k indices from token_importance using the same path as runtime
+    printf("Building top-k indices from token_importance...\n");
+    ggml_tensor * topk_indices = llama::sparse_attn_topk::select_topk_tokens(ctx, token_importance, n_tokens, cb);
+    if (topk_indices) {
+        printf("OK: topk_indices shape = [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
+               topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);
+    } else {
+        printf("topk_indices null\n");
+    }
+
+    // Reproduce the exact shape configuration observed during runtime startup
+    // q_cur: [576, 128, 4096], k_cur: [576, 1, 4096], v_cur: [512, 1, 4096]
+    // This mismatch between K/V head dims triggers the reshape assert in apply_sparse_attention
+    const int64_t q_embd_head = 576;
+    const int64_t q_n_head    = 128;
+    const int64_t kv_n_head   = 1;
+    const int64_t k_embd_head = 576;
+    const int64_t v_embd_head = 512; // intentionally different than K to reproduce the issue
+
+    ggml_tensor * q_cur = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, q_embd_head, q_n_head, n_tokens);
+    ggml_tensor * k_cur = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k_embd_head, kv_n_head, n_tokens);
+    ggml_tensor * v_cur = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, v_embd_head, kv_n_head, n_tokens);
+
+    printf("About to call apply_sparse_attention (expected to reproduce runtime assertion)...\n");
+    fflush(stdout);
+    ggml_tensor * sparse_out = llama::sparse_mla_fwd::apply_sparse_attention(
+        ctx, q_cur, k_cur, v_cur, topk_indices, n_tokens, /*top_k=*/64, cb);
+    (void)sparse_out;
 
     delete model;
     ggml_free(ctx);
