@@ -230,3 +230,6 @@ target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
 # Sparse attention tests
 llama_build_and_test(test-sparse-attn.cpp)
 target_include_directories(test-sparse-attn PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
+
+# Reproducer for no_alloc sparse indexer crash
+llama_build_and_test(test-sparse-attn-noalloc.cpp)
