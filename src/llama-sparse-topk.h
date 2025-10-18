@@ -2,7 +2,7 @@
 #define LLAMA_SPARSE_TOPK_H
 
 #include <functional>
-#include "ggml-cpp.h"
+#include "ggml.h"
 
 namespace llama {
 

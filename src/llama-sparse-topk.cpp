@@ -8,6 +8,7 @@ namespace llama {
 
 using std::function;
 
+// Modified to handle single row input [1, T] or [T, 1] instead of full T×T matrix
 ggml_tensor * sparse_attn_topk::select_topk_tokens(
     ggml_context * ctx,
     ggml_tensor * token_importance,
@@ -24,49 +25,52 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
     printf("SPARSE TOPK: token_importance total elements: %" PRId64 "\n", ggml_nelements(token_importance));
     fflush(stdout);
     
-    // The token_importance tensor should have shape [n_tokens, n_tokens]
-    // We need to extract the importance scores for each token
+    // The token_importance tensor should now have shape [1, n_tokens] or [n_tokens, 1]
+    // We need to ensure it's in the right format for ggml_top_k
     
-    // Extract actual number of tokens from tensor
-    const int64_t actual_n_tokens = token_importance->ne[0]; // Should be n_tokens
+    // Extract actual number of tokens from tensor (should be n_tokens)
+    const int64_t actual_n_tokens = (token_importance->ne[0] > token_importance->ne[1]) ? 
+                                   token_importance->ne[0] : token_importance->ne[1];
     
     // Use top-64 tokens for sparse attention (DeepSeek V3.2 default)
     const int64_t top_k = (64 < actual_n_tokens) ? 64 : actual_n_tokens;
     
-    // For each token, we need to find the top-k important previous tokens
-    // The token_importance matrix has shape [n_tokens, n_tokens] where
-    // token_importance[i, j] represents the importance of token j for token i
+    // The token_importance tensor contains the importance scores for the last token
+    // We need to reshape it to [actual_n_tokens, 1] for ggml_top_k
     
     printf("SPARSE TOPK: actual_n_tokens = %" PRId64 ", top_k = %" PRId64 "\n", actual_n_tokens, top_k);
     fflush(stdout);
     
-    // We need to extract the diagonal or specific rows depending on the current token
-    // For simplicity, let's use the last row (current token's view of all previous tokens)
+    // Reshape token_importance to [actual_n_tokens, 1] if needed
+    ggml_tensor * current_importance = token_importance;
     
-    // Create a tensor for the row index (last row)
-    ggml_tensor * row_index = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
-    // Set the row index value to the last row
-    int32_t * row_data = (int32_t *)row_index->data;
-    row_data[0] = actual_n_tokens - 1;
+    // If we have a row vector [1, n_tokens], transpose to column vector [n_tokens, 1]
+    if (token_importance->ne[0] == 1 && token_importance->ne[1] == actual_n_tokens) {
+        current_importance = ggml_cont(ctx, ggml_transpose(ctx, token_importance));
+        cb(current_importance, "current_importance_transposed", -1);
+        printf("SPARSE TOPK: Transposed row vector to column vector\n");
+    }
+    // If we have a column vector [n_tokens, 1], use it directly
+    else if (token_importance->ne[0] == actual_n_tokens && token_importance->ne[1] == 1) {
+        // Already in correct format
+        printf("SPARSE TOPK: Using column vector directly\n");
+    }
+    // If we have something else, reshape to column vector
+    else {
+        current_importance = ggml_reshape_2d(ctx, token_importance, actual_n_tokens, 1);
+        cb(current_importance, "current_importance_reshaped", -1);
+        printf("SPARSE TOPK: Reshaped to column vector\n");
+    }
     
-    // Extract the importance scores for the current token (last row)
-    ggml_tensor * current_importance = ggml_get_rows(ctx, token_importance, row_index);
-    cb(current_importance, "current_importance", -1);
-    
-    printf("SPARSE TOPK: After get_rows - current_importance shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+    printf("SPARSE TOPK: current_importance shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
            current_importance->ne[0], current_importance->ne[1], current_importance->ne[2], current_importance->ne[3]);
     fflush(stdout);
-    
-    // Reshape to [actual_n_tokens, 1] for ggml_top_k
-    current_importance = ggml_reshape_2d(ctx, current_importance, actual_n_tokens, 1);
-    cb(current_importance, "current_importance_reshaped", -1);
     
     // Get indices of top-k important tokens
     // ggml_top_k returns a tensor with dimensions [top_k, 1, 1, 1]
     ggml_tensor * topk_indices = ggml_top_k(ctx, current_importance, top_k);
     cb(topk_indices, "topk_indices", -1);
     
-    // topk_indices now has dimensions [top_k, 1, 1, 1]
     printf("SPARSE TOPK: Final topk_indices shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
            topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);
     printf("SPARSE TOPK: select_topk_tokens completed successfully\n");

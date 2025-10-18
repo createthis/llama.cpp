@@ -2,7 +2,7 @@
 #define LLAMA_SPARSE_INDEXER_H
 
 #include <functional>
-#include "ggml-cpp.h"
+#include "ggml.h"
 
 // Forward declarations
 struct llama_model;

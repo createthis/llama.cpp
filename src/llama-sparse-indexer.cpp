@@ -27,6 +27,7 @@ namespace llama {
 
 using std::function;
 
+// Modified to compute only the last row (I_{t,:}) for the last token t = T-1
 ggml_tensor * sparse_attn_indexer::compute_token_importance(
     ggml_context * ctx,
     const llama_model & model,
@@ -35,7 +36,7 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     bool is_lite,
     const function<void(ggml_tensor *, const char *, int)> & cb) {
     
-    // DeepSeek V3.2 Lightning Indexer implementation
+    // DeepSeek V3.2 Lightning Indexer implementation - Single row version
     // Mathematical formula: I_{t,s} = sum_{j=1}^{H^I} w^I_{t,j} * ReLU(q^I_{t,j} · k^I_s)
     
     printf("=== SPARSE INDEXER: Starting compute_token_importance for layer %d ===\n", layer_idx);
@@ -46,6 +47,21 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     printf("Input tensor cur total elements: %" PRId64 "\n", ggml_nelements(cur));
     fflush(stdout);
     
+    // Extract only the last token (t = T-1) to compute I_{t,:} for the last token
+    const int64_t n_tokens = cur->ne[1];
+    
+    // Create index tensor for the last token
+    ggml_tensor * t_idx = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+    int32_t * t_idx_data = (int32_t *)t_idx->data;
+    t_idx_data[0] = n_tokens - 1;
+    
+    // Extract the last token: x_t = cur[:, T-1]
+    ggml_tensor * x_t = ggml_get_rows(ctx, cur, t_idx);
+    cb(x_t, "x_t_last_token", layer_idx);
+    printf("SPARSE INDEXER: Extracted last token x_t shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+           x_t->ne[0], x_t->ne[1], x_t->ne[2], x_t->ne[3]);
+    fflush(stdout);
+    
     // Indexer query projection (wq_a) - for non-lite version
     ggml_tensor * qr = nullptr;
     if (!is_lite) {
@@ -53,7 +69,7 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
         fflush(stdout);
         
         // First projection: cur -> wq_a -> qr
-        qr = ggml_mul_mat(ctx, model.layers[layer_idx].wq_a, cur);
+        qr = ggml_mul_mat(ctx, model.layers[layer_idx].wq_a, x_t);
         cb(qr, "indexer_qr", layer_idx);
         printf("SPARSE INDEXER: After wq_a projection, qr shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
                qr->ne[0], qr->ne[1], qr->ne[2], qr->ne[3]);
@@ -73,7 +89,7 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
         printf("SPARSE INDEXER: Using lite version\n");
         fflush(stdout);
         // For lite version, use the current hidden state directly
-        qr = cur;
+        qr = x_t;
     }
 
     // Indexer key projection (wk) - k^I_s from the formula
@@ -100,7 +116,7 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
 
     // Indexer weights projection - w^I_{t,j} from the formula
     // These are the per-head weights for the indexer
-    ggml_tensor * weights = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_weights_proj, cur);
+    ggml_tensor * weights = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_weights_proj, x_t);
     cb(weights, "indexer_weights", layer_idx);
     printf("SPARSE INDEXER: After weights_proj, weights shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
            weights->ne[0], weights->ne[1], weights->ne[2], weights->ne[3]);
@@ -124,128 +140,49 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     const int64_t index_n_heads = 64;
     const int64_t index_head_dim = 128;
     
-    // Get n_tokens from the weights tensor (moved from later in the function)
-    const int64_t n_tokens = ggml_nelements(weights) / index_n_heads;
-    printf("SPARSE INDEXER: Calculated n_tokens = %" PRId64 " / %" PRId64 " = %" PRId64 "\n", 
-           ggml_nelements(weights), index_n_heads, n_tokens);
-    fflush(stdout);
-    
-    // Reshape q_indexer to [index_n_heads, index_head_dim, n_tokens]
-    // q_indexer should have shape [index_n_heads * index_head_dim, n_tokens] from matrix multiplication
-    printf("SPARSE INDEXER: Before reshape - q_indexer shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
-           q_indexer->ne[0], q_indexer->ne[1], q_indexer->ne[2], q_indexer->ne[3]);
-    printf("SPARSE INDEXER: Before reshape - q_indexer total elements: %" PRId64 "\n", ggml_nelements(q_indexer));
-    printf("SPARSE INDEXER: Reshape target: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", index_n_heads, index_head_dim, n_tokens);
-    printf("SPARSE INDEXER: Expected elements after reshape: %" PRId64 "\n", index_n_heads * index_head_dim * n_tokens);
-    fflush(stdout);
-    
-    q_indexer = ggml_reshape_3d(ctx, q_indexer, index_n_heads, index_head_dim, n_tokens);
-    cb(q_indexer, "indexer_q_reshape", layer_idx);
-    printf("SPARSE INDEXER: After reshape - q_indexer shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
-           q_indexer->ne[0], q_indexer->ne[1], q_indexer->ne[2], q_indexer->ne[3]);
-    printf("Memory usage after q reshape: %s (delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(), 
-           format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());
-    fflush(stdout);
-
     // Reshape k_indexer to [index_head_dim, n_tokens]
     k_indexer = ggml_reshape_2d(ctx, k_indexer, index_head_dim, n_tokens);
     cb(k_indexer, "indexer_k_reshape", layer_idx);
-    
-    // Compute the dot product: q_indexer [index_n_heads, index_head_dim, n_tokens] · k_indexer [index_head_dim, n_tokens]
-    // We need to reshape and permute to align dimensions properly
-    
-    // Permute q_indexer to [index_head_dim, index_n_heads, n_tokens]
-    ggml_tensor * q_permuted = ggml_cont(ctx, ggml_permute(ctx, q_indexer, 1, 0, 2, 3));
-    cb(q_permuted, "indexer_q_permuted", layer_idx);
-    printf("SPARSE INDEXER: After permute - q_permuted shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
-           q_permuted->ne[0], q_permuted->ne[1], q_permuted->ne[2], q_permuted->ne[3]);
-    printf("Memory usage after q permute: %s (delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(), 
-           format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());
+    printf("SPARSE INDEXER: k_indexer reshaped to [%" PRId64 ", %" PRId64 "]\n", k_indexer->ne[0], k_indexer->ne[1]);
     fflush(stdout);
     
-    // Reshape q_permuted to [index_head_dim, index_n_heads * n_tokens]
-    ggml_tensor * q_reshaped = ggml_reshape_2d(ctx, q_permuted, index_head_dim, index_n_heads * n_tokens);
-    cb(q_reshaped, "indexer_q_reshaped", layer_idx);
-    printf("SPARSE INDEXER: After reshape 2d - q_reshaped shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
-           q_reshaped->ne[0], q_reshaped->ne[1], q_reshaped->ne[2], q_reshaped->ne[3]);
-    printf("SPARSE INDEXER: q_reshaped total elements: %" PRId64 "\n", ggml_nelements(q_reshaped));
-    printf("Memory usage after q reshape 2d: %s (delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(), 
-           format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());
+    // Reshape q_indexer to [index_n_heads, index_head_dim] (for single token)
+    q_indexer = ggml_reshape_2d(ctx, q_indexer, index_head_dim, index_n_heads);
+    cb(q_indexer, "indexer_q_reshape", layer_idx);
+    printf("SPARSE INDEXER: q_indexer reshaped to [%" PRId64 ", %" PRId64 "]\n", q_indexer->ne[0], q_indexer->ne[1]);
     fflush(stdout);
     
-    // Reshape k_indexer to [index_head_dim, n_tokens] (already done)
-    ggml_tensor * k_reshaped = k_indexer;
-    cb(k_reshaped, "indexer_k_reshaped", layer_idx);
-    
-    // Compute dot product: result will be [index_n_heads * n_tokens, n_tokens]
-    // This gives us the dot product for each (head, query_token) pair with each key_token
-    ggml_tensor * dot_product = ggml_mul_mat(ctx, q_reshaped, k_reshaped);
-    cb(dot_product, "indexer_dot_product", layer_idx);
-    printf("SPARSE INDEXER: After dot product - dot_product shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
-           dot_product->ne[0], dot_product->ne[1], dot_product->ne[2], dot_product->ne[3]);
-    printf("Memory usage after dot product: %s (delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(), 
-           format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());
+    // Compute scores: k_indexer^T @ q_indexer -> [n_tokens, index_n_heads]
+    // k_indexer is [index_head_dim, n_tokens], q_indexer is [index_head_dim, index_n_heads]
+    ggml_tensor * scores = ggml_mul_mat(ctx, q_indexer, k_indexer);
+    cb(scores, "indexer_scores", layer_idx);
+    printf("SPARSE INDEXER: After dot product - scores shape: [%" PRId64 ", %" PRId64 "]\n", scores->ne[0], scores->ne[1]);
     fflush(stdout);
     
     // Apply ReLU activation
-    ggml_tensor * relu_scores = ggml_relu(ctx, dot_product);
+    ggml_tensor * relu_scores = ggml_relu(ctx, scores);
     cb(relu_scores, "indexer_relu_scores", layer_idx);
-    
-    // Reshape relu_scores to [index_n_heads, n_tokens, n_tokens]
-    ggml_tensor * relu_3d = ggml_reshape_3d(ctx, relu_scores, n_tokens, index_n_heads, n_tokens);
-    cb(relu_3d, "indexer_relu_3d", layer_idx);
-    printf("SPARSE INDEXER: After relu reshape - relu_3d shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
-           relu_3d->ne[0], relu_3d->ne[1], relu_3d->ne[2], relu_3d->ne[3]);
-    printf("Memory usage after relu reshape: %s (delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(), 
-           format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());
+    printf("SPARSE INDEXER: After ReLU - relu_scores shape: [%" PRId64 ", %" PRId64 "]\n", relu_scores->ne[0], relu_scores->ne[1]);
     fflush(stdout);
     
-    // Permute to [index_n_heads, n_tokens, n_tokens] for weight multiplication
-    ggml_tensor * relu_permuted = ggml_cont(ctx, ggml_permute(ctx, relu_3d, 1, 0, 2, 3));
-    cb(relu_permuted, "indexer_relu_permuted", layer_idx);
-    printf("SPARSE INDEXER: After relu permute - relu_permuted shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
-           relu_permuted->ne[0], relu_permuted->ne[1], relu_permuted->ne[2], relu_permuted->ne[3]);
-    printf("Memory usage after relu permute: %s (delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(), 
-           format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());
+    // Reshape weights to [index_n_heads, 1] for the single token
+    weights = ggml_reshape_2d(ctx, weights, index_n_heads, 1);
+    cb(weights, "indexer_weights_reshaped", layer_idx);
+    printf("SPARSE INDEXER: weights reshaped to [%" PRId64 ", %" PRId64 "]\n", weights->ne[0], weights->ne[1]);
     fflush(stdout);
     
-    // Reshape weights to [index_n_heads, n_tokens, 1] for broadcasting
-    ggml_tensor * weights_3d = ggml_reshape_3d(ctx, weights, 1, n_tokens, index_n_heads);
-    weights_3d = ggml_cont(ctx, ggml_permute(ctx, weights_3d, 2, 1, 0, 3)); // [index_n_heads, n_tokens, 1]
-    cb(weights_3d, "indexer_weights_3d", layer_idx);
-    printf("SPARSE INDEXER: After weights reshape - weights_3d shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
-           weights_3d->ne[0], weights_3d->ne[1], weights_3d->ne[2], weights_3d->ne[3]);
-    printf("Memory usage after weights reshape: %s (delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(), 
-           format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());
+    // Contract heads with weights: relu_scores @ weights -> [n_tokens, 1]
+    ggml_tensor * token_importance_col = ggml_mul_mat(ctx, weights, relu_scores);
+    cb(token_importance_col, "token_importance_col", layer_idx);
+    printf("SPARSE INDEXER: After weighted sum - token_importance_col shape: [%" PRId64 ", %" PRId64 "]\n", 
+           token_importance_col->ne[0], token_importance_col->ne[1]);
     fflush(stdout);
     
-    // Multiply ReLU scores by weights: w^I_{t,j} * ReLU(q^I_{t,j} · k^I_s)
-    // We need to broadcast weights across the appropriate dimensions
-    ggml_tensor * weighted_scores = ggml_mul(ctx, relu_permuted, weights_3d);
-    cb(weighted_scores, "indexer_weighted_scores", layer_idx);
-    printf("SPARSE INDEXER: After weighted scores - weighted_scores shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
-           weighted_scores->ne[0], weighted_scores->ne[1], weighted_scores->ne[2], weighted_scores->ne[3]);
-    printf("Memory usage after weighted scores: %s (delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(), 
-           format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());
-    fflush(stdout);
+    // Transpose to get row vector [1, n_tokens]
+    ggml_tensor * token_importance = ggml_cont(ctx, ggml_transpose(ctx, token_importance_col));
+    cb(token_importance, "token_importance_final", layer_idx);
     
-    // Sum across heads to get final importance scores: sum_{j=1}^{H^I}
-    // weighted_scores has shape [index_n_heads, n_tokens, n_tokens]
-    // We need to sum over the head dimension
-    
-    // Sum along the head dimension to get [n_tokens, n_tokens]
-    ggml_tensor * token_importance = ggml_sum_rows(ctx, ggml_reshape_2d(ctx, weighted_scores, index_n_heads, n_tokens * n_tokens));
-    cb(token_importance, "token_importance", layer_idx);
-    printf("SPARSE INDEXER: After sum rows - token_importance shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
-           token_importance->ne[0], token_importance->ne[1], token_importance->ne[2], token_importance->ne[3]);
-    printf("Memory usage after sum rows: %s (delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(), 
-           format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());
-    fflush(stdout);
-    
-    // Reshape to [n_tokens, n_tokens] if needed
-    token_importance = ggml_reshape_2d(ctx, token_importance, n_tokens, n_tokens);
     if (token_importance) {
-        cb(token_importance, "token_importance_final", layer_idx);
         printf("SPARSE INDEXER: Final token_importance shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
                token_importance->ne[0], token_importance->ne[1], token_importance->ne[2], token_importance->ne[3]);
         printf("Final memory usage: %s (total delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(), 

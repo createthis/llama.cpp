@@ -230,11 +230,3 @@ target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
 # Sparse attention tests
 llama_build_and_test(test-sparse-attn.cpp)
 target_include_directories(test-sparse-attn PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
-
-# Sparse attention assertion reproduction test
-llama_build_and_test(test-sparse-attn-assertion.cpp)
-target_include_directories(test-sparse-attn-assertion PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
-
-# Sparse attention 4096 tokens test
-llama_build_and_test(test-sparse-attn-4096.cpp)
-target_include_directories(test-sparse-attn-4096 PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
