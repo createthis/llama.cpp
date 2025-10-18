@@ -13881,8 +13881,22 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         cur = llama::sparse_mla_fwd::apply_sparse_attention(
                             ctx0, Qcur, Kcur, Vcur, topk_indices, n_tokens, top_k, cb_wrapper);
                         
+                        // Project kv_lora_rank -> n_embd_head_v per head using wv_b and flatten heads before WO
+                        ggml_tensor * cur_perm = ggml_permute(ctx0, cur, 0, 2, 1, 3); // [kv_lora_rank, n_tokens, n_head]
+                        cb(cur_perm, "sparse_attn_perm_kvT_H", il);
+
+                        ggml_tensor * cur_proj = ggml_mul_mat(ctx0, model.layers[il].wv_b, cur_perm); // [n_embd_head_v, n_tokens, n_head]
+                        cb(cur_proj, "sparse_attn_vproj", il);
+
+                        ggml_tensor * cur_proj_perm = ggml_permute(ctx0, cur_proj, 0, 2, 1, 3); // [n_embd_head_v, n_head, n_tokens]
+                        cb(cur_proj_perm, "sparse_attn_vproj_perm", il);
+
+                        cur_proj_perm = ggml_cont(ctx0, cur_proj_perm);
+                        ggml_tensor * cur2d = ggml_reshape_2d(ctx0, cur_proj_perm, n_head * n_embd_head_v, n_tokens);
+                        cb(cur2d, "sparse_attn_flat", il);
+
                         // Apply output projection for sparse attention
-                        cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur);
+                        cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur2d);
                         cb(cur, "sparse_attn_out", il);
                         
                         // Log that we're using sparse attention
@@ -13929,9 +13943,17 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         // Use sparse attention with top-k tokens
                         cur = llama::sparse_mla_fwd::apply_sparse_attention(
                             ctx0, Qcur, Kcur, Vcur, topk_indices, n_tokens, top_k, cb_wrapper);
-                        
+
+                        // Flatten heads before WO
+                        ggml_tensor * cur_perm2 = ggml_permute(ctx0, cur, 0, 2, 1, 3); // [n_embd_head_v, n_tokens, n_head]
+                        cb(cur_perm2, "sparse_attn_perm_vT_H", il);
+
+                        cur_perm2 = ggml_cont(ctx0, cur_perm2);
+                        ggml_tensor * cur2d2 = ggml_reshape_2d(ctx0, cur_perm2, n_head * n_embd_head_v, n_tokens);
+                        cb(cur2d2, "sparse_attn_flat", il);
+
                         // Apply output projection for sparse attention
-                        cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur);
+                        cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur2d2);
                         cb(cur, "sparse_attn_out", il);
                         
                         // Log that we're using sparse attention
