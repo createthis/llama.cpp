@@ -65,13 +65,8 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
 
     // Prepare indices as [top_k, T, 1, 1] without creating copies (avoid CUDA i32->i32 cpy)
     ggml_tensor * indices_full = nullptr;
-    if (topk_indices->ne[1] == 1) {
-        // Single column of indices; reuse the same for all t without repeat
-        indices_full = topk_indices; // will handle per-t reshape below
-    } else {
-        // Already per-token columns; just view as 4D
-        indices_full = ggml_reshape_4d(ctx, topk_indices, top_k, actual_n_tokens_q, 1, 1);
-    }
+    // Use the topk_indices tensor directly; avoid reshape which requires contiguity
+    indices_full = topk_indices;
     cb(indices_full, "indices_full", -1);
 
     // 2D view of Q: [Dq, Hq*T]
