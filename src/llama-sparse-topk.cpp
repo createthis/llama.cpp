@@ -139,6 +139,11 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
               mask_tc   = ggml_cont(ctx, mask_tc);
               // scores as src0 should also be contiguous rows to avoid scheduler selecting awkward views
               scores_tc = ggml_cont(ctx, scores_tc);
+              // ensure both operands have the same data type to avoid mixed-type CUDA kernels
+              if (mask_tc->type != scores_tc->type) {
+                  mask_tc = ggml_cast(ctx, mask_tc, scores_tc->type);
+                  mask_tc = ggml_cont(ctx, mask_tc);
+              }
               fprintf(stderr, "KV-AWARE ADD DBG: scores_tc nb=[%zu,%zu,%zu,%zu], mask_tc nb=[%zu,%zu,%zu,%zu]\n",
                       scores_tc->nb[0], scores_tc->nb[1], scores_tc->nb[2], scores_tc->nb[3],
                       mask_tc->nb[0],   mask_tc->nb[1],   mask_tc->nb[2],   mask_tc->nb[3]);
