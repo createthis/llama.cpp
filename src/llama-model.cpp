@@ -32,13 +32,18 @@
 
 // Debug helpers for tracking add() operand layouts during sparse attention
 static void llama_dbg_tensor(const char * tag, struct ggml_tensor * t, int il) {
-    if (!t) { printf("DBG %s L%d: null\n", tag, il); return; }
+    if (!t) {
+      printf("DBG %s L%d: null\n", tag, il);
+      fflush(stdout);
+      return;
+    }
     printf("DBG %s L%d: ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] type=%d cont=%d rowcont=%d\n",
            tag, il,
            (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3],
            t->nb[0], t->nb[1], t->nb[2], t->nb[3],
            (int) t->type,
            (int) ggml_is_contiguous(t), (int) ggml_is_contiguous_rows(t));
+    fflush(stdout);
 }
 
 static struct ggml_tensor * llama_add_dbg(struct ggml_context * ctx, struct ggml_tensor * a, struct ggml_tensor * b,
