@@ -237,32 +237,6 @@ static void launch_bin_bcast_pack(const ggml_tensor * src0, const ggml_tensor * 
         size_t s02 = nb02 / sizeof(src0_t);
         size_t s03 = nb03 / sizeof(src0_t);
 
-        // verbose logging to diagnose CUDA binbcast alignment issues
-        fprintf(stderr,
-                "BINBCAST DBG:\n"
-                "  ORIG dst ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu]\n"
-                "       src0 ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu]\n"
-                "       src1 ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu]\n"
-                "  COLL ne=[%lld,%lld,%lld,%lld]\n"
-                "       nb =[ %zu, %zu, %zu, %zu ]  nb0=[ %zu, %zu, %zu, %zu ]  nb1=[ %zu, %zu, %zu, %zu ]\n"
-                "  s (dst)=[%zu,%zu,%zu,%zu] (src0)=[%zu,%zu,%zu,%zu] (src1)=[%zu,%zu,%zu,%zu]\n",
-                (long long)ne0, (long long)ne1, (long long)ne2, (long long)ne3,
-                nb0, nb1, nb2, nb3,
-                (long long)ne00, (long long)ne01, (long long)ne02, (long long)ne03,
-                nb00, nb01, nb02, nb03,
-                (long long)ne10, (long long)ne11, (long long)ne12, (long long)ne13,
-                nb10, nb11, nb12, nb13,
-                (long long)cne[0], (long long)cne[1], (long long)cne[2], (long long)cne[3],
-                cnb[0], cnb[1], cnb[2], cnb[3],
-                cnb0[0], cnb0[1], cnb0[2], cnb0[3],
-                cnb1[0], cnb1[1], cnb1[2], cnb1[3],
-                s0, s1, s2, s3,
-                s00, s01, s02, s03,
-                s10, s11, s12, s13);
-        fprintf(stderr, "  CHECK nb10 %% sizeof(src1_t) == 0 -> %zu %% %zu = %zu\n",
-                nb10, sizeof(src1_t), nb10 % sizeof(src1_t));
-        fflush(stderr);
-
         GGML_ASSERT(nb0 % sizeof(dst_t) == 0);
         GGML_ASSERT(nb1 % sizeof(dst_t) == 0);
         GGML_ASSERT(nb2 % sizeof(dst_t) == 0);
