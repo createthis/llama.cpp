@@ -14002,6 +14002,8 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         // Apply output projection for sparse attention
                         cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur2d2);
                         cb(cur, "sparse_attn_out", il);
+                        // ensure contiguous layout for subsequent broadcast adds (CUDA)
+                        cur = ggml_cont(ctx0, cur);
                         
                         // Log that we're using sparse attention
                         LLAMA_LOG_INFO("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d", 
