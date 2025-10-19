@@ -5,6 +5,22 @@
 #include <cstdio>
 #include <cinttypes>
 
+// Helper function to get memory usage in human-readable format
+static std::string format_memory_size(size_t bytes) {
+    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+    size_t unit_idx = 0;
+    double size = bytes;
+
+    while (size >= 1024.0 && unit_idx < 4) {
+        size /= 1024.0;
+        unit_idx++;
+    }
+
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "%.2f %s", size, units[unit_idx]);
+    return std::string(buffer);
+}
+
 namespace llama {
 
 using std::function;
@@ -33,6 +49,8 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     const int64_t actual_n_tokens_q = q_cur->ne[2];
 
     printf("SPARSE MLA: Starting apply_sparse_attention\n");
+    size_t initial_mem = ggml_used_mem(ctx);
+    printf("Initial memory usage: %s\n", format_memory_size(initial_mem).c_str());
     printf("SPARSE MLA: q_cur shape: [%%" PRId64 ", %%" PRId64 ", %%" PRId64 "]\n", n_embd_head_q, n_head_q, actual_n_tokens_q);
     printf("SPARSE MLA: k_cur shape: [%%" PRId64 ", %%" PRId64 ", %%" PRId64 "]\n", n_embd_head_k, n_head_kv, actual_n_tokens_k);
     printf("SPARSE MLA: v_cur shape: [%%" PRId64 ", %%" PRId64 ", %%" PRId64 "]\n", n_embd_head_v, n_head_kv_v, actual_n_tokens_v);
@@ -104,6 +122,8 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     cb(output_acc, "sparse_attn_out", -1);
     printf("SPARSE MLA: Final output shape: [%%" PRId64 ", %%" PRId64 ", %%" PRId64 "]\n",
            output_acc->ne[0], output_acc->ne[1], output_acc->ne[2]);
+    printf("Final memory usage: %s (total delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(),
+           format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());
     printf("SPARSE MLA: apply_sparse_attention completed successfully\n");
     fflush(stdout);
 
