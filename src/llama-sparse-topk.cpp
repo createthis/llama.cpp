@@ -132,6 +132,8 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
           // apply mask tile if available: [N_kv, Tc]
           if (mask2d) {
               ggml_tensor * mask_tc = ggml_view_2d(ctx, mask2d, N_kv, Tc, mask2d->nb[1], t0 * mask2d->nb[1]);
+              // ensure CUDA-friendly contiguous strides for broadcast add
+              mask_tc = ggml_cont(ctx, mask_tc);
               scores_tc = ggml_add(ctx, scores_tc, mask_tc);
           }
 
