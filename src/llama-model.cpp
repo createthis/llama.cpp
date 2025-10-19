@@ -27,19 +27,18 @@
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <cinttypes>
 
 
 // Debug helpers for tracking add() operand layouts during sparse attention
 static void llama_dbg_tensor(const char * tag, struct ggml_tensor * t, int il) {
     if (!t) { printf("DBG %s L%d: null\n", tag, il); return; }
-    printf(
-        "DBG %s L%d: ne=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] nb=[%zu,%zu,%zu,%zu] type=%d cont=%d rowcont=%d\n",
-        tag, il,
-        t->ne[0], t->ne[1], t->ne[2], t->ne[3],
-        t->nb[0], t->nb[1], t->nb[2], t->nb[3],
-        (int) t->type,
-        (int) ggml_is_contiguous(t), (int) ggml_is_contiguous_rows(t)
-    );
+    printf("DBG %s L%d: ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] type=%d cont=%d rowcont=%d\n",
+           tag, il,
+           (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3],
+           t->nb[0], t->nb[1], t->nb[2], t->nb[3],
+           (int) t->type,
+           (int) ggml_is_contiguous(t), (int) ggml_is_contiguous_rows(t));
 }
 
 static struct ggml_tensor * llama_add_dbg(struct ggml_context * ctx, struct ggml_tensor * a, struct ggml_tensor * b,
@@ -6749,7 +6748,7 @@ struct llm_build_llama_iswa : public llm_graph_context {
                 inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
             }
 
-            ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
+            ggml_tensor * ffn_inp = llama_add_dbg(ctx0, cur, inpSA, "ffn_inp", il);
             cb(ffn_inp, "ffn_inp", il);
 
             // feed-forward network (non-MoE)
