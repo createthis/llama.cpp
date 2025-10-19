@@ -13766,6 +13766,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                 
                 topk_indices = llama::sparse_attn_topk::select_topk_tokens(
                     ctx0, token_importance, n_tokens, cb_wrapper);
+                ggml_backend_sched_set_tensor_backend(sched, topk_indices, backend_cpu);
                 
                 // Check if we should use sparse attention (only when we have valid indices)
                 use_sparse_attention = (top_k > 0) && (top_k < n_tokens);
