@@ -14043,7 +14043,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                 inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
             }
 
-            ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
+            ggml_tensor * ffn_inp = llama_add_dbg(ctx0, cur, inpSA, "ffn_inp", il);
             cb(ffn_inp, "ffn_inp", il);
 
             cur = build_norm(ffn_inp,
