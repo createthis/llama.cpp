@@ -122,6 +122,8 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
 
     // 7) Sum across heads -> [1, T, T] -> reshape to [T, T]
     ggml_tensor * weighted_perm = ggml_permute(ctx, weighted, 1, 0, 2, 3);
+    // Ensure contiguous layout before sum_rows to satisfy nb[0] == sizeof(float)
+    weighted_perm = ggml_cont(ctx, weighted_perm);
     ggml_tensor * summed = ggml_sum_rows(ctx, weighted_perm);
     cb(summed, "indexer_logits_summed_1_T_T", layer_idx);
     ggml_tensor * token_importance = ggml_reshape_2d(ctx, summed, n_tokens, n_tokens);
