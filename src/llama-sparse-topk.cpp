@@ -70,6 +70,16 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
       cb(K2d, "kvaware_K2d", -1);
       cb(Q2d, "kvaware_Q2d", -1);
 
+      // Adapt Q rows to match Dk if necessary
+      if (Dq != Dk) {
+          if (Dq < Dk) {
+              Q2d = ggml_pad(ctx, Q2d, Dk - Dq, 0, 0, 0);
+          } else {
+              Q2d = ggml_view_2d(ctx, Q2d, Dk, Hq*T, Q2d->nb[1], 0);
+          }
+          cb(Q2d, "kvaware_Q2d_adapted", -1);
+      }
+
       ggml_tensor * logits = ggml_mul_mat(ctx, K2d, Q2d); // [Hkv*N_kv, Hq*T]
       cb(logits, "kvaware_logits_KNq_HqT", -1);
 
