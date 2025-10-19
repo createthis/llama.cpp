@@ -41,9 +41,9 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     printf("=== SPARSE INDEXER: Starting compute_token_importance for layer %d ===\n", layer_idx);
     size_t initial_mem = ggml_used_mem(ctx);
     printf("Initial memory usage: %s\n", format_memory_size(initial_mem).c_str());
-    printf("Input tensor cur shape: [" PRId64 ", " PRId64 ", " PRId64 ", " PRId64 "]\n",
+    printf("Input tensor cur shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
            cur->ne[0], cur->ne[1], cur->ne[2], cur->ne[3]);
-    printf("Input tensor cur total elements: " PRId64 "\n", ggml_nelements(cur));
+    printf("Input tensor cur total elements: %" PRId64 "\n", ggml_nelements(cur));
     fflush(stdout);
 
     const int64_t n_tokens = cur->ne[1];
@@ -127,7 +127,7 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     ggml_tensor * token_importance = ggml_reshape_2d(ctx, summed, n_tokens, n_tokens);
     cb(token_importance, "token_importance_final_T_T", layer_idx);
 
-    printf("SPARSE INDEXER: Final token_importance [T,T]=[%%" PRId64 ", %%" PRId64 "]\n",
+    printf("SPARSE INDEXER: Final token_importance [T,T]=[%" PRId64 ", %" PRId64 "]\n",
            token_importance->ne[0], token_importance->ne[1]);
     printf("Final memory usage: %s (total delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(),
            format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());

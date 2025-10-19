@@ -20,7 +20,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
     (void)n_tokens; // Unused parameter
 
     printf("SPARSE TOPK: Starting select_topk_tokens\n");
-    printf("SPARSE TOPK: token_importance shape: [%%" PRId64 ", %%" PRId64 ", %%" PRId64 ", %%" PRId64 "]\n",
+    printf("SPARSE TOPK: token_importance shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
            token_importance->ne[0], token_importance->ne[1], token_importance->ne[2], token_importance->ne[3]);
     fflush(stdout);
 
@@ -39,7 +39,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
     ggml_tensor * topk_indices = ggml_top_k(ctx, logits_masked, top_k);
     cb(topk_indices, "topk_indices", -1);
 
-    printf("SPARSE TOPK: Final topk_indices shape: [%%" PRId64 ", %%" PRId64 ", %%" PRId64 ", %%" PRId64 "]\n",
+    printf("SPARSE TOPK: Final topk_indices shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
            topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);
     fflush(stdout);
 
