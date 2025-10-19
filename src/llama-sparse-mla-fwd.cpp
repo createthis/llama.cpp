@@ -127,4 +127,68 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     return output_acc;
 }
 
+  ggml_tensor * sparse_mla_fwd::apply_sparse_attention_kvaware(
+      ggml_context * ctx,
+      ggml_tensor * q_cur,
+      ggml_tensor * k_cache,
+      ggml_tensor * v_cache,
+      ggml_tensor * topk_indices,
+      int64_t n_tokens,
+      int64_t top_k,
+      const function<void(ggml_tensor *, const char *, int)> & cb) {
+      (void)n_tokens;
+
+      const int64_t Dk   = k_cache->ne[0];
+      const int64_t Hkv  = k_cache->ne[1];
+      const int64_t N_kv = k_cache->ne[2];
+      const int64_t Dv   = v_cache->ne[0];
+      const int64_t Hkv_v= v_cache->ne[1];
+      const int64_t N_kv_v=v_cache->ne[2];
+
+      const int64_t Dq   = q_cur->ne[0];
+      const int64_t Hq   = q_cur->ne[1];
+      const int64_t T    = q_cur->ne[2];
+
+      cb(k_cache, "kvaware_k_cache", -1);
+      cb(v_cache, "kvaware_v_cache", -1);
+      cb(q_cur,   "kvaware_q_cur",   -1);
+      cb(topk_indices, "kvaware_topk_indices", -1);
+
+      ggml_tensor * K4d = ggml_reshape_4d(ctx, k_cache, Dk*Hkv, N_kv, 1, 1);
+      ggml_tensor * V4d = ggml_reshape_4d(ctx, v_cache, Dv*Hkv_v, N_kv_v, 1, 1);
+
+      ggml_tensor * q_all_2d = ggml_reshape_2d(ctx, q_cur, Dq, Hq*T);
+
+      ggml_tensor * output_acc = nullptr;
+      for (int64_t t = 0; t < T; ++t) {
+          ggml_tensor * idx_t_2d = ggml_view_2d(ctx, topk_indices, top_k, 1, topk_indices->nb[1], t * topk_indices->nb[1]);
+          ggml_tensor * idx_t_4d = ggml_reshape_4d(ctx, idx_t_2d, top_k, 1, 1, 1);
+
+          ggml_tensor * k_sel_4d = ggml_get_rows(ctx, K4d, idx_t_4d); // [Dk*Hkv, top_k]
+          ggml_tensor * v_sel_4d = ggml_get_rows(ctx, V4d, idx_t_4d); // [Dv*Hkv, top_k]
+
+          ggml_tensor * k_sel_2d = ggml_reshape_2d(ctx, k_sel_4d, Dk, Hkv*top_k);
+          ggml_tensor * v_sel_2d = ggml_reshape_2d(ctx, v_sel_4d, Dv, Hkv_v*top_k);
+          v_sel_2d = ggml_cont(ctx, ggml_transpose(ctx, v_sel_2d)); // [Hkv_v*top_k, Dv]
+
+          size_t q_off = t * Hq * q_all_2d->nb[1];
+          ggml_tensor * q_t_2d = ggml_view_2d(ctx, q_all_2d, Dq, Hq, q_all_2d->nb[1], q_off);
+
+          ggml_tensor * scores_t = ggml_mul_mat(ctx, k_sel_2d, q_t_2d); // [Hkv*top_k, Hq]
+          const float kq_scale = 1.0f / sqrtf((float)Dk);
+          scores_t = ggml_scale(ctx, scores_t, kq_scale);
+          ggml_tensor * weights_t = ggml_soft_max(ctx, scores_t);
+
+          ggml_tensor * out2d_t = ggml_mul_mat(ctx, weights_t, v_sel_2d); // [Hq, Dv]
+          ggml_tensor * out2d_t_T = ggml_cont(ctx, ggml_transpose(ctx, out2d_t)); // [Dv, Hq]
+          ggml_tensor * out3d_t = ggml_reshape_3d(ctx, out2d_t_T, Dv, Hq, 1);
+
+          if (!output_acc) output_acc = out3d_t; else output_acc = ggml_concat(ctx, output_acc, out3d_t, 2);
+      }
+
+      cb(output_acc, "kvaware_sparse_attn_out", -1);
+      return output_acc;
+  }
+
+
 } // namespace llama

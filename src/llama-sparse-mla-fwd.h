@@ -24,7 +24,19 @@ struct sparse_mla_fwd {
         int64_t n_tokens,
         int64_t top_k,
         const function<void(ggml_tensor *, const char *, int)> & cb);
+
+    // KV-aware variant: gather from full KV cache tensors instead of current block
+    static ggml_tensor * apply_sparse_attention_kvaware(
+        ggml_context * ctx,
+        ggml_tensor * q_cur,     // [Dq, Hq, T]
+        ggml_tensor * k_cache,   // [Dk, Hkv, N_kv]
+        ggml_tensor * v_cache,   // [Dv, Hkv, N_kv]
+        ggml_tensor * topk_indices, // [top_k, T]
+        int64_t n_tokens,
+        int64_t top_k,
+        const function<void(ggml_tensor *, const char *, int)> & cb);
 };
+
 
 } // namespace llama
 

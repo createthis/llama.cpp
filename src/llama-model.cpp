@@ -13759,17 +13759,10 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
             if (model.layers[il].attn_indexer_k_norm != nullptr) {
                 // Use the new sparse attention implementation for indexer computation
                 
-                token_importance = llama::sparse_attn_indexer::compute_token_importance(
-                    ctx0, model, il, cur, is_lite, cb_wrapper);
-                
-                top_k = (64 < n_tokens) ? 64 : n_tokens;  // Use top-64 tokens for sparse attention
-                
-                topk_indices = llama::sparse_attn_topk::select_topk_tokens(
-                    ctx0, token_importance, n_tokens, cb_wrapper);
-                ggml_backend_sched_set_tensor_backend(sched, topk_indices, backend_cpu);
-                
-                // Check if we should use sparse attention (only when we have valid indices)
-                use_sparse_attention = (top_k > 0) && (top_k < n_tokens);
+                // Defer KV-aware top-k computation to the attention block using KV cache
+                use_sparse_attention = true;
+                top_k = 0;
+                topk_indices = nullptr;
             }
 
             // self_attention
@@ -13884,9 +13877,24 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
                         }
                         
-                        // Use sparse attention with top-k tokens
-                        cur = llama::sparse_mla_fwd::apply_sparse_attention(
-                            ctx0, Qcur, Kcur, Vcur, topk_indices, n_tokens, top_k, cb_wrapper);
+                        // Use sparse attention with top-k tokens (KV-aware)
+                        {
+                            const auto * mctx_cur2 = inp_attn->mctx;
+                            ggml_tensor * Kcache = mctx_cur2->get_k(ctx0, il);
+                            ggml_tensor * Vcache = mctx_cur2->get_v(ctx0, il);
+                            ggml_tensor * KQmask2 = inp_attn->get_kq_mask();
+                            ggml_tensor * q_for_topk_3d = ggml_view_3d(ctx0, q,
+                                    n_embd_head_k, n_head, n_tokens,
+                                    ggml_row_size(q->type, n_embd_head_k),
+                                    ggml_row_size(q->type, n_embd_head_k) * n_head,
+                                    0);
+                            top_k = std::min<int64_t>(64, (int64_t) Kcache->ne[2]);
+                            ggml_tensor * kvaware_indices = llama::sparse_attn_topk::select_topk_tokens_kvaware(
+                                ctx0, q_for_topk_3d, Kcache, KQmask2, top_k, cb_wrapper);
+                            ggml_backend_sched_set_tensor_backend(sched, kvaware_indices, backend_cpu);
+                            cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
+                                ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, cb_wrapper);
+                        }
 
                         if (!cparams.offload_kqv) {
                             /* sparse: follow dense behavior by placing on CPU when not offloading */
@@ -13958,9 +13966,24 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
                         }
                         
-                        // Use sparse attention with top-k tokens
-                        cur = llama::sparse_mla_fwd::apply_sparse_attention(
-                            ctx0, Qcur, Kcur, Vcur, topk_indices, n_tokens, top_k, cb_wrapper);
+                        // Use sparse attention with top-k tokens (KV-aware)
+                        {
+                            const auto * mctx_cur2 = inp_attn->mctx;
+                            ggml_tensor * Kcache = mctx_cur2->get_k(ctx0, il);
+                            ggml_tensor * Vcache = mctx_cur2->get_v(ctx0, il);
+                            ggml_tensor * KQmask2 = inp_attn->get_kq_mask();
+                            ggml_tensor * q_for_topk_3d = ggml_view_3d(ctx0, q,
+                                    n_embd_head_k, n_head, n_tokens,
+                                    ggml_row_size(q->type, n_embd_head_k),
+                                    ggml_row_size(q->type, n_embd_head_k) * n_head,
+                                    0);
+                            top_k = std::min<int64_t>(64, (int64_t) Kcache->ne[2]);
+                            ggml_tensor * kvaware_indices = llama::sparse_attn_topk::select_topk_tokens_kvaware(
+                                ctx0, q_for_topk_3d, Kcache, KQmask2, top_k, cb_wrapper);
+                            ggml_backend_sched_set_tensor_backend(sched, kvaware_indices, backend_cpu);
+                            cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
+                                ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, cb_wrapper);
+                        }
 
                         if (!cparams.offload_kqv) {
                             /* sparse: follow dense behavior by placing on CPU when not offloading */
