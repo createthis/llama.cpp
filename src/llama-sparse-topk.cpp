@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 
 namespace llama {
 
@@ -138,6 +139,13 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
               mask_tc   = ggml_cont(ctx, mask_tc);
               // scores as src0 should also be contiguous rows to avoid scheduler selecting awkward views
               scores_tc = ggml_cont(ctx, scores_tc);
+              fprintf(stderr, "KV-AWARE ADD DBG: scores_tc nb=[%zu,%zu,%zu,%zu], mask_tc nb=[%zu,%zu,%zu,%zu]\n",
+                      scores_tc->nb[0], scores_tc->nb[1], scores_tc->nb[2], scores_tc->nb[3],
+                      mask_tc->nb[0],   mask_tc->nb[1],   mask_tc->nb[2],   mask_tc->nb[3]);
+              fprintf(stderr, "KV-AWARE ADD DBG: scores_tc ne=[%lld,%lld,%lld,%lld], mask_tc ne=[%lld,%lld,%lld,%lld]\n",
+                      (long long)scores_tc->ne[0], (long long)scores_tc->ne[1], (long long)scores_tc->ne[2], (long long)scores_tc->ne[3],
+                      (long long)mask_tc->ne[0],   (long long)mask_tc->ne[1],   (long long)mask_tc->ne[2],   (long long)mask_tc->ne[3]);
+              fflush(stderr);
               scores_tc = ggml_add(ctx, scores_tc, mask_tc);
           }
 
