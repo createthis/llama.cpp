@@ -63,18 +63,14 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     cb(k_cur_4d, "k_cur_4d", -1);
     cb(v_cur_4d, "v_cur_4d", -1);
 
-    // Convert indices to I32 and reshape to [top_k, T, 1, 1]
-    ggml_tensor * indices_i32 = topk_indices;
-    if (topk_indices->type != GGML_TYPE_I32) {
-        indices_i32 = ggml_cast(ctx, topk_indices, GGML_TYPE_I32);
-        cb(indices_i32, "indices_i32", -1);
-    }
-    ggml_tensor * indices_src = ggml_cont(ctx, indices_i32);
+    // Prepare indices as [top_k, T, 1, 1] without creating copies (avoid CUDA i32->i32 cpy)
     ggml_tensor * indices_full = nullptr;
     if (topk_indices->ne[1] == 1) {
-        indices_full = ggml_repeat_4d(ctx, indices_src, top_k, actual_n_tokens_q, 1, 1);
+        // Single column of indices; reuse the same for all t without repeat
+        indices_full = topk_indices; // will handle per-t reshape below
     } else {
-        indices_full = ggml_reshape_4d(ctx, indices_src, top_k, actual_n_tokens_q, 1, 1);
+        // Already per-token columns; just view as 4D
+        indices_full = ggml_reshape_4d(ctx, topk_indices, top_k, actual_n_tokens_q, 1, 1);
     }
     cb(indices_full, "indices_full", -1);
 
@@ -84,9 +80,15 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     ggml_tensor * output_acc = nullptr;
     for (int64_t t = 0; t < actual_n_tokens_q; ++t) {
         // Slice indices for query t: [top_k, 1, 1, 1]
-        size_t idx_off = t * indices_full->nb[1];
-        ggml_tensor * idx_t_2d = ggml_view_2d(ctx, indices_full, top_k, 1, indices_full->nb[1], idx_off);
-        ggml_tensor * idx_t_4d = ggml_reshape_4d(ctx, idx_t_2d, top_k, 1, 1, 1);
+        ggml_tensor * idx_t_4d = nullptr;
+        if (indices_full->ne[1] == 1) {
+            // Use the same column for all t
+            idx_t_4d = ggml_reshape_4d(ctx, indices_full, top_k, 1, 1, 1);
+        } else {
+            size_t idx_off = t * indices_full->nb[1];
+            ggml_tensor * idx_t_2d = ggml_view_2d(ctx, indices_full, top_k, 1, indices_full->nb[1], idx_off);
+            idx_t_4d = ggml_reshape_4d(ctx, idx_t_2d, top_k, 1, 1, 1);
+        }
 
         // Select K and V rows
         ggml_tensor * k_sel_4d = ggml_get_rows(ctx, k_cur_4d, idx_t_4d); // [Dk*Hkv, top_k, 1, 1]
