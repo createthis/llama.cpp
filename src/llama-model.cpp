@@ -13748,8 +13748,6 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
 
             // Sparse attention indexer for DeepSeek V3.2
             // This should be computed BEFORE the regular attention using the normalized hidden state
-            ggml_tensor * token_importance = nullptr;
-            ggml_tensor * topk_indices = nullptr;
             bool use_sparse_attention = false;
             int64_t top_k = 0;
             auto cb_wrapper = [this](ggml_tensor * cur, const char * name, int il) {
@@ -13762,7 +13760,6 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                 // Defer KV-aware top-k computation to the attention block using KV cache
                 use_sparse_attention = true;
                 top_k = 0;
-                topk_indices = nullptr;
             }
 
             // self_attention
