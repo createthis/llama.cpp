@@ -66,51 +66,68 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
       const int64_t N_kv = k_cache->ne[2];
 
       ggml_tensor * K2d = ggml_reshape_2d(ctx, k_cache, Dk, Hkv * N_kv);
-      ggml_tensor * Q2d = ggml_reshape_2d(ctx, q_cur,   Dq, Hq * T);
       cb(K2d, "kvaware_K2d", -1);
-      cb(Q2d, "kvaware_Q2d", -1);
+      // For Hkv == 1, view K as [Dk, N_kv] and precompute its transpose once
+      ggml_tensor * Ksum2d = nullptr;
+      ggml_tensor * KsumT  = nullptr;
+      if (Hkv == 1) {
+          Ksum2d = ggml_view_2d(ctx, K2d, Dk, N_kv, K2d->nb[1], 0);
+          KsumT  = ggml_transpose(ctx, Ksum2d); // [N_kv, Dk]
+      }
 
-      // Adapt Q rows to match Dk if necessary
+      // Prepare mask as 2D [N_kv, T] if provided
+      ggml_tensor * mask2d = nullptr;
+      if (kq_mask) {
+          mask2d = ggml_cont(ctx, kq_mask);
+          if (mask2d->ne[0] == N_kv && mask2d->ne[1] >= T) {
+              mask2d = ggml_view_2d(ctx, mask2d, N_kv, T, mask2d->nb[1], 0);
+          }
+      }
+
+      // Vectorized implementation across all T to avoid O(T) node explosion
+      const int64_t k = std::min<int64_t>(top_k, N_kv);
+
+      // 2D view of Q: [Dq, Hq*T]
+      ggml_tensor * Q2d_full = ggml_reshape_2d(ctx, q_cur, Dq, Hq * T);
+      cb(Q2d_full, "kvaware_Q2d", -1);
+
+      // Adapt Q rows to match Dk if necessary across the entire view
       if (Dq != Dk) {
           if (Dq < Dk) {
-              Q2d = ggml_pad(ctx, Q2d, Dk - Dq, 0, 0, 0);
+              Q2d_full = ggml_pad(ctx, Q2d_full, Dk - Dq, 0, 0, 0);
           } else {
-              Q2d = ggml_view_2d(ctx, Q2d, Dk, Hq*T, Q2d->nb[1], 0);
+              Q2d_full = ggml_view_2d(ctx, Q2d_full, Dk, Hq * T, Q2d_full->nb[1], 0);
           }
-          cb(Q2d, "kvaware_Q2d_adapted", -1);
       }
 
-      ggml_tensor * logits = ggml_mul_mat(ctx, K2d, Q2d); // [Hkv*N_kv, Hq*T]
-      cb(logits, "kvaware_logits_KNq_HqT", -1);
-
-      ggml_tensor * logits4 = ggml_reshape_4d(ctx, logits, N_kv, Hkv, Hq, T);
-      cb(logits4, "kvaware_logits4_Nkv_Hkv_Hq_T", -1);
-
-      // Sum across Hkv, Hq -> [N_kv, T]
-      ggml_tensor * tmp1 = ggml_permute(ctx, logits4, 1, 0, 2, 3); // [Hkv, N_kv, Hq, T]
-      tmp1 = ggml_cont(ctx, tmp1);
-      ggml_tensor * sum1 = ggml_sum_rows(ctx, tmp1);               // [1, N_kv, Hq, T]
-      ggml_tensor * logits3 = ggml_reshape_3d(ctx, sum1, N_kv, Hq, T);
-      ggml_tensor * tmp2 = ggml_permute(ctx, logits3, 1, 0, 2, 3); // [Hq, N_kv, T, 1]
-      tmp2 = ggml_cont(ctx, tmp2);
-      ggml_tensor * sum2 = ggml_sum_rows(ctx, tmp2);               // [1, N_kv, T, 1]
-      ggml_tensor * logits2 = ggml_reshape_2d(ctx, sum2, N_kv, T); // [N_kv, T]
-      cb(logits2, "kvaware_logits2_Nkv_T", -1);
-
-      ggml_tensor * logits_masked = logits2;
-      if (kq_mask) {
-          ggml_tensor * mask = ggml_cont(ctx, kq_mask);
-          if (mask->ne[0] == N_kv && mask->ne[1] >= T) {
-              mask = ggml_view_2d(ctx, mask, N_kv, T, mask->nb[1], 0);
-          }
-          logits_masked = ggml_add(ctx, logits2, mask);
+      // logits_all: [*, Hq*T]
+      ggml_tensor * logits_all = nullptr;
+      if (Hkv == 1) {
+          // Ksum2d: [Dk, N_kv]
+          logits_all = ggml_mul_mat(ctx, Ksum2d, Q2d_full);                 // [N_kv, Hq*T]
+      } else {
+          ggml_tensor * tmp = ggml_mul_mat(ctx, K2d, Q2d_full);             // [Hkv*N_kv, Hq*T]
+          ggml_tensor * tmp3 = ggml_reshape_3d(ctx, tmp, Hkv, N_kv, Hq*T);  // [Hkv, N_kv, Hq*T]
+          ggml_tensor * sum_hkv = ggml_sum_rows(ctx, tmp3);                 // [1, N_kv, Hq*T]
+          logits_all = ggml_reshape_2d(ctx, sum_hkv, N_kv, Hq*T);           // [N_kv, Hq*T]
       }
-      cb(logits_masked, "kvaware_logits_masked_Nkv_T", -1);
 
-      const int64_t k = std::min<int64_t>(top_k, N_kv);
-      ggml_tensor * topk_indices = ggml_top_k(ctx, logits_masked, k); // [k, T]
-      cb(topk_indices, "kvaware_topk_indices_k_T", -1);
-      return topk_indices;
+      // Sum over query heads Hq -> [N_kv, T]
+      ggml_tensor * logits3_q = ggml_reshape_3d(ctx, logits_all, N_kv, Hq, T); // [N_kv, Hq, T]
+      ggml_tensor * perm_q    = ggml_permute(ctx, logits3_q, 1, 0, 2, 3);      // [Hq, N_kv, T]
+      perm_q = ggml_cont(ctx, perm_q);
+      ggml_tensor * sum_hq    = ggml_sum_rows(ctx, perm_q);                    // [1, N_kv, T]
+      ggml_tensor * scores2d  = ggml_reshape_2d(ctx, sum_hq, N_kv, T);         // [N_kv, T]
+
+      // apply mask if available: [N_kv, T]
+      ggml_tensor * masked = scores2d;
+      if (mask2d) {
+          masked = ggml_add(ctx, scores2d, mask2d);
+      }
+
+      ggml_tensor * result = ggml_top_k(ctx, masked, k); // [k, T]
+      cb(result, "kvaware_topk_indices_k_T", -1);
+      return result;
   }
 
 
