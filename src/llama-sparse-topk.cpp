@@ -67,12 +67,10 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
 
       ggml_tensor * K2d = ggml_reshape_2d(ctx, k_cache, Dk, Hkv * N_kv);
       cb(K2d, "kvaware_K2d", -1);
-      // For Hkv == 1, view K as [Dk, N_kv] and precompute its transpose once
+      // For Hkv == 1, view K as [Dk, N_kv]
       ggml_tensor * Ksum2d = nullptr;
-      ggml_tensor * KsumT  = nullptr;
       if (Hkv == 1) {
           Ksum2d = ggml_view_2d(ctx, K2d, Dk, N_kv, K2d->nb[1], 0);
-          KsumT  = ggml_transpose(ctx, Ksum2d); // [N_kv, Dk]
       }
 
       // Prepare mask as 2D [N_kv, T] if provided
@@ -100,32 +98,46 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
           }
       }
 
-      // logits_all: [*, Hq*T]
-      ggml_tensor * logits_all = nullptr;
-      if (Hkv == 1) {
-          // Ksum2d: [Dk, N_kv]
-          logits_all = ggml_mul_mat(ctx, Ksum2d, Q2d_full);                 // [N_kv, Hq*T]
-      } else {
-          ggml_tensor * tmp = ggml_mul_mat(ctx, K2d, Q2d_full);             // [Hkv*N_kv, Hq*T]
-          ggml_tensor * tmp3 = ggml_reshape_3d(ctx, tmp, Hkv, N_kv, Hq*T);  // [Hkv, N_kv, Hq*T]
-          ggml_tensor * sum_hkv = ggml_sum_rows(ctx, tmp3);                 // [1, N_kv, Hq*T]
-          logits_all = ggml_reshape_2d(ctx, sum_hkv, N_kv, Hq*T);           // [N_kv, Hq*T]
+      // Chunked computation across tokens to avoid materializing [N_kv, Hq*T]
+      const int64_t TILE_T = 128; // tuneable
+      ggml_tensor * result = nullptr; // [k, T]
+      for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {
+          const int64_t Tc = std::min<int64_t>(TILE_T, T - t0);
+          // Q_tile: [Dk, Hq*Tc]
+          size_t q_off = t0 * Hq * Q2d_full->nb[1];
+          ggml_tensor * Q_tile = ggml_view_2d(ctx, Q2d_full, Dk, Hq * Tc, Q2d_full->nb[1], q_off);
+
+          // logits_tile: [*, Hq*Tc]
+          ggml_tensor * logits_tile = nullptr;
+          if (Hkv == 1) {
+              logits_tile = ggml_mul_mat(ctx, Ksum2d, Q_tile);                // [N_kv, Hq*Tc]
+          } else {
+              ggml_tensor * tmp = ggml_mul_mat(ctx, K2d, Q_tile);             // [Hkv*N_kv, Hq*Tc]
+              ggml_tensor * tmp3 = ggml_reshape_3d(ctx, tmp, Hkv, N_kv, Hq*Tc); // [Hkv, N_kv, Hq*Tc]
+              ggml_tensor * sum_hkv = ggml_sum_rows(ctx, tmp3);               // [1, N_kv, Hq*Tc]
+              logits_tile = ggml_reshape_2d(ctx, sum_hkv, N_kv, Hq*Tc);       // [N_kv, Hq*Tc]
+          }
+
+          // Sum over Hq -> [N_kv, Tc]
+          ggml_tensor * logits3_q = ggml_reshape_3d(ctx, logits_tile, N_kv, Hq, Tc); // [N_kv, Hq, Tc]
+          ggml_tensor * perm_q    = ggml_permute(ctx, logits3_q, 1, 0, 2, 3);        // [Hq, N_kv, Tc]
+          perm_q = ggml_cont(ctx, perm_q);
+          ggml_tensor * sum_hq    = ggml_sum_rows(ctx, perm_q);                        // [1, N_kv, Tc]
+          ggml_tensor * scores_tc = ggml_reshape_2d(ctx, sum_hq, N_kv, Tc);            // [N_kv, Tc]
+
+          // apply mask tile if available: [N_kv, Tc]
+          if (mask2d) {
+              ggml_tensor * mask_tc = ggml_view_2d(ctx, mask2d, N_kv, Tc, mask2d->nb[1], t0 * mask2d->nb[1]);
+              scores_tc = ggml_add(ctx, scores_tc, mask_tc);
+          }
+
+          // top-k for this tile -> [k, Tc]
+          ggml_tensor * topk_tc = ggml_top_k(ctx, scores_tc, k);
+
+          // accumulate across tiles along dim 1
+          result = result ? ggml_concat(ctx, result, topk_tc, 1) : topk_tc;
       }
 
-      // Sum over query heads Hq -> [N_kv, T]
-      ggml_tensor * logits3_q = ggml_reshape_3d(ctx, logits_all, N_kv, Hq, T); // [N_kv, Hq, T]
-      ggml_tensor * perm_q    = ggml_permute(ctx, logits3_q, 1, 0, 2, 3);      // [Hq, N_kv, T]
-      perm_q = ggml_cont(ctx, perm_q);
-      ggml_tensor * sum_hq    = ggml_sum_rows(ctx, perm_q);                    // [1, N_kv, T]
-      ggml_tensor * scores2d  = ggml_reshape_2d(ctx, sum_hq, N_kv, T);         // [N_kv, T]
-
-      // apply mask if available: [N_kv, T]
-      ggml_tensor * masked = scores2d;
-      if (mask2d) {
-          masked = ggml_add(ctx, scores2d, mask2d);
-      }
-
-      ggml_tensor * result = ggml_top_k(ctx, masked, k); // [k, T]
       cb(result, "kvaware_topk_indices_k_T", -1);
       return result;
   }
