@@ -99,7 +99,11 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
       }
 
       // Chunked computation across tokens to avoid materializing [N_kv, Hq*T]
-      const int64_t TILE_T = 128; // tuneable
+      int64_t TILE_T = 32; // tuneable; can override via LLAMA_SPARSE_TOPK_TILE_T
+      if (const char *env = getenv("LLAMA_SPARSE_TOPK_TILE_T")) {
+          long v = strtol(env, nullptr, 10);
+          if (v > 0 && v <= 4096) TILE_T = v;
+      }
       ggml_tensor * result = nullptr; // [k, T]
       for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {
           const int64_t Tc = std::min<int64_t>(TILE_T, T - t0);
