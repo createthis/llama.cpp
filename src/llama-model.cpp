@@ -13880,14 +13880,16 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_tensor * Kcache = mctx_cur2->get_k(ctx0, il);
                             ggml_tensor * Vcache = mctx_cur2->get_v(ctx0, il);
                             ggml_tensor * KQmask2 = inp_attn->get_kq_mask();
-                            ggml_tensor * q_for_topk_3d = ggml_view_3d(ctx0, q,
-                                    n_embd_head_k, n_head, n_tokens,
+                            // Build Q compatible with Kcache D (pre-absorption): concat(q_pe, q_nope)
+                            ggml_tensor * q_nope_kcompat = ggml_view_3d(ctx0, q,
+                                    n_embd_head_qk_nope, n_head, n_tokens,
                                     ggml_row_size(q->type, n_embd_head_k),
                                     ggml_row_size(q->type, n_embd_head_k) * n_head,
                                     0);
+                            ggml_tensor * q_kcompat = ggml_concat(ctx0, q_pe, q_nope_kcompat, 0);
                             top_k = std::min<int64_t>(64, (int64_t) Kcache->ne[2]);
                             ggml_tensor * kvaware_indices = llama::sparse_attn_topk::select_topk_tokens_kvaware(
-                                ctx0, q_for_topk_3d, Kcache, KQmask2, top_k, cb_wrapper);
+                                ctx0, q_kcompat, Kcache, KQmask2, top_k, cb_wrapper);
                             ggml_backend_sched_set_tensor_backend(sched, kvaware_indices, backend_cpu);
                             cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
                                 ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, cb_wrapper);
@@ -13969,14 +13971,16 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_tensor * Kcache = mctx_cur2->get_k(ctx0, il);
                             ggml_tensor * Vcache = mctx_cur2->get_v(ctx0, il);
                             ggml_tensor * KQmask2 = inp_attn->get_kq_mask();
-                            ggml_tensor * q_for_topk_3d = ggml_view_3d(ctx0, q,
-                                    n_embd_head_k, n_head, n_tokens,
+                            // Build Q compatible with Kcache D (pre-absorption): concat(q_pe, q_nope)
+                            ggml_tensor * q_nope_kcompat = ggml_view_3d(ctx0, q,
+                                    n_embd_head_qk_nope, n_head, n_tokens,
                                     ggml_row_size(q->type, n_embd_head_k),
                                     ggml_row_size(q->type, n_embd_head_k) * n_head,
                                     0);
+                            ggml_tensor * q_kcompat = ggml_concat(ctx0, q_pe, q_nope_kcompat, 0);
                             top_k = std::min<int64_t>(64, (int64_t) Kcache->ne[2]);
                             ggml_tensor * kvaware_indices = llama::sparse_attn_topk::select_topk_tokens_kvaware(
-                                ctx0, q_for_topk_3d, Kcache, KQmask2, top_k, cb_wrapper);
+                                ctx0, q_kcompat, Kcache, KQmask2, top_k, cb_wrapper);
                             ggml_backend_sched_set_tensor_backend(sched, kvaware_indices, backend_cpu);
                             cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
                                 ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, cb_wrapper);
