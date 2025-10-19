@@ -126,14 +126,18 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
           ggml_tensor * logits3_q = ggml_reshape_3d(ctx, logits_tile, N_kv, Hq, Tc); // [N_kv, Hq, Tc]
           ggml_tensor * perm_q    = ggml_permute(ctx, logits3_q, 1, 0, 2, 3);        // [Hq, N_kv, Tc]
           perm_q = ggml_cont(ctx, perm_q);
-          ggml_tensor * sum_hq    = ggml_sum_rows(ctx, perm_q);                        // [1, N_kv, Tc]
-          ggml_tensor * scores_tc = ggml_reshape_2d(ctx, sum_hq, N_kv, Tc);            // [N_kv, Tc]
+          ggml_tensor * sum_hq    = ggml_sum_rows(ctx, perm_q);                      // [1, N_kv, Tc]
+          ggml_tensor * scores_tc = ggml_reshape_2d(ctx, sum_hq, N_kv, Tc);          // [N_kv, Tc]
+          // Ensure CUDA-friendly layout for subsequent broadcast add with mask
+          scores_tc = ggml_cont(ctx, scores_tc);
 
           // apply mask tile if available: [N_kv, Tc]
           if (mask2d) {
               ggml_tensor * mask_tc = ggml_view_2d(ctx, mask2d, N_kv, Tc, mask2d->nb[1], t0 * mask2d->nb[1]);
-              // ensure CUDA-friendly contiguous strides for broadcast add
-              mask_tc = ggml_cont(ctx, mask_tc);
+              // ensure CUDA-friendly contiguous strides for broadcast add (src1 must have nb0 == sizeof(type))
+              mask_tc   = ggml_cont(ctx, mask_tc);
+              // scores as src0 should also be contiguous rows to avoid scheduler selecting awkward views
+              scores_tc = ggml_cont(ctx, scores_tc);
               scores_tc = ggml_add(ctx, scores_tc, mask_tc);
           }
 

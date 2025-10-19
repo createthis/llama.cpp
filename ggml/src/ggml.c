@@ -23,6 +23,8 @@
 #include <assert.h>
 #include <errno.h>
 #include <time.h>
+#include <inttypes.h>
+
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1919,6 +1921,11 @@ static struct ggml_tensor * ggml_add_impl(
         struct ggml_tensor  * b,
         bool                  inplace) {
     GGML_ASSERT(ggml_can_repeat(b, a));
+
+    // Ensure RHS has CUDA-friendly stride alignment for broadcast add
+    if (ggml_type_size(b->type) > 0 && (b->nb[1] % ggml_type_size(b->type)) != 0) {
+        b = ggml_cont(ctx, b);
+    }
 
     struct ggml_tensor * result = inplace ? ggml_view_tensor(ctx, a) : ggml_dup_tensor(ctx, a);
 
