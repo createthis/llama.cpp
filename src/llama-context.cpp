@@ -1362,7 +1362,11 @@ void llama_context::output_reorder() {
 //
 
 uint32_t llama_context::graph_max_nodes() const {
-    return std::max<uint32_t>(1024u, 8u*model.n_tensors());
+    uint32_t base = std::max<uint32_t>(1024u, 8u*model.n_tensors());
+    if (model.arch == LLM_ARCH_DEEPSEEK3_2) {
+        base = std::max<uint32_t>(base, 16u*model.n_tensors());
+    }
+    return base;
 }
 
 llm_graph_result * llama_context::get_gf_res_reserve() const {
