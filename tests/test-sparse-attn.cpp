@@ -190,7 +190,7 @@ void test_compute_token_importance() {
                 test_ctx.ctx, *model, 0, cur, is_lite, cb);
 
             if (token_importance) {
-                printf("Success: token_importance tensor created with shape [%" PRId64 ", %" PRId64 "]\n", 
+                printf("Success: token_importance tensor created with shape [%" PRId64 ", %" PRId64 "]\n",
                        token_importance->ne[0], token_importance->ne[1]);
                 fflush(stdout);
             } else {
@@ -248,7 +248,7 @@ void test_select_topk_tokens() {
             test_ctx.ctx, token_importance, n_tokens, cb);
 
         if (topk_indices) {
-            printf("Success: topk_indices tensor created with shape [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+            printf("Success: topk_indices tensor created with shape [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
                    topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);
             fflush(stdout);
         } else {
@@ -334,7 +334,7 @@ void test_apply_sparse_attention_simple() {
             assert(ggml_nelements(result) == n_embd_head * n_head_q * n_tokens);
             printf("Shape validation passed: result tensor has correct dimensions\n");
 
-            printf("Success: sparse attention result tensor created with shape [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+            printf("Success: sparse attention result tensor created with shape [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
                    result->ne[0], result->ne[1], result->ne[2]);
             fflush(stdout);
         } else {
@@ -417,7 +417,7 @@ void test_problematic_reshape() {
     // Create key tensor with exact same dimensions as in the real model
     ggml_tensor * k_cur = ggml_new_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, n_tokens);
 
-    printf("Created Kcur tensor with dimensions: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+    printf("Created Kcur tensor with dimensions: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
            k_cur->ne[0], k_cur->ne[1], k_cur->ne[2]);
     printf("Total elements: %" PRId64 "\n", ggml_nelements(k_cur));
     fflush(stdout);
@@ -485,7 +485,7 @@ void test_fixed_reshape_operation() {
     // Create key tensor with actual dimensions
     ggml_tensor * k_cur = ggml_new_tensor_3d(test_ctx.ctx, GGML_TYPE_F32, n_embd_head, n_head_kv, actual_n_tokens);
 
-    printf("Created Kcur tensor with dimensions: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", 
+    printf("Created Kcur tensor with dimensions: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
            k_cur->ne[0], k_cur->ne[1], k_cur->ne[2]);
     fflush(stdout);
     printf("Total elements: %" PRId64 "\n", ggml_nelements(k_cur));
