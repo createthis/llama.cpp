@@ -109,8 +109,8 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
 
         // Attention: scores and weights
         ggml_tensor * scores_t = ggml_mul_mat(ctx, k_sel_2d, q_t_2d); // [n_head_kv*top_k, n_head_q]
-        const float kq_scale = 1.0f / sqrtf((float)n_embd_head_k);
-        scores_t = ggml_scale(ctx, scores_t, kq_scale);
+        // use base scale for block-local attention path
+        scores_t = ggml_scale(ctx, scores_t, 1.0f / sqrtf((float)n_embd_head_k));
         ggml_tensor * weights_t = ggml_soft_max(ctx, scores_t);
 
         // Weighted V and output for t
@@ -144,6 +144,7 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
       ggml_tensor * topk_indices,
       int64_t n_tokens,
       int64_t top_k,
+      float kq_scale,
       const function<void(ggml_tensor *, const char *, int)> & cb) {
       (void)n_tokens;
 
@@ -194,7 +195,6 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
           ggml_tensor * q_t_2d = ggml_view_2d(ctx, q_all_2d, Dq, Hq, q_all_2d->nb[1], q_off);
 
           ggml_tensor * scores_t = ggml_mul_mat(ctx, k_sel_2d, q_t_2d); // [Hkv*top_k, Hq]
-          const float kq_scale = 1.0f / sqrtf((float)Dk);
           scores_t = ggml_scale(ctx, scores_t, kq_scale);
           ggml_tensor * weights_t = ggml_soft_max(ctx, scores_t);
 
