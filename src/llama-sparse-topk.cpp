@@ -174,11 +174,21 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
       const int64_t T    = q_indexer->ne[2];
       const int64_t N_kv = k_indexer->ne[1];
 
+      // Shape/contiguity assertions for weights [H, T]
+      GGML_ASSERT(D > 0 && H > 0 && T > 0 && N_kv > 0);
+      GGML_ASSERT(weights != nullptr);
+      GGML_ASSERT(weights->ne[0] == H);
+      GGML_ASSERT(weights->ne[1] >= T);
+      GGML_ASSERT(weights->nb[0] == (int64_t) ggml_type_size(weights->type));
+      GGML_ASSERT(weights->nb[1] == (int64_t) ggml_row_size(weights->type, weights->ne[0]));
+
+
       // Q as [D, H*T]
       ggml_tensor * q_perm   = ggml_permute(ctx, q_indexer, 0, 2, 1, 3);   // [D, T, H]
       ggml_tensor * q_cont   = ggml_cont(ctx, q_perm);
       ggml_tensor * Q2d_full = ggml_reshape_2d(ctx, q_cont, D, T*H);
       cb(Q2d_full, "idxkv_Q2d_full", -1);
+
 
       ggml_tensor * mask2d = nullptr;
       if (kq_mask) {
@@ -186,6 +196,9 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
           if (mask2d->ne[0] == N_kv && mask2d->ne[1] >= T) {
               mask2d = ggml_view_2d(ctx, mask2d, N_kv, T, mask2d->nb[1], 0);
           }
+          // Only 2D [N_kv, >=T] masks are supported here; fail fast if not satisfied
+          GGML_ASSERT(mask2d->ne[0] == N_kv && mask2d->ne[1] >= T);
+          GGML_ASSERT(mask2d->nb[0] == (int64_t) ggml_type_size(mask2d->type));
       }
 
       const int64_t k = std::min<int64_t>(top_k, N_kv);
@@ -212,6 +225,9 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
               logits_h = ggml_relu(ctx, logits_h);
 
               // weights[h, t0:t0+Tc] -> [1, Tc] -> broadcast to [N_kv, Tc]
+              // Bounds checks for per-head slice
+              GGML_ASSERT(h >= 0 && h < weights->ne[0]);
+              GGML_ASSERT(t0 >= 0 && t0 + Tc <= weights->ne[1]);
               ggml_tensor * w_tile = ggml_view_2d(ctx, weights, 1, Tc, weights->nb[1], h*weights->nb[0] + t0*weights->nb[1]);
               ggml_tensor * w_b    = ggml_repeat(ctx, w_tile, logits_h);
               ggml_tensor * contrib = ggml_mul(ctx, logits_h, w_b);
@@ -229,6 +245,9 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
                   mask_tc = ggml_cast(ctx, mask_tc, scores_tc->type);
                   mask_tc = ggml_cont(ctx, mask_tc);
               }
+              // Ensure both operands have row-contiguous layout for safe broadcast add
+              GGML_ASSERT(scores_tc->nb[0] == (int64_t) ggml_type_size(scores_tc->type));
+              GGML_ASSERT(mask_tc->nb[0]   == (int64_t) ggml_type_size(mask_tc->type));
               scores_tc = ggml_add(ctx, scores_tc, mask_tc);
           }
 
