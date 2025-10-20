@@ -215,7 +215,7 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
               ggml_tensor * scores_col_view = ggml_view_2d(ctx,
                   scores_t,
                   /*ne0*/ Hkv*top_k, /*ne1*/ 1,
-                  /*nb1*/ scores_t->nb[0],
+                  /*nb1*/ scores_t->nb[1],
                   /*offset*/ 0);
 
               // repeat mask across heads only -> [Hkv*top_k, 1]
