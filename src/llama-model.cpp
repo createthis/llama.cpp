@@ -13948,7 +13948,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                 ctx0, q_indexer, Kindexer_cache, idx_weights, KQmask2, top_k, cb_wrapper);
                             ggml_backend_sched_set_tensor_backend(sched, kvaware_indices, backend_cpu);
                             cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
-                                ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, cb_wrapper);
+                                ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, cb_wrapper);
                         }
 
                         if (!cparams.offload_kqv) {
@@ -14068,7 +14068,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                 ctx0, q_indexer, Kindexer_cache, idx_weights, KQmask2, top_k, cb_wrapper);
                             ggml_backend_sched_set_tensor_backend(sched, kvaware_indices, backend_cpu);
                             cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
-                                ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, cb_wrapper);
+                                ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, cb_wrapper);
                         }
 
                         if (!cparams.offload_kqv) {

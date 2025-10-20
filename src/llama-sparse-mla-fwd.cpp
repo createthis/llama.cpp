@@ -145,6 +145,8 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
       int64_t n_tokens,
       int64_t top_k,
       float kq_scale,
+      ggml_tensor * kq_mask,
+      float attn_softcap,
       const function<void(ggml_tensor *, const char *, int)> & cb) {
       (void)n_tokens;
 
@@ -196,6 +198,22 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
 
           ggml_tensor * scores_t = ggml_mul_mat(ctx, k_sel_2d, q_t_2d); // [Hkv*top_k, Hq]
           scores_t = ggml_scale(ctx, scores_t, kq_scale);
+          // add mask/alibi bias if provided: gather kq_mask rows by indices and add to scores
+          if (kq_mask) {
+              // mask is [N_kv, PAD(T)], take column t and gather top_k rows -> [top_k,1]
+              ggml_tensor * mask_col = ggml_view_2d(ctx, kq_mask, kq_mask->ne[0], 1, kq_mask->nb[1], t * kq_mask->nb[1]);
+              ggml_tensor * mask_rows = ggml_get_rows(ctx, mask_col, idx_t_4d); // [top_k,1]
+              // expand to [Hkv*top_k, Hq]
+              ggml_tensor * mask_rows_T = ggml_cont(ctx, ggml_transpose(ctx, mask_rows)); // [1, top_k]
+              ggml_tensor * mask_repeated = ggml_repeat(ctx, mask_rows_T, scores_t);
+              scores_t = ggml_add(ctx, scores_t, mask_repeated);
+          }
+          // apply tanh softcap if enabled
+          if (attn_softcap > 0.0f) {
+              scores_t = ggml_scale(ctx, scores_t, 1.0f / attn_softcap);
+              scores_t = ggml_tanh(ctx, scores_t);
+              scores_t = ggml_scale(ctx, scores_t, attn_softcap);
+          }
           ggml_tensor * weights_t = ggml_soft_max(ctx, scores_t);
 
           ggml_tensor * out2d_t = ggml_mul_mat(ctx, weights_t, v_sel_2d); // [Hq, Dv]
