@@ -13749,6 +13749,8 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
         const float kq_scale = 1.0f*mscale*mscale/sqrtf(float(n_embd_head_k));
         const float attn_factor = 1.0f / (1.0f + 0.1f * logf(1.0f / freq_scale));
 
+        printf("[deepseek3_2] layer init: attn_factor=%g mscale=%g dense_kq_scale=%g (n_embd_head_k=%lld)\n", attn_factor, mscale, kq_scale, (long long) n_embd_head_k);
+
         ggml_tensor * cur;
         ggml_tensor * inpL;
 
