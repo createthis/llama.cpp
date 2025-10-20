@@ -55,6 +55,12 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     printf("SPARSE MLA: k_cur shape: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", n_embd_head_k, n_head_kv, actual_n_tokens_k);
     printf("SPARSE MLA: v_cur shape: [%" PRId64 ", %" PRId64 ", %" PRId64 "]\n", n_embd_head_v, n_head_kv_v, actual_n_tokens_v);
     printf("SPARSE MLA: topk_indices shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);
+    printf("SPARSE MLA DBG: q_cur  ne=[%" PRId64 ", %" PRId64 ", %" PRId64 "] nb=[%zu,%zu,%zu,%zu] type=%d\n",
+           q_cur->ne[0], q_cur->ne[1], q_cur->ne[2], q_cur->nb[0], q_cur->nb[1], q_cur->nb[2], q_cur->nb[3], (int)q_cur->type);
+    printf("SPARSE MLA DBG: k_cur  ne=[%" PRId64 ", %" PRId64 ", %" PRId64 "] nb=[%zu,%zu,%zu,%zu] type=%d\n",
+           k_cur->ne[0], k_cur->ne[1], k_cur->ne[2], k_cur->nb[0], k_cur->nb[1], k_cur->nb[2], k_cur->nb[3], (int)k_cur->type);
+    printf("SPARSE MLA DBG: v_cur  ne=[%" PRId64 ", %" PRId64 ", %" PRId64 "] nb=[%zu,%zu,%zu,%zu] type=%d\n",
+           v_cur->ne[0], v_cur->ne[1], v_cur->ne[2], v_cur->nb[0], v_cur->nb[1], v_cur->nb[2], v_cur->nb[3], (int)v_cur->type);
     fflush(stdout);
 
     // Reshape key and value tensors for row selection
@@ -68,6 +74,9 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
     // Use the topk_indices tensor directly; avoid reshape which requires contiguity
     indices_full = topk_indices;
     cb(indices_full, "indices_full", -1);
+    // Basic assertions on index tensor shape/type
+    GGML_ASSERT(indices_full->type == GGML_TYPE_I32);
+    GGML_ASSERT(indices_full->ne[0] == top_k);
 
     // 2D view of Q: [Dq, Hq*T]
     ggml_tensor * q_all_2d = ggml_reshape_2d(ctx, q_cur, n_embd_head_q, n_head_q * actual_n_tokens_q);
@@ -153,6 +162,10 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
       cb(v_cache, "kvaware_v_cache", -1);
       cb(q_cur,   "kvaware_q_cur",   -1);
       cb(topk_indices, "kvaware_topk_indices", -1);
+      printf("SPARSE MLA KV-AWARE DBG: Q=[%" PRId64 ",%" PRId64 ",%" PRId64 "] K=[%" PRId64 ",%" PRId64 ",%" PRId64 "] V=[%" PRId64 ",%" PRId64 ",%" PRId64 "] topk=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "]\n",
+             Dq, Hq, T, Dk, Hkv, N_kv, Dv, Hkv_v, N_kv_v,
+             topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);
+      fflush(stdout);
 
       ggml_tensor * K4d = ggml_reshape_4d(ctx, k_cache, Dk*Hkv, N_kv, 1, 1);
       ggml_tensor * V4d = ggml_reshape_4d(ctx, v_cache, Dv*Hkv_v, N_kv_v, 1, 1);
@@ -161,6 +174,7 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
 
       ggml_tensor * output_acc = nullptr;
       for (int64_t t = 0; t < T; ++t) {
+          GGML_ASSERT(topk_indices->ne[0] == top_k);
           ggml_tensor * idx_t_2d = ggml_view_2d(ctx, topk_indices, top_k, 1, topk_indices->nb[1], t * topk_indices->nb[1]);
           ggml_tensor * idx_t_4d = ggml_reshape_4d(ctx, idx_t_2d, top_k, 1, 1, 1);
 

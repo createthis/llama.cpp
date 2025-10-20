@@ -81,6 +81,9 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
           if (mask2d->ne[0] == N_kv && mask2d->ne[1] >= T) {
               mask2d = ggml_view_2d(ctx, mask2d, N_kv, T, mask2d->nb[1], 0);
           }
+          // Only support 2D [N_kv, >=T] here
+          GGML_ASSERT(mask2d->ne[0] == N_kv && mask2d->ne[1] >= T);
+          GGML_ASSERT(mask2d->nb[0] == (size_t) ggml_type_size(mask2d->type));
       }
 
       // Vectorized implementation across all T to avoid O(T) node explosion
@@ -155,6 +158,11 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
       }
 
       cb(result, "kvaware_topk_indices_k_T", -1);
+      if (result) {
+          printf("SPARSE TOPK KV-AWARE (QK): result topk_indices dims=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] type=%d\n",
+                 result->ne[0], result->ne[1], result->ne[2], result->ne[3], (int)result->type);
+          fflush(stdout);
+      }
       return result;
   }
 
@@ -174,6 +182,17 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
       const int64_t T    = q_indexer->ne[2];
       const int64_t N_kv = k_indexer->ne[1];
 
+      printf("SPARSE TOPK KV-AWARE (INDEXER): q_indexer [D,H,T]=[%" PRId64 ",%" PRId64 ",%" PRId64 "]\n", D, H, T);
+      printf("SPARSE TOPK KV-AWARE (INDEXER): k_indexer dims=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "]\n",
+             k_indexer->ne[0], k_indexer->ne[1], k_indexer->ne[2], k_indexer->ne[3]);
+      printf("SPARSE TOPK KV-AWARE (INDEXER): weights [H,T]=[%" PRId64 ",%" PRId64 "]\n",
+             weights ? weights->ne[0] : -1, weights ? weights->ne[1] : -1);
+      if (kq_mask) {
+          printf("SPARSE TOPK KV-AWARE (INDEXER): kq_mask dims=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] type=%d\n",
+                 kq_mask->ne[0], kq_mask->ne[1], kq_mask->ne[2], kq_mask->ne[3], (int)kq_mask->type);
+      }
+      fflush(stdout);
+
       // Shape/contiguity assertions for weights [H, T]
       GGML_ASSERT(D > 0 && H > 0 && T > 0 && N_kv > 0);
       GGML_ASSERT(weights != nullptr);
@@ -181,6 +200,10 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
       GGML_ASSERT(weights->ne[1] >= T);
       GGML_ASSERT(weights->nb[0] == (size_t) ggml_type_size(weights->type));
       GGML_ASSERT(weights->nb[1] == (size_t) ggml_row_size(weights->type, weights->ne[0]));
+      // Ensure indexer K depth matches indexer Q depth
+      GGML_ASSERT(k_indexer->ne[0] == D);
+      // KV indexer currently expected as 2D [D, N_kv] or 3D with singleton stream
+      GGML_ASSERT(k_indexer->ne[2] <= 1);
 
 
       // Q as [D, H*T]
@@ -257,6 +280,11 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
       }
 
       cb(result, "idxkv_topk_indices_k_T", -1);
+      if (result) {
+          printf("SPARSE TOPK KV-AWARE (INDEXER): result topk_indices dims=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] type=%d\n",
+                 result->ne[0], result->ne[1], result->ne[2], result->ne[3], (int)result->type);
+          fflush(stdout);
+      }
       return result;
   }
 
