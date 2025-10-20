@@ -13973,7 +13973,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         cb(cur, "sparse_attn_out", il);
                         
                         // Log that we're using sparse attention
-                        LLAMA_LOG_INFO("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d", 
+                        LLAMA_LOG_INFO("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d\n",
                                       (int)top_k, il);
                     } else {
                         // note: MLA with the absorption optimzation converts into MQA (ie: GQA with 1 group)
@@ -14089,7 +14089,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         cur = ggml_cont(ctx0, cur);
                         
                         // Log that we're using sparse attention
-                        LLAMA_LOG_INFO("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d", 
+                        LLAMA_LOG_INFO("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d\n",
                                       (int)top_k, il);
                     } else {
                         // note: MLA without the absorption optimization converts into MHA (ie: GQA with full n_head groups)
