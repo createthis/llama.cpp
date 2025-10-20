@@ -13778,10 +13778,10 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
             auto cb_wrapper = [this](ggml_tensor * cur, const char * name, int il) {
                 this->cb(cur, name, il);
             };
-            
+
             if (model.layers[il].attn_indexer_k_norm != nullptr) {
                 // Use the new sparse attention implementation for indexer computation
-                
+
                 // Defer KV-aware top-k computation to the attention block using KV cache
                 use_sparse_attention = true;
                 top_k = 0;
@@ -13898,7 +13898,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
                             ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
                         }
-                        
+
                         // Use sparse attention with top-k tokens (KV-aware)
                         {
                             const auto * mctx_cur2 = inp_attn->mctx;
@@ -13953,7 +13953,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             /* sparse: follow dense behavior by placing on CPU when not offloading */
                         ggml_backend_sched_set_tensor_backend(sched, cur, backend_cpu);
                         }
-                        
+
                         // Project kv_lora_rank -> n_embd_head_v per head using wv_b and flatten heads before WO
                         ggml_tensor * cur_perm = ggml_permute(ctx0, cur, 0, 2, 1, 3); // [kv_lora_rank, n_tokens, n_head]
                         cb(cur_perm, "sparse_attn_perm_kvT_H", il);
@@ -13971,7 +13971,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         // Apply output projection for sparse attention
                         cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur2d);
                         cb(cur, "sparse_attn_out", il);
-                        
+
                         // Log that we're using sparse attention
                         LLAMA_LOG_INFO("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d\n",
                                       (int)top_k, il);
@@ -14018,7 +14018,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
                             ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
                         }
-                        
+
                         // Use sparse attention with top-k tokens (KV-aware)
                         {
                             const auto * mctx_cur2 = inp_attn->mctx;
@@ -14087,7 +14087,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         cb(cur, "sparse_attn_out", il);
                         // ensure contiguous layout for subsequent broadcast adds (CUDA)
                         cur = ggml_cont(ctx0, cur);
-                        
+
                         // Log that we're using sparse attention
                         LLAMA_LOG_INFO("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d\n",
                                       (int)top_k, il);
