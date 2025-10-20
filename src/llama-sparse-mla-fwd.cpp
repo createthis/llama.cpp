@@ -200,14 +200,24 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
           scores_t = ggml_scale(ctx, scores_t, kq_scale);
           // add mask/alibi bias if provided: gather kq_mask rows by indices and add to scores
           if (kq_mask) {
-              // mask is [N_kv, PAD(T)], take column t and gather top_k rows -> [top_k,1]
+              // kq_mask is [N_kv, PAD(T)]; take column t -> [N_kv,1]
               ggml_tensor * mask_col = ggml_view_2d(ctx, kq_mask, kq_mask->ne[0], 1, kq_mask->nb[1], t * kq_mask->nb[1]);
-              ggml_tensor * mask_rows = ggml_get_rows(ctx, mask_col, idx_t_4d); // [top_k,1]
-              // expand to [Hkv*top_k, Hq]
-              ggml_tensor * mask_rows_T = ggml_cont(ctx, ggml_transpose(ctx, mask_rows)); // [1, top_k]
-              ggml_tensor * mask_repeated = ggml_repeat(ctx, mask_rows_T, scores_t);
-              scores_t = ggml_add(ctx, scores_t, mask_repeated);
+              // make it [1, N_kv] so that get_rows yields [1, top_k, 1, 1]
+              ggml_tensor * mask_vec = ggml_transpose(ctx, mask_col); // [1, N_kv]
+              if (mask_vec->type != scores_t->type) {
+                  mask_vec = ggml_cast(ctx, mask_vec, scores_t->type);
+              }
+              ggml_tensor * mask_rows = ggml_get_rows(ctx, mask_vec, idx_t_4d); // [1, top_k, 1, 1]
+              // reshape to [1, top_k, 1]
+              mask_rows = ggml_reshape_3d(ctx, mask_rows, 1, top_k, 1);
+              // reshape scores to [Hkv, top_k, Hq] for broadcast add
+              ggml_tensor * scores_3d = ggml_reshape_3d(ctx, scores_t, Hkv, top_k, Hq);
+              ggml_tensor * mask_brd = ggml_repeat(ctx, mask_rows, scores_3d); // [Hkv, top_k, Hq]
+              scores_3d = ggml_add(ctx, scores_3d, mask_brd);
+              // back to [Hkv*top_k, Hq]
+              scores_t = ggml_reshape_2d(ctx, ggml_cont(ctx, scores_3d), Hkv*top_k, Hq);
           }
+
           // apply tanh softcap if enabled
           if (attn_softcap > 0.0f) {
               scores_t = ggml_scale(ctx, scores_t, 1.0f / attn_softcap);
