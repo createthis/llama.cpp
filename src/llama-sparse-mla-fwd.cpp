@@ -159,37 +159,6 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
 
       ggml_tensor * q_all_2d = ggml_reshape_2d(ctx, q_cur, Dq, Hq*T);
 
-      // Heuristic: avoid building O(T) nodes when sequence is very large (no-alloc meta limit)
-      if (T >= 1024) {
-          const int64_t t0 = 0;
-          ggml_tensor * idx_t_2d = ggml_view_2d(ctx, topk_indices, top_k, 1, topk_indices->nb[1], t0 * topk_indices->nb[1]);
-          ggml_tensor * idx_t_4d = ggml_reshape_4d(ctx, idx_t_2d, top_k, 1, 1, 1);
-
-          ggml_tensor * k_sel_4d = ggml_get_rows(ctx, K4d, idx_t_4d); // [Dk*Hkv, top_k]
-          ggml_tensor * v_sel_4d = ggml_get_rows(ctx, V4d, idx_t_4d); // [Dv*Hkv, top_k]
-
-          ggml_tensor * k_sel_2d = ggml_reshape_2d(ctx, k_sel_4d, Dk, Hkv*top_k);
-          ggml_tensor * v_sel_2d = ggml_reshape_2d(ctx, v_sel_4d, Dv, Hkv_v*top_k);
-          v_sel_2d = ggml_cont(ctx, ggml_transpose(ctx, v_sel_2d)); // [Hkv_v*top_k, Dv]
-
-          ggml_tensor * q_t_2d = ggml_view_2d(ctx, q_all_2d, Dq, Hq, q_all_2d->nb[1], 0);
-
-          ggml_tensor * scores_t = ggml_mul_mat(ctx, k_sel_2d, q_t_2d); // [Hkv*top_k, Hq]
-          const float kq_scale = 1.0f / sqrtf((float)Dk);
-          scores_t = ggml_scale(ctx, scores_t, kq_scale);
-          ggml_tensor * weights_t = ggml_soft_max(ctx, scores_t);
-
-          ggml_tensor * out2d_t = ggml_mul_mat(ctx, weights_t, v_sel_2d); // [Hq, Dv]
-          ggml_tensor * out2d_t_T = ggml_cont(ctx, ggml_transpose(ctx, out2d_t)); // [Dv, Hq]
-          ggml_tensor * out3d_t = ggml_reshape_3d(ctx, out2d_t_T, Dv, Hq, 1);
-
-          ggml_tensor * repeated = ggml_repeat_4d(ctx, out3d_t, Dv, Hq, T, 1);
-          ggml_tensor * output_acc = ggml_reshape_3d(ctx, repeated, Dv, Hq, T);
-
-          cb(output_acc, "kvaware_sparse_attn_out", -1);
-          return output_acc;
-      }
-
       ggml_tensor * output_acc = nullptr;
       for (int64_t t = 0; t < T; ++t) {
           ggml_tensor * idx_t_2d = ggml_view_2d(ctx, topk_indices, top_k, 1, topk_indices->nb[1], t * topk_indices->nb[1]);
