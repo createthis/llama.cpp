@@ -202,20 +202,27 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
           if (kq_mask) {
               // kq_mask is [N_kv, PAD(T)]; take column t -> [N_kv,1]
               ggml_tensor * mask_col = ggml_view_2d(ctx, kq_mask, kq_mask->ne[0], 1, kq_mask->nb[1], t * kq_mask->nb[1]);
-              // make it [1, N_kv] so that get_rows yields [1, top_k, 1, 1]
+              // convert to [1, N_kv] so get_rows yields [1, top_k, 1, 1]
               ggml_tensor * mask_vec = ggml_transpose(ctx, mask_col); // [1, N_kv]
               if (mask_vec->type != scores_t->type) {
                   mask_vec = ggml_cast(ctx, mask_vec, scores_t->type);
               }
-              ggml_tensor * mask_rows = ggml_get_rows(ctx, mask_vec, idx_t_4d); // [1, top_k, 1, 1]
-              // reshape to [1, top_k, 1]
-              mask_rows = ggml_reshape_3d(ctx, mask_rows, 1, top_k, 1);
-              // reshape scores to [Hkv, top_k, Hq] for broadcast add
-              ggml_tensor * scores_3d = ggml_reshape_3d(ctx, scores_t, Hkv, top_k, Hq);
-              ggml_tensor * mask_brd = ggml_repeat(ctx, mask_rows, scores_3d); // [Hkv, top_k, Hq]
-              scores_3d = ggml_add(ctx, scores_3d, mask_brd);
-              // back to [Hkv*top_k, Hq]
-              scores_t = ggml_reshape_2d(ctx, ggml_cont(ctx, scores_3d), Hkv*top_k, Hq);
+              ggml_tensor * mask_rows_4d = ggml_get_rows(ctx, mask_vec, idx_t_4d); // [1, top_k, 1, 1]
+              // reshape to [top_k, 1]
+              ggml_tensor * mask_rows_2d = ggml_reshape_2d(ctx, mask_rows_4d, top_k, 1); // [top_k,1]
+
+              // build a view of scores' column shape [Hkv*top_k, 1]
+              ggml_tensor * scores_col_view = ggml_view_2d(ctx,
+                  scores_t,
+                  /*ne0*/ Hkv*top_k, /*ne1*/ 1,
+                  /*nb1*/ scores_t->nb[0],
+                  /*offset*/ 0);
+
+              // repeat mask across heads only -> [Hkv*top_k, 1]
+              ggml_tensor * mask_bias = ggml_repeat(ctx, mask_rows_2d, scores_col_view); // [Hkv*top_k, 1]
+
+              // add with column broadcast: [Hkv*top_k, Hq] + [Hkv*top_k, 1]
+              scores_t = ggml_add(ctx, scores_t, mask_bias);
           }
 
           // apply tanh softcap if enabled
