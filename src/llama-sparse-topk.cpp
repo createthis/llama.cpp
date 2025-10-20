@@ -163,10 +163,10 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
 
   ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
       ggml_context * ctx,
-      ggml_tensor * q_indexer,
-      ggml_tensor * k_indexer,
-      ggml_tensor * weights,
-      ggml_tensor * kq_mask,
+      ggml_tensor * q_indexer,   // [D, H, T]
+      ggml_tensor * k_indexer,   // [D, N_kv]
+      ggml_tensor * weights,     // [H, T]
+      ggml_tensor * kq_mask,     // [N_kv, T] or [N_kv, PAD(T)]
       int64_t top_k,
       const std::function<void(ggml_tensor *, const char *, int)> & cb) {
       const int64_t D    = q_indexer->ne[0];
@@ -174,44 +174,71 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
       const int64_t T    = q_indexer->ne[2];
       const int64_t N_kv = k_indexer->ne[1];
 
-      ggml_tensor * q_perm   = ggml_permute(ctx, q_indexer, 0, 2, 1, 3);
+      // Q as [D, H*T]
+      ggml_tensor * q_perm   = ggml_permute(ctx, q_indexer, 0, 2, 1, 3);   // [D, T, H]
       ggml_tensor * q_cont   = ggml_cont(ctx, q_perm);
-      ggml_tensor * q_tiled  = ggml_reshape_2d(ctx, q_cont, D, T*H);
-      cb(q_tiled, "idxkv_Q_tiled", -1);
+      ggml_tensor * Q2d_full = ggml_reshape_2d(ctx, q_cont, D, T*H);
+      cb(Q2d_full, "idxkv_Q2d_full", -1);
 
-      ggml_tensor * logits_concat = ggml_mul_mat(ctx, k_indexer, q_tiled);
-      logits_concat = ggml_relu(ctx, logits_concat);
-      cb(logits_concat, "idxkv_logits_concat", -1);
-
-      ggml_tensor * logits_3d = ggml_reshape_3d(ctx, logits_concat, N_kv, H, T);
-
-      ggml_tensor * w_3d      = ggml_reshape_3d(ctx, weights, H, T, 1);
-      ggml_tensor * logits_ph = ggml_permute(ctx, logits_3d, 1, 0, 2, 3);
-      ggml_tensor * w_bcast   = ggml_repeat(ctx, w_3d, logits_ph);
-      ggml_tensor * weighted  = ggml_mul(ctx, logits_ph, w_bcast);
-
-      weighted = ggml_cont(ctx, weighted);
-      ggml_tensor * summed = ggml_sum_rows(ctx, weighted);
-      ggml_tensor * scores = ggml_reshape_2d(ctx, summed, N_kv, T);
-      scores = ggml_cont(ctx, scores);
-
+      ggml_tensor * mask2d = nullptr;
       if (kq_mask) {
-          ggml_tensor * mask2d = ggml_cont(ctx, kq_mask);
+          mask2d = ggml_cont(ctx, kq_mask);
           if (mask2d->ne[0] == N_kv && mask2d->ne[1] >= T) {
               mask2d = ggml_view_2d(ctx, mask2d, N_kv, T, mask2d->nb[1], 0);
           }
-          if (mask2d->type != scores->type) {
-              mask2d = ggml_cast(ctx, mask2d, scores->type);
-              mask2d = ggml_cont(ctx, mask2d);
-          }
-          scores = ggml_add(ctx, scores, mask2d);
       }
 
       const int64_t k = std::min<int64_t>(top_k, N_kv);
-      ggml_tensor * indices = ggml_top_k(ctx, scores, k);
+      int64_t TILE_T = 32;
+      if (const char *env = getenv("LLAMA_SPARSE_TOPK_TILE_T")) {
+          long v = strtol(env, nullptr, 10);
+          if (v > 0 && v <= 4096) TILE_T = v;
+      }
 
-      cb(indices, "idxkv_topk_indices_k_T", -1);
-      return indices;
+      ggml_tensor * result = nullptr; // [k, T]
+      for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {
+          const int64_t Tc = std::min<int64_t>(TILE_T, T - t0);
+
+          // Q_tile all heads: [D, H*Tc]
+          size_t q_off = t0 * H * Q2d_full->nb[1];
+          ggml_tensor * Q_tile_all = ggml_view_2d(ctx, Q2d_full, D, H * Tc, Q2d_full->nb[1], q_off);
+
+          // Accumulate per-head contributions into [N_kv, Tc]
+          ggml_tensor * scores_tc = nullptr;
+          for (int64_t h = 0; h < H; ++h) {
+              size_t h_off = h * Tc * Q2d_full->nb[1];
+              ggml_tensor * Q_tile_h = ggml_view_2d(ctx, Q_tile_all, D, Tc, Q2d_full->nb[1], h_off);
+              ggml_tensor * logits_h = ggml_mul_mat(ctx, k_indexer, Q_tile_h); // [N_kv, Tc]
+              logits_h = ggml_relu(ctx, logits_h);
+
+              // weights[h, t0:t0+Tc] -> [1, Tc] -> broadcast to [N_kv, Tc]
+              ggml_tensor * w_tile = ggml_view_2d(ctx, weights, 1, Tc, weights->nb[1], h*weights->nb[0] + t0*weights->nb[1]);
+              ggml_tensor * w_b    = ggml_repeat(ctx, w_tile, logits_h);
+              ggml_tensor * contrib = ggml_mul(ctx, logits_h, w_b);
+
+              scores_tc = scores_tc ? ggml_add(ctx, scores_tc, contrib) : contrib;
+          }
+
+          scores_tc = ggml_cont(ctx, scores_tc);
+
+          // mask tile if available
+          if (mask2d) {
+              ggml_tensor * mask_tc = ggml_view_2d(ctx, mask2d, N_kv, Tc, mask2d->nb[1], t0 * mask2d->nb[1]);
+              mask_tc = ggml_cont(ctx, mask_tc);
+              if (mask_tc->type != scores_tc->type) {
+                  mask_tc = ggml_cast(ctx, mask_tc, scores_tc->type);
+                  mask_tc = ggml_cont(ctx, mask_tc);
+              }
+              scores_tc = ggml_add(ctx, scores_tc, mask_tc);
+          }
+
+          // top-k for this tile -> [k, Tc]
+          ggml_tensor * topk_tc = ggml_top_k(ctx, scores_tc, k);
+          result = result ? ggml_concat(ctx, result, topk_tc, 1) : topk_tc;
+      }
+
+      cb(result, "idxkv_topk_indices_k_T", -1);
+      return result;
   }
 
 } // namespace llama
