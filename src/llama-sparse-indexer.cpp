@@ -74,6 +74,7 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     cb(q_indexer, "indexer_q", layer_idx);
     ggml_tensor * idx_weights = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_weights_proj, cur);
     // Scale weights by 1/sqrt(H_index) to match TileLang indexer behavior
+    // see https://github.com/tile-ai/tilelang/blob/5cb5c068bc9a1a0b38c46bac915a8c2743eb1442/examples/deepseek_v32/inference/model.py#L500
     idx_weights = ggml_scale(ctx, idx_weights, 1.0f / sqrtf((float) H_index));
     cb(idx_weights, "indexer_weights", layer_idx);
     ggml_tensor * Kindexer_cache = mctx ? mctx->get_k_indexer(ctx, layer_idx)
