@@ -165,6 +165,12 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
       cb(v_cache, "kvaware_v_cache", -1);
       cb(q_cur,   "kvaware_q_cur",   -1);
       cb(topk_indices, "kvaware_topk_indices", -1);
+      printf("[SPARSE-MLA] Dq=%lld Hq=%lld T=%lld Dk=%lld Hkv=%lld N_kv=%lld Dv=%lld Hkv_v=%lld\n",
+             (long long) Dq, (long long) Hq, (long long) T,
+             (long long) Dk, (long long) Hkv, (long long) N_kv,
+             (long long) Dv, (long long) Hkv_v);
+      fflush(stdout);
+
       printf("SPARSE MLA KV-AWARE DBG: Q=[%" PRId64 ",%" PRId64 ",%" PRId64 "] K=[%" PRId64 ",%" PRId64 ",%" PRId64 "] V=[%" PRId64 ",%" PRId64 ",%" PRId64 "] topk=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "]\n",
              Dq, Hq, T, Dk, Hkv, N_kv, Dv, Hkv_v, N_kv_v,
              topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);

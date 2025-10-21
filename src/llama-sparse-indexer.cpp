@@ -85,9 +85,18 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     ggml_tensor * q_indexer = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_wq_b, qr);
     cb(q_indexer, "indexer_q", layer_idx);
 
-    // DeepSeek V3.2 config
-    const int64_t index_n_heads = 64;
-    const int64_t index_head_dim = 128;
+    // DeepSeek V3.2 indexer dims: derive from tensors to avoid config drift
+    const int64_t index_head_dim = model.layers[layer_idx].attn_indexer_wk->ne[1];
+    const int64_t index_n_heads  = model.layers[layer_idx].attn_indexer_weights_proj->ne[1];
+    const int64_t wq_b_cols      = model.layers[layer_idx].attn_indexer_wq_b->ne[1];
+    // Basic consistency check: attn_indexer_wq_b should have D_index * H_index columns
+    GGML_ASSERT(wq_b_cols == index_head_dim * index_n_heads);
+    printf("[DSA][L%02d] Indexer dims: D_index=%lld H_index=%lld wq_b_cols=%lld\n",
+           layer_idx,
+           (long long) index_head_dim,
+           (long long) index_n_heads,
+           (long long) wq_b_cols);
+    fflush(stdout);
 
     // Reshape K to [D, T]
     k_indexer = ggml_reshape_2d(ctx, k_indexer, index_head_dim, n_tokens);
@@ -103,6 +112,11 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     cb(q_tiled, "indexer_q_tiled", layer_idx);
 
     // 5) Compute logits for all heads in one matmul: K^T @ Q_tiled -> [T, T*H]
+    printf("[DSA][L%02d] Matmul shapes: K=[%lld,%lld] Q_tiled=[%lld,%lld]\n",
+           layer_idx,
+           (long long) k_indexer->ne[0], (long long) k_indexer->ne[1],
+           (long long) q_tiled->ne[0],   (long long) q_tiled->ne[1]);
+    fflush(stdout);
     ggml_tensor * logits_concat = ggml_mul_mat(ctx, k_indexer, q_tiled);
     cb(logits_concat, "indexer_logits_concat_T_TH", layer_idx);
     logits_concat = ggml_relu(ctx, logits_concat);
@@ -119,6 +133,11 @@ ggml_tensor * sparse_attn_indexer::compute_token_importance(
     ggml_tensor * w_bcast = ggml_repeat(ctx, w_T_H_1, logits_3d);       // [T, H, T]
     ggml_tensor * weighted = ggml_mul(ctx, logits_3d, w_bcast);
     cb(weighted, "indexer_logits_weighted_T_H_T", layer_idx);
+    printf("[DSA][L%02d] logits_3d=[%lld,%lld,%lld] weights=[%lld,%lld]\n",
+           layer_idx,
+           (long long) logits_3d->ne[0], (long long) logits_3d->ne[1], (long long) logits_3d->ne[2],
+           (long long) weights->ne[0], (long long) weights->ne[1]);
+    fflush(stdout);
 
     // 7) Sum across heads -> [1, T, T] -> reshape to [T, T]
     ggml_tensor * weighted_perm = ggml_permute(ctx, weighted, 1, 0, 2, 3);

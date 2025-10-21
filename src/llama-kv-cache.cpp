@@ -154,7 +154,8 @@ llama_kv_cache::llama_kv_cache(
         // Allocate Indexer K cache if the model layer has indexer tensors
         if (model.layers[il].attn_indexer_wk != nullptr) {
             const int64_t index_head_dim = model.layers[il].attn_indexer_wk->ne[1];
-            ggml_tensor * kidx = ggml_new_tensor_3d(ctx, type_k, index_head_dim, kv_size, n_stream);
+            // Use F32 for indexer K cache to preserve top-k ranking stability
+            ggml_tensor * kidx = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, index_head_dim, kv_size, n_stream);
             ggml_format_name(kidx, "cache_k_indexer_l%d", il);
 
             std::vector<ggml_tensor *> kidx_stream;

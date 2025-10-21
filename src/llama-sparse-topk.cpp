@@ -109,6 +109,10 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
           if (v > 0 && v <= 4096) TILE_T = v;
       }
       ggml_tensor * result = nullptr; // [k, T]
+      printf("[TOPK-QK] N_kv=%lld T=%lld k=%lld TILE_T=%lld Hq=%lld Dq=%lld\n",
+             (long long) N_kv, (long long) T, (long long) k, (long long) TILE_T, (long long) Hq, (long long) Dq);
+      fflush(stdout);
+
       for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {
           const int64_t Tc = std::min<int64_t>(TILE_T, T - t0);
           // Q_tile: [Dk, Hq*Tc]
@@ -230,6 +234,9 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
           long v = strtol(env, nullptr, 10);
           if (v > 0 && v <= 4096) TILE_T = v;
       }
+      printf("[TOPK-INDEXER] N_kv=%lld T=%lld k=%lld TILE_T=%lld H=%lld D=%lld\n",
+             (long long) N_kv, (long long) T, (long long) k, (long long) TILE_T, (long long) H, (long long) D);
+      fflush(stdout);
 
       ggml_tensor * result = nullptr; // [k, T]
       for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {
