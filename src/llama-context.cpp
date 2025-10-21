@@ -1366,7 +1366,7 @@ uint32_t llama_context::graph_max_nodes() const {
     if (model.arch == LLM_ARCH_DEEPSEEK3_2) {
         // The DeepSeek V3.2 sparse-attention graph has significantly higher node fanout.
         // Provide a cushion to avoid near-boundary meta pool overflows.
-        uint32_t ds_base = std::max<uint32_t>(base, 6144u*model.n_tensors());
+        uint32_t ds_base = std::max<uint32_t>(base, 7168u*model.n_tensors());
         base = ds_base + 16384u;
     }
     return base;
