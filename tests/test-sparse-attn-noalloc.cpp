@@ -73,20 +73,10 @@ int main() {
                name, t->ne[0], t->ne[1], t->ne[2], t->ne[3]);
     };
 
-    printf("About to call compute_token_importance...\n");
-    ggml_tensor * token_importance = sparse_attn_indexer::compute_token_importance(
-        ctx, *model, 0, cur, /*is_lite=*/false, cb);
+    printf("About to call build_kvaware_topk_indices...\n");
+    ggml_tensor * topk_indices = llama::sparse_attn_indexer::build_kvaware_topk_indices(
+        ctx, *model, 0, cur, n_tokens, /*mctx*/ nullptr, /*k_idxs*/ nullptr, /*kq_mask*/ nullptr, /*top_k*/ 64, cb, /*gf*/ nullptr);
 
-    if (token_importance) {
-        printf("OK: token_importance shape = [%" PRId64 ", %" PRId64 "]\n",
-               token_importance->ne[0], token_importance->ne[1]);
-    } else {
-        printf("token_importance null\n");
-    }
-
-    // Build top-k indices from token_importance using the same path as runtime
-    printf("Building top-k indices from token_importance...\n");
-    ggml_tensor * topk_indices = llama::sparse_attn_topk::select_topk_tokens(ctx, token_importance, n_tokens, cb);
     if (topk_indices) {
         printf("OK: topk_indices shape = [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
                topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);

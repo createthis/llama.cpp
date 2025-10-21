@@ -26,7 +26,7 @@
 // This test focuses on the core operations without loading a full model
 
 // Function declarations
-void test_compute_token_importance();
+void test_compute_indexer_triplet();
 void test_select_topk_tokens();
 void test_apply_sparse_attention_simple();
 void test_reshape_assertion_fix();
@@ -140,9 +140,9 @@ static void cleanup_test_model(llama_model* model) {
     }
 }
 
-// Test the compute_token_importance function
-void test_compute_token_importance() {
-    printf("Testing compute_token_importance...\n");
+// Test the Lightning Indexer kv-aware topk builder
+void test_compute_indexer_triplet() {
+    printf("Testing compute_indexer_triplet...\n");
     fflush(stdout);
 
     TestContext test_ctx;
@@ -186,15 +186,17 @@ void test_compute_token_importance() {
         fflush(stdout);
 
         try {
-            ggml_tensor * token_importance = llama::sparse_attn_indexer::compute_token_importance(
-                test_ctx.ctx, *model, 0, cur, is_lite, cb);
+            auto trip = llama::sparse_attn_indexer::compute_indexer_triplet(
+                test_ctx.ctx, *model, 0, cur, n_tokens, /*mctx*/ nullptr, /*k_idxs*/ nullptr, cb, /*gf*/ nullptr);
 
-            if (token_importance) {
-                printf("Success: token_importance tensor created with shape [%" PRId64 ", %" PRId64 "]\n",
-                       token_importance->ne[0], token_importance->ne[1]);
+            if (trip.q_indexer && trip.k_indexer_cache && trip.idx_weights) {
+                printf("Success: triplet shapes q_indexer=[%" PRId64 ", %" PRId64 ", %" PRId64 "] k_indexer_cache=[%" PRId64 ", %" PRId64 "] idx_weights=[%" PRId64 ", %" PRId64 "]\n",
+                       trip.q_indexer->ne[0], trip.q_indexer->ne[1], trip.q_indexer->ne[2],
+                       trip.k_indexer_cache->ne[0], trip.k_indexer_cache->ne[1],
+                       trip.idx_weights->ne[0], trip.idx_weights->ne[1]);
                 fflush(stdout);
             } else {
-                printf("Error: token_importance is null\n");
+                printf("Error: triplet contains null tensor(s)\n");
                 fflush(stdout);
             }
         } catch (const std::exception& e) {
@@ -206,7 +208,7 @@ void test_compute_token_importance() {
     // Cleanup the model
     cleanup_test_model(model);
 
-    printf("compute_token_importance test completed\n\n");
+    printf("compute_indexer_triplet test completed\n\n");
     fflush(stdout);
 }
 
@@ -539,7 +541,7 @@ int main() {
     srand(42);
 
     // Run individual tests
-    test_compute_token_importance();
+    test_compute_indexer_triplet();
     test_select_topk_tokens();
     test_apply_sparse_attention_simple();
     test_reshape_assertion_fix();

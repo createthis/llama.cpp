@@ -13908,44 +13908,11 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_tensor * Vcache = mctx_cur2->get_v(ctx0, il);
                             ggml_tensor * KQmask2 = inp_attn->get_kq_mask();
 
-                            // Compute and write Indexer K for current tokens
-                            ggml_tensor * Kindexer_cur = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_wk, cur);
-                            Kindexer_cur = ggml_norm(ctx0, Kindexer_cur, 1e-5f);
-                            if (model.layers[il].attn_indexer_k_norm != nullptr) {
-                                ggml_tensor * gamma = model.layers[il].attn_indexer_k_norm;
-                                ggml_tensor * gamma_r = ggml_repeat(ctx0, gamma, Kindexer_cur);
-                                Kindexer_cur = ggml_mul(ctx0, Kindexer_cur, gamma_r);
-                            }
-                            if (model.layers[il].attn_indexer_k_norm_bias != nullptr) {
-                                ggml_tensor * beta = model.layers[il].attn_indexer_k_norm_bias;
-                                ggml_tensor * beta_r = ggml_repeat(ctx0, beta, Kindexer_cur);
-                                Kindexer_cur = ggml_add(ctx0, Kindexer_cur, beta_r);
-                            }
-                            ggml_tensor * Kindexer_cur_3d = ggml_reshape_3d(ctx0, Kindexer_cur, Kindexer_cur->ne[0], 1, n_tokens);
-                            ggml_build_forward_expand(gf, mctx_cur2->cpy_k_indexer(ctx0, Kindexer_cur_3d, inp_attn->get_k_idxs(), il));
-
-                            // Prepare q_indexer and weights for current T
-                            ggml_tensor * qidx_qr = nullptr;
-                            if (!is_lite) {
-                                qidx_qr = ggml_mul_mat(ctx0, model.layers[il].wq_a, cur);
-                                qidx_qr = ggml_norm(ctx0, qidx_qr, 1e-5f);
-                            } else {
-                                qidx_qr = ggml_norm(ctx0, cur, 1e-5f);
-                            }
-                            ggml_tensor * q_indexer = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_wq_b, qidx_qr);
-                            const int64_t D_index = model.layers[il].attn_indexer_wk->ne[1];
-                            const int64_t H_index = model.layers[il].attn_indexer_wq_b->ne[1] / D_index;
-                            q_indexer = ggml_reshape_3d(ctx0, q_indexer, D_index, H_index, n_tokens);
-
-                            ggml_tensor * idx_weights = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_weights_proj, cur);
-
-                            // KV-aware selection using Indexer cache
-                            ggml_tensor * Kindexer_cache = mctx_cur2->get_k_indexer(ctx0, il);
                             const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
                             top_k = env_topk ? std::max<int64_t>(1, atoll(env_topk)) : 1024;
                             top_k = std::min<int64_t>(top_k, (int64_t) Kcache->ne[2]);
-                            ggml_tensor * kvaware_indices = llama::sparse_attn_topk::select_topk_tokens_indexer_kvaware(
-                                ctx0, q_indexer, Kindexer_cache, idx_weights, KQmask2, top_k, cb_wrapper);
+                            ggml_tensor * kvaware_indices = llama::sparse_attn_indexer::build_kvaware_topk_indices(
+                                ctx0, model, il, cur, n_tokens, mctx_cur2, inp_attn->get_k_idxs(), KQmask2, top_k, cb_wrapper, gf);
                             ggml_backend_sched_set_tensor_backend(sched, kvaware_indices, backend_cpu);
                             cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
                                 ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, cb_wrapper);
@@ -14028,44 +13995,11 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_tensor * Vcache = mctx_cur2->get_v(ctx0, il);
                             ggml_tensor * KQmask2 = inp_attn->get_kq_mask();
 
-                            // Compute and write Indexer K for current tokens
-                            ggml_tensor * Kindexer_cur = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_wk, cur);
-                            Kindexer_cur = ggml_norm(ctx0, Kindexer_cur, 1e-5f);
-                            if (model.layers[il].attn_indexer_k_norm != nullptr) {
-                                ggml_tensor * gamma = model.layers[il].attn_indexer_k_norm;
-                                ggml_tensor * gamma_r = ggml_repeat(ctx0, gamma, Kindexer_cur);
-                                Kindexer_cur = ggml_mul(ctx0, Kindexer_cur, gamma_r);
-                            }
-                            if (model.layers[il].attn_indexer_k_norm_bias != nullptr) {
-                                ggml_tensor * beta = model.layers[il].attn_indexer_k_norm_bias;
-                                ggml_tensor * beta_r = ggml_repeat(ctx0, beta, Kindexer_cur);
-                                Kindexer_cur = ggml_add(ctx0, Kindexer_cur, beta_r);
-                            }
-                            ggml_tensor * Kindexer_cur_3d = ggml_reshape_3d(ctx0, Kindexer_cur, Kindexer_cur->ne[0], 1, n_tokens);
-                            ggml_build_forward_expand(gf, mctx_cur2->cpy_k_indexer(ctx0, Kindexer_cur_3d, inp_attn->get_k_idxs(), il));
-
-                            // Prepare q_indexer and weights for current T
-                            ggml_tensor * qidx_qr = nullptr;
-                            if (!is_lite) {
-                                qidx_qr = ggml_mul_mat(ctx0, model.layers[il].wq_a, cur);
-                                qidx_qr = ggml_norm(ctx0, qidx_qr, 1e-5f);
-                            } else {
-                                qidx_qr = ggml_norm(ctx0, cur, 1e-5f);
-                            }
-                            ggml_tensor * q_indexer = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_wq_b, qidx_qr);
-                            const int64_t D_index = model.layers[il].attn_indexer_wk->ne[1];
-                            const int64_t H_index = model.layers[il].attn_indexer_wq_b->ne[1] / D_index;
-                            q_indexer = ggml_reshape_3d(ctx0, q_indexer, D_index, H_index, n_tokens);
-
-                            ggml_tensor * idx_weights = ggml_mul_mat(ctx0, model.layers[il].attn_indexer_weights_proj, cur);
-
-                            // KV-aware selection using Indexer cache
-                            ggml_tensor * Kindexer_cache = mctx_cur2->get_k_indexer(ctx0, il);
                             const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
                             top_k = env_topk ? std::max<int64_t>(1, atoll(env_topk)) : 1024;
                             top_k = std::min<int64_t>(top_k, (int64_t) Kcache->ne[2]);
-                            ggml_tensor * kvaware_indices = llama::sparse_attn_topk::select_topk_tokens_indexer_kvaware(
-                                ctx0, q_indexer, Kindexer_cache, idx_weights, KQmask2, top_k, cb_wrapper);
+                            ggml_tensor * kvaware_indices = llama::sparse_attn_indexer::build_kvaware_topk_indices(
+                                ctx0, model, il, cur, n_tokens, mctx_cur2, inp_attn->get_k_idxs(), KQmask2, top_k, cb_wrapper, gf);
                             ggml_backend_sched_set_tensor_backend(sched, kvaware_indices, backend_cpu);
                             cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
                                 ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, cb_wrapper);
