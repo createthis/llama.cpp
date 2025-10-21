@@ -66,11 +66,15 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
         qsrc = ggml_norm(ctx, cur, 1e-5f);
     }
     ggml_tensor * q_indexer = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_wq_b, qsrc);
+    // index head dim (head_dim in Tilelang)
     const int64_t D_index = model.layers[layer_idx].attn_indexer_wk->ne[1];
+    // indexer head count (n_heads in Tilelang)
     const int64_t H_index = model.layers[layer_idx].attn_indexer_wq_b->ne[1] / D_index;
     q_indexer = ggml_reshape_3d(ctx, q_indexer, D_index, H_index, n_tokens);
     cb(q_indexer, "indexer_q", layer_idx);
     ggml_tensor * idx_weights = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_weights_proj, cur);
+    // Scale weights by 1/sqrt(H_index) to match TileLang indexer behavior
+    idx_weights = ggml_scale(ctx, idx_weights, 1.0f / sqrtf((float) H_index));
     cb(idx_weights, "indexer_weights", layer_idx);
     ggml_tensor * Kindexer_cache = mctx ? mctx->get_k_indexer(ctx, layer_idx)
                                         : ggml_reshape_2d(ctx, Kindexer_cur, D_index, n_tokens);
