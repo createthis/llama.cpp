@@ -200,6 +200,11 @@ ggml_tensor * sparse_attn_indexer::build_kvaware_topk_indices(
     size_t initial_mem = ggml_used_mem(ctx);
     printf("Initial memory usage: %s\n", format_memory_size(initial_mem).c_str());
     fflush(stdout);
+    // Dump indexer dims and sanity-check shapes
+    const int64_t D_index_dbg = model.layers[layer_idx].attn_indexer_wk->ne[1];
+    const int64_t H_index_dbg = model.layers[layer_idx].attn_indexer_wq_b->ne[1] / D_index_dbg;
+    printf("[SPARSE-DBG-IDX] L%d: D_index=%" PRId64 " H_index=%" PRId64 " n_tokens=%" PRId64 "\n", layer_idx, D_index_dbg, H_index_dbg, (long long) n_tokens);
+    fflush(stdout);
     IndexerKVTriplet trip = compute_indexer_triplet(ctx, model, layer_idx, cur, n_tokens, mctx, k_idxs,
         inp_pos, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,
         cb, gf);

@@ -198,6 +198,12 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
           } else {
               v_sel_2d = ggml_cont(ctx, ggml_transpose(ctx, v_sel_2d));
           }
+          if (t < 2) {
+              // print first few index ranges and check ordering
+              int32_t *idxp = (int32_t *) idx_t_2d->data;
+              printf("[SPARSE-DBG-INDICES] t=%lld: idx[0]=%d idx[last]=%d top_k=%lld N_kv=%lld\n",
+                     (long long) t, (int) idxp[0], (int) idxp[top_k-1], (long long) top_k, (long long) N_kv);
+          }
 
           size_t q_off = t * Hq * q_all_2d->nb[1];
           ggml_tensor * q_t_2d = ggml_view_2d(ctx, q_all_2d, Dq, Hq, q_all_2d->nb[1], q_off);
