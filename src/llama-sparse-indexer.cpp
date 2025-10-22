@@ -195,13 +195,27 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     }
 
     cb(q_indexer, "indexer_q", layer_idx);
-    ggml_tensor * idx_weights = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_weights_proj, cur);
-    // Scale weights by 1/sqrt(H_index) to match TileLang indexer behavior
-    // see https://github.com/tile-ai/tilelang/blob/5cb5c068bc9a1a0b38c46bac915a8c2743eb1442/examples/deepseek_v32/inference/model.py#L500
+
+    // Approximate q_scale via per-(head, token) RMS of q_indexer across D_index
+    // q_indexer: [D_index, H_index, T]
+    ggml_tensor * q_sqr = ggml_sqr(ctx, q_indexer);                                  // [D_index, H, T]
+    ggml_tensor * q_sum = ggml_sum_rows(ctx, q_sqr);                                  // [1, H, T]
+    ggml_tensor * q_mean= ggml_scale(ctx, q_sum, 1.0f / (float) D_index);             // [1, H, T]
+    ggml_tensor * q_rms = ggml_sqrt(ctx, q_mean);                                     // [1, H, T]
+    printf("[SPARSE-IDX-QRMS] L%d: computed q_rms over D_index; D_index=%" PRId64 " H=%" PRId64 " T=%" PRId64 "\n",
+           layer_idx, D_index, H_index, n_tokens);
+    fflush(stdout);
+
+    // Build base weights from projection on cur
+    ggml_tensor * idx_weights = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_weights_proj, cur); // [H, T]
+    // Scale weights by 1/sqrt(H_index) and 1/sqrt(D_index), then multiply by q_rms
     idx_weights = ggml_scale(ctx, idx_weights, 1.0f / sqrtf((float) H_index));
-    // Also apply 1/sqrt(D_index) (softmax_scale) as used in tilelang's indexer
-    // https://github.com/tile-ai/tilelang/blob/8a5eb569704bfea64478c29adcfe3a09e3c2b12c/examples/deepseek_v32/inference/model.py#L461
     idx_weights = ggml_scale(ctx, idx_weights, 1.0f / sqrtf((float) D_index));
+
+    // Broadcast q_rms [1,H,T] to [H,T] and multiply
+    ggml_tensor * q_rms_2d = ggml_reshape_2d(ctx, q_rms, H_index, n_tokens);          // [H, T]
+    idx_weights = ggml_mul(ctx, idx_weights, q_rms_2d);                               // [H, T]
+
     cb(idx_weights, "indexer_weights", layer_idx);
     ggml_tensor * Kindexer_cache = mctx ? mctx->get_k_indexer(ctx, layer_idx)
                                         : ggml_reshape_2d(ctx, Kindexer_cur, D_index, n_tokens);
