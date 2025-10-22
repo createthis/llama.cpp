@@ -101,10 +101,10 @@ int main() {
     ggml_tensor * k_cur = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k_embd_head, kv_n_head, n_tokens);
     ggml_tensor * v_cur = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, v_embd_head, kv_n_head, n_tokens);
 
-    printf("About to call apply_sparse_attention (expected to reproduce runtime assertion)...\n");
+    printf("About to call apply_sparse_attention_kvaware (expected to reproduce runtime assertion)...\n");
     fflush(stdout);
-    ggml_tensor * sparse_out = llama::sparse_mla_fwd::apply_sparse_attention(
-        ctx, q_cur, k_cur, v_cur, topk_indices, n_tokens, /*top_k=*/64, cb);
+    ggml_tensor * sparse_out = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
+        ctx, q_cur, k_cur, v_cur, topk_indices, n_tokens, /*top_k=*/64, /*kq_scale=*/1.0f, /*kq_mask=*/nullptr, /*attn_softcap=*/0.0f, cb);
     (void)sparse_out;
 
     delete model;
