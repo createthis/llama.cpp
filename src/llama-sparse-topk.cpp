@@ -151,6 +151,12 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
                   mask_tc = ggml_cast(ctx, mask_tc, scores_tc->type);
                   mask_tc = ggml_cont(ctx, mask_tc);
               }
+              // debug: log operand layouts for the first tile only
+              if (t0 == 0) {
+                  printf("[TOPK-INDEXER-DBG] add mask: scores_tc ne=[%" PRId64 ",%" PRId64 "] nb=[%zu,%zu] type=%d | mask_tc ne=[%" PRId64 ",%" PRId64 "] nb=[%zu,%zu] type=%d\n",
+                         scores_tc->ne[0], scores_tc->ne[1], scores_tc->nb[0], scores_tc->nb[1], (int)scores_tc->type,
+                         mask_tc->ne[0], mask_tc->ne[1], mask_tc->nb[0], mask_tc->nb[1], (int)mask_tc->type);
+              }
               scores_tc = ggml_add(ctx, scores_tc, mask_tc);
           }
 

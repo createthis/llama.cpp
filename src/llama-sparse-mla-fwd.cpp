@@ -208,6 +208,8 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
           ggml_tensor * q_t_2d = ggml_view_2d(ctx, q_all_2d, Dq, Hq, q_all_2d->nb[1], q_off);
 
           ggml_tensor * scores_t = ggml_mul_mat(ctx, k_sel_2d, q_t_2d); // [Hkv*top_k, Hq]
+          // debug marker: scores computed pre-scale
+          printf("[SPARSE-DBG-MLA] t=%lld scores pre-scale\n", (long long) t);
           scores_t = ggml_scale(ctx, scores_t, kq_scale);
           // add mask/alibi bias if provided: gather kq_mask rows by indices and add to scores
           if (kq_mask) {
@@ -242,6 +244,8 @@ ggml_tensor * sparse_mla_fwd::apply_sparse_attention(
               scores_t = ggml_tanh(ctx, scores_t);
               scores_t = ggml_scale(ctx, scores_t, attn_softcap);
           }
+          // debug marker: scores post-mask/softcap
+          printf("[SPARSE-DBG-MLA] t=%lld scores post-mask/softcap\n", (long long) t);
           ggml_tensor * weights_t = ggml_soft_max(ctx, scores_t);
 
           ggml_tensor * out2d_t = ggml_mul_mat(ctx, weights_t, v_sel_2d); // [Hq, Dv]
