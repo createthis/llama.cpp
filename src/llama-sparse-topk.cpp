@@ -140,6 +140,13 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
               scores_tc = scores_tc ? ggml_add(ctx, scores_tc, contrib) : contrib;
           }
 
+
+          // Debug (cb): per-tile scalar sums (no deref)
+          ggml_tensor * idxkv_scores_sum = ggml_sum(ctx, scores_tc);
+          ggml_tensor * idxkv_scores_ssq = ggml_sum(ctx, ggml_sqr(ctx, scores_tc));
+          cb(idxkv_scores_sum,  "idxkv_scores_sum",  -1);
+          cb(idxkv_scores_ssq,  "idxkv_scores_ssq",  -1);
+
           scores_tc = ggml_cont(ctx, scores_tc);
 
           // mask tile if available
