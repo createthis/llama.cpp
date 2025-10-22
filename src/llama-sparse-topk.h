@@ -10,13 +10,6 @@ using std::function;
 
 // Top-k selector implementation for DeepSeek V3.2
 struct sparse_attn_topk {
-    // Identify top-k important tokens for sparse attention
-    static ggml_tensor * select_topk_tokens(
-        ggml_context * ctx,
-        ggml_tensor * token_importance,
-        int64_t n_tokens,
-        const function<void(ggml_tensor *, const char *, int)> & cb);
-
     // Lightning Indexer KV-aware selection
     static ggml_tensor * select_topk_tokens_indexer_kvaware(
         ggml_context * ctx,
