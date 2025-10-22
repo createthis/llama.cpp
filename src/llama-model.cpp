@@ -13924,7 +13924,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             }
                             if (model.layers[il].wv_b) {
                                 printf("[SPARSE-DBG-MLA] L%d: wv_b dims=[%" PRId64 ", %" PRId64 "] expected=[%u, %" PRId64 "]\n",
-                                       il, model.layers[il].wv_b->ne[0], model.layers[il].wv_b->ne[1], kv_lora_rank, (long long) n_embd_head_v);
+                                       il, (int64_t) model.layers[il].wv_b->ne[0], (int64_t) model.layers[il].wv_b->ne[1], kv_lora_rank, (int64_t) n_embd_head_v);
                             }
                             GGML_ASSERT(cur->ne[0] == (int64_t) kv_lora_rank);
                             if (model.layers[il].wv_b) {
@@ -14022,7 +14022,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                 ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, cb_wrapper);
                             // Sanity checks for MHA sparse attention output vs expected V-dim (n_embd_head_v)
                             if (cur->ne[0] != (int64_t) n_embd_head_v) {
-                                printf("[SPARSE-DBG-MHA] L%d: sparse attn out Dv=%" PRId64 " but n_embd_head_v=%" PRId64 " (mismatch)\n", il, cur->ne[0], (long long) n_embd_head_v);
+                                printf("[SPARSE-DBG-MHA] L%d: sparse attn out Dv=%" PRId64 " but n_embd_head_v=%" PRId64 " (mismatch)\n", il, (int64_t) cur->ne[0], (int64_t) n_embd_head_v);
                             }
                             GGML_ASSERT(cur->ne[0] == (int64_t) n_embd_head_v);
                         }
