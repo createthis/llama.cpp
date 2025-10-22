@@ -285,6 +285,12 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
               // Ensure both operands have row-contiguous layout for safe broadcast add
               GGML_ASSERT(scores_tc->nb[0] == (size_t) ggml_type_size(scores_tc->type));
               GGML_ASSERT(mask_tc->nb[0]   == (size_t) ggml_type_size(mask_tc->type));
+              if (t0 == 0) {
+                  printf("[TOPK-INDEXER-DBG] (INDEXER) add mask: scores_tc ne=[%" PRId64 ",%" PRId64 "] nb=[%zu,%zu] type=%d | mask_tc ne=[%" PRId64 ",%" PRId64 "] nb=[%zu,%zu] type=%d\n",
+                         scores_tc->ne[0], scores_tc->ne[1], scores_tc->nb[0], scores_tc->nb[1], (int) scores_tc->type,
+                         mask_tc->ne[0], mask_tc->ne[1], mask_tc->nb[0], mask_tc->nb[1], (int) mask_tc->type);
+                  fflush(stdout);
+              }
               scores_tc = ggml_add(ctx, scores_tc, mask_tc);
           }
 
