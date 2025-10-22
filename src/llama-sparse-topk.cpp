@@ -136,6 +136,11 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens(
           perm_q = ggml_cont(ctx, perm_q);
           ggml_tensor * sum_hq    = ggml_sum_rows(ctx, perm_q);                      // [1, N_kv, Tc]
           ggml_tensor * scores_tc = ggml_reshape_2d(ctx, sum_hq, N_kv, Tc);          // [N_kv, Tc]
+          // Debug: build scalar sums for diag (no deref); shapes logged via cb
+          ggml_tensor * idx_scores_sum  = ggml_sum(ctx, scores_tc);
+          ggml_tensor * idx_scores_ssq  = ggml_sum(ctx, ggml_sqr(ctx, scores_tc));
+          cb(idx_scores_sum,  "idx_scores_sum",  -1);
+          cb(idx_scores_ssq,  "idx_scores_ssq",  -1);
           // Ensure CUDA-friendly layout for subsequent broadcast add with mask
           scores_tc = ggml_cont(ctx, scores_tc);
 
