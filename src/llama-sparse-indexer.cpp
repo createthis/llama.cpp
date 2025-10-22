@@ -111,7 +111,19 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     const bool has_wq_a = (model.layers[layer_idx].wq_a != nullptr);
     if (has_wq_a) {
         qsrc = ggml_mul_mat(ctx, model.layers[layer_idx].wq_a, cur);
+        // Apply learned RMSNorm (attn_q_a_norm) like main attention path
+        // This aligns with TileLang qr = q_norm(wq_a(x))
         qsrc = ggml_norm(ctx, qsrc, 1e-5f);
+        if (model.layers[layer_idx].attn_q_a_norm) {
+            ggml_tensor * gamma_q = model.layers[layer_idx].attn_q_a_norm;
+            ggml_tensor * gamma_q_r = ggml_repeat(ctx, gamma_q, qsrc);
+            qsrc = ggml_mul(ctx, qsrc, gamma_q_r);
+            printf("[SPARSE-IDX-Q] L%d: applied attn_q_a_norm to indexer qsrc\n", layer_idx);
+            fflush(stdout);
+        } else {
+            printf("[SPARSE-IDX-Q][WARN] L%d: attn_q_a_norm not found; using plain RMSNorm for indexer qsrc\n", layer_idx);
+            fflush(stdout);
+        }
     } else {
         qsrc = ggml_norm(ctx, cur, 1e-5f);
     }
