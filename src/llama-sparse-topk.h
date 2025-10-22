@@ -17,16 +17,6 @@ struct sparse_attn_topk {
         int64_t n_tokens,
         const function<void(ggml_tensor *, const char *, int)> & cb);
 
-    // KV-aware top-k selection using attention Q and cached K, with mask.
-    // Returns absolute KV indices of shape [top_k, n_tokens].
-    static ggml_tensor * select_topk_tokens_kvaware(
-        ggml_context * ctx,
-        ggml_tensor * q_cur,     // [Dq, Hq, T]
-        ggml_tensor * k_cache,   // [Dk, Hkv, N_kv]
-        ggml_tensor * kq_mask,   // [N_kv, PAD(T)] or broadcastable
-        int64_t top_k,
-        const function<void(ggml_tensor *, const char *, int)> & cb);
-
     // Lightning Indexer KV-aware selection
     static ggml_tensor * select_topk_tokens_indexer_kvaware(
         ggml_context * ctx,
