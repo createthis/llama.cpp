@@ -84,8 +84,8 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
         cb(Kindexer_cur, "indexer_k_rope", layer_idx);
     }
 
-    // Minimal rotate_activation approximation: circularly shift Dim0 by D/2
-    {
+    // Minimal rotate_activation approximation disabled for debugging (was: circular shift by D/2)
+    if (false) {
         const int64_t Dtot = Kindexer_cur->ne[0];
         if (Dtot > 1) {
             const int64_t D2 = Dtot/2;
@@ -140,8 +140,8 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
         cb(q_indexer, "indexer_q_rope", layer_idx);
     }
 
-    // Minimal rotate_activation approximation on q_indexer: circular shift Dim0 by D/2
-    {
+    // Minimal rotate_activation approximation on q_indexer disabled for debugging
+    if (false) {
         const int64_t Dtot = q_indexer->ne[0];
         if (Dtot > 1) {
             const int64_t D2 = Dtot/2;
