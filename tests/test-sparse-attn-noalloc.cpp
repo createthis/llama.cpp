@@ -75,7 +75,11 @@ int main() {
 
     printf("About to call build_kvaware_topk_indices...\n");
     ggml_tensor * topk_indices = llama::sparse_attn_indexer::build_kvaware_topk_indices(
-        ctx, *model, 0, cur, n_tokens, /*mctx*/ nullptr, /*k_idxs*/ nullptr, /*kq_mask*/ nullptr, /*top_k*/ 64, cb, /*gf*/ nullptr);
+        ctx, *model, 0, cur, n_tokens, /*mctx*/ nullptr, /*k_idxs*/ nullptr, /*kq_mask*/ nullptr, /*top_k*/ 64,
+        /*inp_pos*/ nullptr, /*n_rot*/ 0, /*rope_type*/ 0, /*n_ctx_orig*/ 0,
+        /*freq_base*/ 0.0f, /*freq_scale*/ 1.0f, /*ext_factor*/ 0.0f, /*attn_factor*/ 1.0f,
+        /*beta_fast*/ 1.0f, /*beta_slow*/ 1.0f,
+        cb, /*gf*/ nullptr);
 
     if (topk_indices) {
         printf("OK: topk_indices shape = [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n",

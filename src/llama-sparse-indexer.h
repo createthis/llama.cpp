@@ -33,6 +33,16 @@ struct sparse_attn_indexer {
         int64_t n_tokens,
         const llama_kv_cache_context * mctx,
         ggml_tensor * k_idxs,
+        ggml_tensor * inp_pos,
+        int64_t n_rot,
+        int rope_type,
+        int n_ctx_orig,
+        float freq_base,
+        float freq_scale,
+        float ext_factor,
+        float attn_factor,
+        float beta_fast,
+        float beta_slow,
         const function<void(ggml_tensor *, const char *, int)> & cb,
         ggml_cgraph * gf);
 
@@ -46,6 +56,16 @@ struct sparse_attn_indexer {
         ggml_tensor * k_idxs,
         ggml_tensor * kq_mask,
         int64_t top_k,
+        ggml_tensor * inp_pos,
+        int64_t n_rot,
+        int rope_type,
+        int n_ctx_orig,
+        float freq_base,
+        float freq_scale,
+        float ext_factor,
+        float attn_factor,
+        float beta_fast,
+        float beta_slow,
         const function<void(ggml_tensor *, const char *, int)> & cb,
         ggml_cgraph * gf);
 };

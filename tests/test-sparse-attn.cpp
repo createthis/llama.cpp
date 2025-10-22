@@ -187,7 +187,11 @@ void test_compute_indexer_triplet() {
 
         try {
             auto trip = llama::sparse_attn_indexer::compute_indexer_triplet(
-                test_ctx.ctx, *model, 0, cur, n_tokens, /*mctx*/ nullptr, /*k_idxs*/ nullptr, cb, /*gf*/ nullptr);
+                test_ctx.ctx, *model, 0, cur, n_tokens, /*mctx*/ nullptr, /*k_idxs*/ nullptr,
+                /*inp_pos*/ nullptr, /*n_rot*/ 0, /*rope_type*/ 0, /*n_ctx_orig*/ 0,
+                /*freq_base*/ 0.0f, /*freq_scale*/ 1.0f, /*ext_factor*/ 0.0f, /*attn_factor*/ 1.0f,
+                /*beta_fast*/ 1.0f, /*beta_slow*/ 1.0f,
+                cb, /*gf*/ nullptr);
 
             if (trip.q_indexer && trip.k_indexer_cache && trip.idx_weights) {
                 printf("Success: triplet shapes q_indexer=[%" PRId64 ", %" PRId64 ", %" PRId64 "] k_indexer_cache=[%" PRId64 ", %" PRId64 "] idx_weights=[%" PRId64 ", %" PRId64 "]\n",

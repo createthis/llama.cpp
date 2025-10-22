@@ -37,6 +37,16 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     int64_t n_tokens,
     const llama_kv_cache_context * mctx,
     ggml_tensor * k_idxs,
+    ggml_tensor * inp_pos,
+    int64_t n_rot,
+    int rope_type,
+    int n_ctx_orig,
+    float freq_base,
+    float freq_scale,
+    float ext_factor,
+    float attn_factor,
+    float beta_fast,
+    float beta_slow,
     const function<void(ggml_tensor *, const char *, int)> & cb,
     ggml_cgraph * gf) {
     // Compute Indexer K for current tokens and (optionally) write to cache
@@ -53,6 +63,27 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
         Kindexer_cur = ggml_add(ctx, Kindexer_cur, beta_r);
     }
     cb(Kindexer_cur, "indexer_k_norm", layer_idx);
+
+    // Apply RoPE to the first n_rot dims of K-indexer: view as [n_rot, 1, T]
+    if (n_rot > 0) {
+        ggml_tensor * Kidx_pe = ggml_view_3d(ctx, Kindexer_cur,
+            n_rot, 1, n_tokens,
+            ggml_row_size(Kindexer_cur->type, Kindexer_cur->ne[0]),
+            ggml_row_size(Kindexer_cur->type, Kindexer_cur->ne[0]),
+            0);
+        Kidx_pe = ggml_rope_ext(ctx, Kidx_pe, inp_pos, nullptr,
+            n_rot, (enum llama_rope_type) rope_type, n_ctx_orig, freq_base, freq_scale,
+            ext_factor, attn_factor, beta_fast, beta_slow);
+        // Reuse Kindexer_cur as concatenation of [pe, nope]
+        ggml_tensor * Kidx_nope = ggml_view_3d(ctx, Kindexer_cur,
+            Kindexer_cur->ne[0] - n_rot, 1, n_tokens,
+            ggml_row_size(Kindexer_cur->type, Kindexer_cur->ne[0]),
+            ggml_row_size(Kindexer_cur->type, Kindexer_cur->ne[0]),
+            ggml_row_size(Kindexer_cur->type, n_rot));
+        Kindexer_cur = ggml_concat(ctx, Kidx_pe, Kidx_nope, 0);
+        cb(Kindexer_cur, "indexer_k_rope", layer_idx);
+    }
+
     if (mctx && gf) {
         ggml_tensor * Kindexer_cur_3d = ggml_reshape_3d(ctx, Kindexer_cur, Kindexer_cur->ne[0], 1, n_tokens);
         ggml_build_forward_expand(gf, mctx->cpy_k_indexer(ctx, Kindexer_cur_3d, k_idxs, layer_idx));
@@ -71,6 +102,26 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     // indexer head count (n_heads in Tilelang)
     const int64_t H_index = model.layers[layer_idx].attn_indexer_wq_b->ne[1] / D_index;
     q_indexer = ggml_reshape_3d(ctx, q_indexer, D_index, H_index, n_tokens);
+
+    // Apply RoPE to the first n_rot dims of q_indexer: view as [n_rot, H, T]
+    if (n_rot > 0) {
+        ggml_tensor * qidx_pe = ggml_view_3d(ctx, q_indexer,
+            n_rot, H_index, n_tokens,
+            ggml_row_size(q_indexer->type, D_index),
+            ggml_row_size(q_indexer->type, D_index) * H_index,
+            0);
+        qidx_pe = ggml_rope_ext(ctx, qidx_pe, inp_pos, nullptr,
+            n_rot, (enum llama_rope_type) rope_type, n_ctx_orig, freq_base, freq_scale,
+            ext_factor, attn_factor, beta_fast, beta_slow);
+        ggml_tensor * qidx_nope = ggml_view_3d(ctx, q_indexer,
+            D_index - n_rot, H_index, n_tokens,
+            ggml_row_size(q_indexer->type, D_index),
+            ggml_row_size(q_indexer->type, D_index) * H_index,
+            ggml_row_size(q_indexer->type, n_rot));
+        q_indexer = ggml_concat(ctx, qidx_pe, qidx_nope, 0);
+        cb(q_indexer, "indexer_q_rope", layer_idx);
+    }
+
     cb(q_indexer, "indexer_q", layer_idx);
     ggml_tensor * idx_weights = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_weights_proj, cur);
     // Scale weights by 1/sqrt(H_index) to match TileLang indexer behavior
@@ -93,6 +144,16 @@ ggml_tensor * sparse_attn_indexer::build_kvaware_topk_indices(
     ggml_tensor * k_idxs,
     ggml_tensor * kq_mask,
     int64_t top_k,
+    ggml_tensor * inp_pos,
+    int64_t n_rot,
+    int rope_type,
+    int n_ctx_orig,
+    float freq_base,
+    float freq_scale,
+    float ext_factor,
+    float attn_factor,
+    float beta_fast,
+    float beta_slow,
     const function<void(ggml_tensor *, const char *, int)> & cb,
     ggml_cgraph * gf)
 {
@@ -100,7 +161,9 @@ ggml_tensor * sparse_attn_indexer::build_kvaware_topk_indices(
     size_t initial_mem = ggml_used_mem(ctx);
     printf("Initial memory usage: %s\n", format_memory_size(initial_mem).c_str());
     fflush(stdout);
-    IndexerKVTriplet trip = compute_indexer_triplet(ctx, model, layer_idx, cur, n_tokens, mctx, k_idxs, cb, gf);
+    IndexerKVTriplet trip = compute_indexer_triplet(ctx, model, layer_idx, cur, n_tokens, mctx, k_idxs,
+        inp_pos, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,
+        cb, gf);
     ggml_tensor * Kindexer_cache = trip.k_indexer_cache;
     if (top_k <= 0) {
         top_k = std::max<int64_t>(64, std::min<int64_t>(1024, Kindexer_cache->ne[1]));
