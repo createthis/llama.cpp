@@ -108,17 +108,41 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     }
     // Build q_indexer and weights
     ggml_tensor * qsrc = nullptr;
-    if (model.layers[layer_idx].wq_a != nullptr) {
+    const bool has_wq_a = (model.layers[layer_idx].wq_a != nullptr);
+    if (has_wq_a) {
         qsrc = ggml_mul_mat(ctx, model.layers[layer_idx].wq_a, cur);
         qsrc = ggml_norm(ctx, qsrc, 1e-5f);
     } else {
         qsrc = ggml_norm(ctx, cur, 1e-5f);
     }
+
+    // Logging and sanity checks for potential lite-config mismatch
+    const int64_t qsrc_in_dim = qsrc ? qsrc->ne[0] : -1;
+    const int64_t wq_b_in_dim = model.layers[layer_idx].attn_indexer_wq_b ? model.layers[layer_idx].attn_indexer_wq_b->ne[0] : -1;
+    const int64_t wq_b_out_dim = model.layers[layer_idx].attn_indexer_wq_b ? model.layers[layer_idx].attn_indexer_wq_b->ne[1] : -1;
+    printf("[SPARSE-IDX-Q] L%d: has_wq_a=%d qsrc_in=%lld wq_b_in=%lld wq_b_out=%lld\n",
+           layer_idx, (int)has_wq_a, (long long)qsrc_in_dim, (long long)wq_b_in_dim, (long long)wq_b_out_dim);
+    fflush(stdout);
+
+    if (model.layers[layer_idx].attn_indexer_wq_b && qsrc) {
+        if (wq_b_in_dim != qsrc_in_dim) {
+            printf("[SPARSE-IDX-Q][WARN] L%d: attn_indexer_wq_b input dim (%lld) != qsrc dim (%lld). Lite config?\n",
+                   layer_idx, (long long) wq_b_in_dim, (long long) qsrc_in_dim);
+            fflush(stdout);
+        }
+    }
+
     ggml_tensor * q_indexer = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_wq_b, qsrc);
+
     // index head dim (head_dim in Tilelang)
     const int64_t D_index = model.layers[layer_idx].attn_indexer_wk->ne[1];
     // indexer head count (n_heads in Tilelang)
     const int64_t H_index = model.layers[layer_idx].attn_indexer_wq_b->ne[1] / D_index;
+    if ((model.layers[layer_idx].attn_indexer_wq_b->ne[1] % D_index) != 0) {
+        printf("[SPARSE-IDX-Q][WARN] L%d: wq_b_out_dim (%lld) is not divisible by D_index (%lld)\n",
+               layer_idx, (long long) model.layers[layer_idx].attn_indexer_wq_b->ne[1], (long long) D_index);
+        fflush(stdout);
+    }
     q_indexer = ggml_reshape_3d(ctx, q_indexer, D_index, H_index, n_tokens);
 
     // Apply RoPE to the first n_rot dims of q_indexer: view as [n_rot, H, T]
