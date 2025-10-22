@@ -84,6 +84,24 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
         cb(Kindexer_cur, "indexer_k_rope", layer_idx);
     }
 
+    // Minimal rotate_activation approximation: circularly shift Dim0 by D/2
+    {
+        const int64_t Dtot = Kindexer_cur->ne[0];
+        if (Dtot > 1) {
+            const int64_t D2 = Dtot/2;
+            if (D2 > 0) {
+                ggml_tensor * k_hi = ggml_view_3d(ctx, Kindexer_cur,
+                    Dtot - D2, Kindexer_cur->ne[1], Kindexer_cur->ne[2],
+                    Kindexer_cur->nb[1], Kindexer_cur->nb[2], D2 * Kindexer_cur->nb[0]);
+                ggml_tensor * k_lo = ggml_view_3d(ctx, Kindexer_cur,
+                    D2, Kindexer_cur->ne[1], Kindexer_cur->ne[2],
+                    Kindexer_cur->nb[1], Kindexer_cur->nb[2], 0);
+                Kindexer_cur = ggml_concat(ctx, k_hi, k_lo, 0);
+                cb(Kindexer_cur, "indexer_k_rot", layer_idx);
+            }
+        }
+    }
+
     if (mctx && gf) {
         ggml_tensor * Kindexer_cur_3d = ggml_reshape_3d(ctx, Kindexer_cur, Kindexer_cur->ne[0], 1, n_tokens);
         ggml_build_forward_expand(gf, mctx->cpy_k_indexer(ctx, Kindexer_cur_3d, k_idxs, layer_idx));
@@ -120,6 +138,24 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
             ggml_row_size(q_indexer->type, n_rot));
         q_indexer = ggml_concat(ctx, qidx_pe, qidx_nope, 0);
         cb(q_indexer, "indexer_q_rope", layer_idx);
+    }
+
+    // Minimal rotate_activation approximation on q_indexer: circular shift Dim0 by D/2
+    {
+        const int64_t Dtot = q_indexer->ne[0];
+        if (Dtot > 1) {
+            const int64_t D2 = Dtot/2;
+            if (D2 > 0) {
+                ggml_tensor * q_hi = ggml_view_3d(ctx, q_indexer,
+                    Dtot - D2, q_indexer->ne[1], q_indexer->ne[2],
+                    q_indexer->nb[1], q_indexer->nb[2], D2 * q_indexer->nb[0]);
+                ggml_tensor * q_lo = ggml_view_3d(ctx, q_indexer,
+                    D2, q_indexer->ne[1], q_indexer->ne[2],
+                    q_indexer->nb[1], q_indexer->nb[2], 0);
+                q_indexer = ggml_concat(ctx, q_hi, q_lo, 0);
+                cb(q_indexer, "indexer_q_rot", layer_idx);
+            }
+        }
     }
 
     cb(q_indexer, "indexer_q", layer_idx);
