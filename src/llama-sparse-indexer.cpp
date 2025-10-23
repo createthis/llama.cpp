@@ -51,17 +51,32 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     ggml_cgraph * gf) {
     // Compute Indexer K for current tokens and (optionally) write to cache
     ggml_tensor * Kindexer_cur = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_wk, cur);
-    Kindexer_cur = ggml_norm(ctx, Kindexer_cur, 1e-5f);
+
+    // Apply LayerNorm over D_index (per token), then gamma/beta
+    const int64_t D_index = model.layers[layer_idx].attn_indexer_wk->ne[1];
+    ggml_tensor * K3d = ggml_reshape_3d(ctx, Kindexer_cur, D_index, 1, n_tokens); // [D,1,T]
+    ggml_tensor * K_mean = ggml_sum_rows(ctx, K3d);                                // [1,1,T]
+    K_mean = ggml_scale(ctx, K_mean, 1.0f / (float) D_index);                      // [1,1,T]
+    ggml_tensor * K_mean_rep = ggml_repeat(ctx, K_mean, K3d);                      // [D,1,T]
+    ggml_tensor * K_centered = ggml_sub(ctx, K3d, K_mean_rep);                     // [D,1,T]
+    ggml_tensor * K_var = ggml_sum_rows(ctx, ggml_sqr(ctx, K_centered));           // [1,1,T]
+    K_var = ggml_scale(ctx, K_var, 1.0f / (float) D_index);                        // [1,1,T]
+    ggml_tensor * K_var_eps = ggml_clamp(ctx, K_var, 1e-5f, 1e9f);                 // [1,1,T]
+    ggml_tensor * K_std = ggml_sqrt(ctx, K_var_eps);                                // [1,1,T]
+    ggml_tensor * K_std_rep = ggml_repeat(ctx, K_std, K_centered);                  // [D,1,T]
+    ggml_tensor * K_normed = ggml_div(ctx, K_centered, K_std_rep);                  // [D,1,T]
     if (model.layers[layer_idx].attn_indexer_k_norm != nullptr) {
-        ggml_tensor * gamma = model.layers[layer_idx].attn_indexer_k_norm;
-        ggml_tensor * gamma_r = ggml_repeat(ctx, gamma, Kindexer_cur);
-        Kindexer_cur = ggml_mul(ctx, Kindexer_cur, gamma_r);
+        ggml_tensor * gamma = model.layers[layer_idx].attn_indexer_k_norm;         // [D]
+        ggml_tensor * gamma_r = ggml_repeat(ctx, gamma, K_normed);                 // [D,1,T]
+        K_normed = ggml_mul(ctx, K_normed, gamma_r);
     }
     if (model.layers[layer_idx].attn_indexer_k_norm_bias != nullptr) {
-        ggml_tensor * beta = model.layers[layer_idx].attn_indexer_k_norm_bias;
-        ggml_tensor * beta_r = ggml_repeat(ctx, beta, Kindexer_cur);
-        Kindexer_cur = ggml_add(ctx, Kindexer_cur, beta_r);
+        ggml_tensor * beta = model.layers[layer_idx].attn_indexer_k_norm_bias;     // [D]
+        ggml_tensor * beta_r = ggml_repeat(ctx, beta, K_normed);                   // [D,1,T]
+        K_normed = ggml_add(ctx, K_normed, beta_r);
     }
+    // reshape back to [D, T]
+    Kindexer_cur = ggml_reshape_2d(ctx, K_normed, D_index, n_tokens);
     cb(Kindexer_cur, "indexer_k_norm", layer_idx);
 
     // Apply RoPE to the first n_rot dims of K-indexer: view as [n_rot, 1, T]
@@ -146,8 +161,7 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
 
     ggml_tensor * q_indexer = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_wq_b, qsrc);
 
-    // index head dim (head_dim in Tilelang)
-    const int64_t D_index = model.layers[layer_idx].attn_indexer_wk->ne[1];
+    // index head dim (head_dim in Tilelang) - already defined earlier as D_index
     // indexer head count (n_heads in Tilelang)
     const int64_t H_index = model.layers[layer_idx].attn_indexer_wq_b->ne[1] / D_index;
     if ((model.layers[layer_idx].attn_indexer_wq_b->ne[1] % D_index) != 0) {
