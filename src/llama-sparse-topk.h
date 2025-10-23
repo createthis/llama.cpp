@@ -21,7 +21,8 @@ struct sparse_attn_topk {
         int64_t top_k,
         const function<void(ggml_tensor *, const char *, int)> & cb,
         ggml_cgraph * gf,
-        ggml_backend_sched_t sched);
+        ggml_backend_sched_t sched,
+        ggml_backend_t backend_cpu);
 };
 
 } // namespace llama

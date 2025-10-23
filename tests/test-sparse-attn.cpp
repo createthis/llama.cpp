@@ -273,7 +273,7 @@ void test_select_topk_tokens_indexer_kvaware() {
 
     try {
         ggml_tensor * topk_indices = llama::sparse_attn_topk::select_topk_tokens_indexer_kvaware(
-            test_ctx.ctx, q_indexer, k_indexer, weights, kq_mask, top_k, cb, /*gf*/ nullptr, /*sched*/ nullptr);
+            test_ctx.ctx, q_indexer, k_indexer, weights, kq_mask, top_k, cb, /*gf*/ nullptr, /*sched*/ nullptr, /*backend_cpu*/ nullptr);
 
         if (topk_indices) {
             assert(topk_indices->ne[0] == top_k);

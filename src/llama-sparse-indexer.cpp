@@ -259,7 +259,8 @@ ggml_tensor * sparse_attn_indexer::build_kvaware_topk_indices(
     float beta_slow,
     const function<void(ggml_tensor *, const char *, int)> & cb,
     ggml_cgraph * gf,
-    ggml_backend_sched_t sched)
+    ggml_backend_sched_t sched,
+    ggml_backend_t backend_cpu)
 {
     printf("=== SPARSE INDEXER: build_kvaware_topk_indices L%d ===\n", layer_idx);
     size_t initial_mem = ggml_used_mem(ctx);
@@ -278,7 +279,7 @@ ggml_tensor * sparse_attn_indexer::build_kvaware_topk_indices(
         top_k = std::max<int64_t>(64, std::min<int64_t>(1024, Kindexer_cache->ne[1]));
     }
     ggml_tensor * kvaware_indices = llama::sparse_attn_topk::select_topk_tokens_indexer_kvaware(
-        ctx, trip.q_indexer, Kindexer_cache, trip.idx_weights, kq_mask, top_k, cb, gf, sched);
+        ctx, trip.q_indexer, Kindexer_cache, trip.idx_weights, kq_mask, top_k, cb, gf, sched, backend_cpu);
     printf("SPARSE INDEXER: Final topk_indices [k,T]=[%" PRId64 ", %" PRId64 "]\n",
            kvaware_indices->ne[0], kvaware_indices->ne[1]);
     printf("Final memory usage: %s (total delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(),

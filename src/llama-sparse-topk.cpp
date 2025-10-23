@@ -20,7 +20,8 @@ using std::function;
       int64_t top_k,
       const std::function<void(ggml_tensor *, const char *, int)> & cb,
       ggml_cgraph * gf,
-      ggml_backend_sched_t sched) {
+      ggml_backend_sched_t sched,
+      ggml_backend_t backend_cpu) {
       const int64_t D    = q_indexer->ne[0];
       const int64_t H    = q_indexer->ne[1];
       const int64_t T    = q_indexer->ne[2];
@@ -186,8 +187,8 @@ using std::function;
               scores_for_topk = host_scores;
           }
           ggml_tensor * topk_tc = ggml_top_k(ctx, scores_for_topk, k);
-          if (sched) {
-              ggml_backend_sched_set_tensor_backend(sched, topk_tc, ggml_backend_sched_get_backend(sched, 0)); // CPU backend is index 0
+          if (sched && backend_cpu) {
+              ggml_backend_sched_set_tensor_backend(sched, topk_tc, backend_cpu);
           }
           if (t0 == 0) {
               ggml_tensor * topk_f32 = ggml_cast(ctx, topk_tc, GGML_TYPE_F32);
