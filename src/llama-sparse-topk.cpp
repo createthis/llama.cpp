@@ -115,6 +115,14 @@ using std::function;
               GGML_ASSERT(h >= 0 && h < weights->ne[0]);
               GGML_ASSERT(t0 >= 0 && t0 + Tc <= weights->ne[1]);
               ggml_tensor * w_tile = ggml_view_2d(ctx, weights, 1, Tc, weights->nb[1], h*weights->nb[0] + t0*weights->nb[1]);
+              if (t0 == 0 && h == 0) {
+                  ggml_tensor * w_tile_abs_sum = ggml_sum(ctx, ggml_abs(ctx, w_tile)); // scalar
+                  cb(w_tile_abs_sum, "idxkv_w_tile_abs_sum", -1);
+                  if (gf) {
+                      ggml_set_output(w_tile_abs_sum);
+                      ggml_build_forward_expand(gf, w_tile_abs_sum);
+                  }
+              }
               ggml_tensor * w_b    = ggml_repeat(ctx, w_tile, logits_h);
               ggml_tensor * contrib = ggml_mul(ctx, logits_h, w_b);
 
@@ -125,6 +133,15 @@ using std::function;
           // Debug (cb): per-tile scalar sums (no deref)
           ggml_tensor * idxkv_scores_sum = ggml_sum(ctx, scores_tc);
           ggml_tensor * idxkv_scores_ssq = ggml_sum(ctx, ggml_sqr(ctx, scores_tc));
+          ggml_tensor * idxkv_scores_post_abs_sum = nullptr;
+          if (t0 == 0) {
+              idxkv_scores_post_abs_sum = ggml_sum(ctx, ggml_abs(ctx, scores_tc));
+              cb(idxkv_scores_post_abs_sum, "idxkv_scores_post_abs_sum", -1);
+              if (gf) {
+                  ggml_set_output(idxkv_scores_post_abs_sum);
+                  ggml_build_forward_expand(gf, idxkv_scores_post_abs_sum);
+              }
+          }
           cb(idxkv_scores_sum,  "idxkv_scores_sum",  -1);
           cb(idxkv_scores_ssq,  "idxkv_scores_ssq",  -1);
 
@@ -148,6 +165,14 @@ using std::function;
                   fflush(stdout);
               }
               scores_tc = ggml_add(ctx, scores_tc, mask_tc);
+              if (t0 == 0) {
+                  ggml_tensor * idxkv_scores_post_mask_abs_sum = ggml_sum(ctx, ggml_abs(ctx, scores_tc));
+                  cb(idxkv_scores_post_mask_abs_sum, "idxkv_scores_post_mask_abs_sum", -1);
+                  if (gf) {
+                      ggml_set_output(idxkv_scores_post_mask_abs_sum);
+                      ggml_build_forward_expand(gf, idxkv_scores_post_mask_abs_sum);
+                  }
+              }
           }
 
           // top-k for this tile -> [k, Tc]
