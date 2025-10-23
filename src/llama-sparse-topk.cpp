@@ -252,22 +252,16 @@ using std::function;
           result = result ? ggml_concat(ctx, result, topk_tc, 1) : topk_tc;
       }
 
-      // Force materialization on CPU and attach a tiny reduction to guarantee eval-callback sees it
       ggml_tensor * result_host_i32 = result;
       if (result && result->buffer && !ggml_backend_buffer_is_host(result->buffer)) {
           ggml_tensor * tmp_i32 = ggml_dup_tensor(ctx, result);
-          ggml_set_name(tmp_i32, "idxkv_topk_indices_k_T_i32");
+          ggml_set_name(tmp_i32, "idxkv_topk_indices_k_T");
           result_host_i32 = ggml_cpy(ctx, result, tmp_i32);
       }
-      // Attach a scalar reduction so eval builds and executes it even if integer dumps are skipped
-      ggml_tensor * idx_i32_sum = ggml_sum(ctx, result_host_i32);
       cb(result_host_i32, "idxkv_topk_indices_k_T", -1);
-      cb(idx_i32_sum, "idxkv_topk_indices_k_T_sum", -1);
       if (gf && result_host_i32) {
           ggml_set_output(result_host_i32);
-          ggml_set_output(idx_i32_sum);
           ggml_build_forward_expand(gf, result_host_i32);
-          ggml_build_forward_expand(gf, idx_i32_sum);
       }
       // Also provide a float32 view for eval-callback visibility on platforms that skip integer dumps
       if (result) {
@@ -278,16 +272,12 @@ using std::function;
               result_host = ggml_cpy(ctx, result, tmp);
           }
           ggml_tensor * result_f32 = ggml_cast(ctx, result_host, GGML_TYPE_F32);
-          ggml_tensor * result_f32_sum = ggml_sum(ctx, result_f32);
           cb(result_f32, "idxkv_topk_indices_k_T_f32", -1);
-          cb(result_f32_sum, "idxkv_topk_indices_k_T_f32_sum", -1);
           if (gf) {
               ggml_set_output(result_host);
               ggml_set_output(result_f32);
-              ggml_set_output(result_f32_sum);
               ggml_build_forward_expand(gf, result_host);
               ggml_build_forward_expand(gf, result_f32);
-              ggml_build_forward_expand(gf, result_f32_sum);
           }
       }
       if (result) {
