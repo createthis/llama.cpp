@@ -3,6 +3,7 @@
 
 #include <functional>
 #include "ggml.h"
+#include "ggml-backend.h"
 
 namespace llama {
 
@@ -19,7 +20,8 @@ struct sparse_attn_topk {
         ggml_tensor * kq_mask,     // [N_kv, PAD(T)] or [N_kv, T]
         int64_t top_k,
         const function<void(ggml_tensor *, const char *, int)> & cb,
-        ggml_cgraph * gf);
+        ggml_cgraph * gf,
+        ggml_backend_sched_t sched);
 };
 
 } // namespace llama

@@ -19,7 +19,8 @@ using std::function;
       ggml_tensor * kq_mask,     // [N_kv, T] or [N_kv, PAD(T)]
       int64_t top_k,
       const std::function<void(ggml_tensor *, const char *, int)> & cb,
-      ggml_cgraph * gf) {
+      ggml_cgraph * gf,
+      ggml_backend_sched_t sched) {
       const int64_t D    = q_indexer->ne[0];
       const int64_t H    = q_indexer->ne[1];
       const int64_t T    = q_indexer->ne[2];
@@ -176,7 +177,18 @@ using std::function;
           }
 
           // top-k for this tile -> [k, Tc]
-          ggml_tensor * topk_tc = ggml_top_k(ctx, scores_tc, k);
+          // Ensure top-k runs on CPU to avoid CUDA backend returning invalid indices for generic shapes
+          ggml_tensor * scores_for_topk = scores_tc;
+          if (scores_tc->buffer && !ggml_backend_buffer_is_host(scores_tc->buffer)) {
+              ggml_tensor * host_scores = ggml_dup_tensor(ctx, scores_tc);
+              ggml_set_name(host_scores, "idxkv_scores_tc_host");
+              host_scores = ggml_cpy(ctx, scores_tc, host_scores);
+              scores_for_topk = host_scores;
+          }
+          ggml_tensor * topk_tc = ggml_top_k(ctx, scores_for_topk, k);
+          if (sched) {
+              ggml_backend_sched_set_tensor_backend(sched, topk_tc, ggml_backend_sched_get_backend(sched, 0)); // CPU backend is index 0
+          }
           if (t0 == 0) {
               ggml_tensor * topk_f32 = ggml_cast(ctx, topk_tc, GGML_TYPE_F32);
               ggml_tensor * idxkv_topk_idx_sum    = ggml_sum(ctx, topk_f32);

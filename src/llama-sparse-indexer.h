@@ -4,6 +4,7 @@
 #include <functional>
 #include "ggml.h"
 #include "ggml-cpp.h"
+#include "ggml-backend.h"
 #include "llama-kv-cache.h"
 
 // Forward declarations
@@ -67,7 +68,8 @@ struct sparse_attn_indexer {
         float beta_fast,
         float beta_slow,
         const function<void(ggml_tensor *, const char *, int)> & cb,
-        ggml_cgraph * gf);
+        ggml_cgraph * gf,
+        ggml_backend_sched_t sched);
 };
 
 } // namespace llama
