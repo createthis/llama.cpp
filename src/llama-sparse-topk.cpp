@@ -194,6 +194,10 @@ using std::function;
       }
 
       cb(result, "idxkv_topk_indices_k_T", -1);
+      if (gf && result) {
+          ggml_set_output(result);
+          ggml_build_forward_expand(gf, result);
+      }
       if (result) {
           printf("SPARSE TOPK KV-AWARE (INDEXER): result topk_indices dims=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] type=%d\n",
                  result->ne[0], result->ne[1], result->ne[2], result->ne[3], (int)result->type);
