@@ -189,6 +189,9 @@ using std::function;
           ggml_tensor * topk_tc = ggml_top_k(ctx, scores_for_topk, k);
           if (sched && backend_cpu) {
               ggml_backend_sched_set_tensor_backend(sched, topk_tc, backend_cpu);
+              const char * bname = ggml_backend_name(backend_cpu);
+              printf("[TOPK] assigned backend for topk_tc: %s (non-null=%d)\n", bname ? bname : "null", backend_cpu ? 1 : 0);
+              fflush(stdout);
           }
           if (t0 == 0) {
               ggml_tensor * topk_f32 = ggml_cast(ctx, topk_tc, GGML_TYPE_F32);
@@ -225,7 +228,17 @@ using std::function;
                  result->ne[0], result->ne[1], result->ne[2], result->ne[3], (int)result->type);
           fflush(stdout);
       }
-      return result;
+      // ensure final indices tensor is on host: duplicate and copy to host-backed tensor, then prefer CPU via scheduler
+      ggml_tensor * result_host = ggml_dup_tensor(ctx, result);
+      ggml_set_name(result_host, "kvaware_topk_indices");
+      result_host = ggml_cpy(ctx, result, result_host);
+      if (sched && backend_cpu) {
+          ggml_backend_sched_set_tensor_backend(sched, result_host, backend_cpu);
+          const char * bname2 = ggml_backend_name(backend_cpu);
+          printf("[TOPK] assigned backend for kvaware_topk_indices: %s (non-null=%d)\n", bname2 ? bname2 : "null", backend_cpu ? 1 : 0);
+          fflush(stdout);
+      }
+      return result_host;
   }
 
 } // namespace llama
