@@ -14003,6 +14003,10 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
                         }
 
+                            // Debug: sample and cast a small window of indices to ensure cb logs it
+                            // NOTE: kvaware_indices is created later in this block; we insert sampling immediately after creation below.
+
+
                         // Use sparse attention with top-k tokens (KV-aware)
                         {
                             const auto * mctx_cur2 = inp_attn->mctx;
@@ -14024,6 +14028,29 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             if (cur->ne[0] != (int64_t) n_embd_head_v) {
                                 printf("[SPARSE-DBG-MHA] L%d: sparse attn out Dv=%" PRId64 " but n_embd_head_v=%" PRId64 " (mismatch)\n", il, (int64_t) cur->ne[0], (int64_t) n_embd_head_v);
                             }
+                            // Sample kvaware_indices for logging: small 2D window, cast to f32, attach reduction to force materialization
+                            if (kvaware_indices) {
+                                const int64_t ks = std::min<int64_t>(kvaware_indices->ne[0], (int64_t)8);
+                                const int64_t ts = std::min<int64_t>(kvaware_indices->ne[1], (int64_t)8);
+                                ggml_tensor * idx_sample_i32 = ggml_view_2d(ctx0, kvaware_indices, ks, ts, kvaware_indices->nb[1], 0);
+                                ggml_tensor * idx_sample_host = idx_sample_i32;
+                                if (idx_sample_i32->buffer && !ggml_backend_buffer_is_host(idx_sample_i32->buffer)) {
+                                    ggml_tensor * tmp_idx = ggml_dup_tensor(ctx0, idx_sample_i32);
+                                    ggml_set_name(tmp_idx, "idxkv_indices_sample_host_i32");
+                                    idx_sample_host = ggml_cpy(ctx0, idx_sample_i32, tmp_idx);
+                                }
+                                ggml_tensor * idx_sample_f32 = ggml_cast(ctx0, idx_sample_host, GGML_TYPE_F32);
+                                ggml_tensor * idx_sample_sum = ggml_sum(ctx0, idx_sample_f32);
+                                cb(idx_sample_f32, "idxkv_topk_indices_sample_f32", il);
+                                cb(idx_sample_sum, "idxkv_topk_indices_sample_f32_sum", il);
+                                ggml_set_output(idx_sample_host);
+                                ggml_set_output(idx_sample_f32);
+                                ggml_set_output(idx_sample_sum);
+                                ggml_build_forward_expand(gf, idx_sample_host);
+                                ggml_build_forward_expand(gf, idx_sample_f32);
+                                ggml_build_forward_expand(gf, idx_sample_sum);
+                            }
+
                             GGML_ASSERT(cur->ne[0] == (int64_t) n_embd_head_v);
                         }
 
