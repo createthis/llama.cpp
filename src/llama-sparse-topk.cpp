@@ -106,13 +106,22 @@ using std::function;
                   const int64_t sample_cols = std::min<int64_t>(Tc, 4);
                   ggml_tensor * logits_sample = ggml_view_2d(ctx, logits_h, sample_cols, sample_rows, logits_h->nb[1], 0);
                   cb(logits_sample, "idxkv_logits_sample_pre_relu", -1);
+                  // Add reductions so the sample is materialized in eval-callback
+                  ggml_tensor * logits_sample_sum    = ggml_sum(ctx, logits_sample);
+                  ggml_tensor * logits_sample_sumsq  = ggml_sum(ctx, ggml_sqr(ctx, logits_sample));
+                  cb(logits_sample_sum,   "idxkv_logits_sample_pre_relu_sum",   -1);
+                  cb(logits_sample_sumsq, "idxkv_logits_sample_pre_relu_sumsq", -1);
                   if (gf) {
                       ggml_set_output(logits_abs_sum);
                       ggml_set_output(logits_relu_sum);
                       ggml_set_output(logits_sample);
+                      ggml_set_output(logits_sample_sum);
+                      ggml_set_output(logits_sample_sumsq);
                       ggml_build_forward_expand(gf, logits_abs_sum);
                       ggml_build_forward_expand(gf, logits_relu_sum);
                       ggml_build_forward_expand(gf, logits_sample);
+                      ggml_build_forward_expand(gf, logits_sample_sum);
+                      ggml_build_forward_expand(gf, logits_sample_sumsq);
                   }
                   // restore logits_h to pre-ReLU for normal flow
               }
