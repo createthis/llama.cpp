@@ -233,7 +233,9 @@ using std::function;
                   ggml_build_forward_expand(gf, sft_sumsq);
               }
           }
-          ggml_tensor * topk_tc = ggml_top_k(ctx, scores_for_topk, k);
+          // Clamp infinities from mask to large finite values to stabilize argsort/top-k
+          ggml_tensor * scores_clamped = ggml_clamp(ctx, scores_for_topk, -1e30f, 1e30f);
+          ggml_tensor * topk_tc = ggml_top_k(ctx, scores_clamped, k);
           if (sched && backend_cpu) {
               ggml_backend_sched_set_tensor_backend(sched, topk_tc, backend_cpu);
               const char * bname = ggml_backend_name(backend_cpu);
