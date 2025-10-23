@@ -177,6 +177,19 @@ using std::function;
 
           // top-k for this tile -> [k, Tc]
           ggml_tensor * topk_tc = ggml_top_k(ctx, scores_tc, k);
+          if (t0 == 0) {
+              ggml_tensor * topk_f32 = ggml_cast(ctx, topk_tc, GGML_TYPE_F32);
+              ggml_tensor * idxkv_topk_idx_sum    = ggml_sum(ctx, topk_f32);
+              ggml_tensor * idxkv_topk_idx_sumsq  = ggml_sum(ctx, ggml_sqr(ctx, topk_f32));
+              cb(idxkv_topk_idx_sum,   "idxkv_topk_idx_sum",   -1);
+              cb(idxkv_topk_idx_sumsq, "idxkv_topk_idx_sumsq", -1);
+              if (gf) {
+                  ggml_set_output(idxkv_topk_idx_sum);
+                  ggml_set_output(idxkv_topk_idx_sumsq);
+                  ggml_build_forward_expand(gf, idxkv_topk_idx_sum);
+                  ggml_build_forward_expand(gf, idxkv_topk_idx_sumsq);
+              }
+          }
           result = result ? ggml_concat(ctx, result, topk_tc, 1) : topk_tc;
       }
 
