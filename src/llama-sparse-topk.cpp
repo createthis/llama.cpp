@@ -198,6 +198,15 @@ using std::function;
           ggml_set_output(result);
           ggml_build_forward_expand(gf, result);
       }
+      // Also provide a float32 view for eval-callback visibility on platforms that skip integer dumps
+      if (result) {
+          ggml_tensor * result_f32 = ggml_cast(ctx, result, GGML_TYPE_F32);
+          cb(result_f32, "idxkv_topk_indices_k_T_f32", -1);
+          if (gf) {
+              ggml_set_output(result_f32);
+              ggml_build_forward_expand(gf, result_f32);
+          }
+      }
       if (result) {
           printf("SPARSE TOPK KV-AWARE (INDEXER): result topk_indices dims=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] type=%d\n",
                  result->ne[0], result->ne[1], result->ne[2], result->ne[3], (int)result->type);
