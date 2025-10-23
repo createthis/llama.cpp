@@ -90,6 +90,17 @@ using std::function;
               size_t h_off = h * Tc * Q2d_full->nb[1];
               ggml_tensor * Q_tile_h = ggml_view_2d(ctx, Q_tile_all, D, Tc, Q2d_full->nb[1], h_off);
               ggml_tensor * logits_h = ggml_mul_mat(ctx, k_indexer, Q_tile_h); // [N_kv, Tc]
+
+              // Diagnostics (tile t0==0 only): pre-ReLU magnitude vs positive mass for head h=0
+              if (t0 == 0 && h == 0) {
+                  ggml_tensor * logits_abs_sum = ggml_sum(ctx, ggml_abs(ctx, logits_h));   // scalar
+                  ggml_tensor * logits_relu    = ggml_relu(ctx, logits_h);
+                  ggml_tensor * logits_relu_sum= ggml_sum(ctx, logits_relu);               // scalar
+                  cb(logits_abs_sum,  "idxkv_logits_pre_abs_sum",  -1);
+                  cb(logits_relu_sum, "idxkv_logits_pre_relu_sum", -1);
+                  // restore logits_h to pre-ReLU for normal flow
+              }
+
               logits_h = ggml_relu(ctx, logits_h);
 
               // weights[h, t0:t0+Tc] -> [1, Tc] -> broadcast to [N_kv, Tc]
