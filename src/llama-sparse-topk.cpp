@@ -101,11 +101,18 @@ using std::function;
                   ggml_tensor * logits_relu_sum= ggml_sum(ctx, logits_relu);               // scalar
                   cb(logits_abs_sum,  "idxkv_logits_pre_abs_sum",  -1);
                   cb(logits_relu_sum, "idxkv_logits_pre_relu_sum", -1);
+                  // Also log a small sample of logits_h before ReLU for inspection
+                  const int64_t sample_rows = std::min<int64_t>(N_kv, 8);
+                  const int64_t sample_cols = std::min<int64_t>(Tc, 4);
+                  ggml_tensor * logits_sample = ggml_view_2d(ctx, logits_h, sample_cols, sample_rows, logits_h->nb[1], 0);
+                  cb(logits_sample, "idxkv_logits_sample_pre_relu", -1);
                   if (gf) {
                       ggml_set_output(logits_abs_sum);
                       ggml_set_output(logits_relu_sum);
+                      ggml_set_output(logits_sample);
                       ggml_build_forward_expand(gf, logits_abs_sum);
                       ggml_build_forward_expand(gf, logits_relu_sum);
+                      ggml_build_forward_expand(gf, logits_sample);
                   }
                   // restore logits_h to pre-ReLU for normal flow
               }
