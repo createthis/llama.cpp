@@ -252,31 +252,17 @@ using std::function;
           result = result ? ggml_concat(ctx, result, topk_tc, 1) : topk_tc;
       }
 
-      ggml_tensor * result_host_i32 = result;
-      if (result && result->buffer && !ggml_backend_buffer_is_host(result->buffer)) {
-          ggml_tensor * tmp_i32 = ggml_dup_tensor(ctx, result);
-          ggml_set_name(tmp_i32, "idxkv_topk_indices_k_T");
-          result_host_i32 = ggml_cpy(ctx, result, tmp_i32);
-      }
-      cb(result_host_i32, "idxkv_topk_indices_k_T", -1);
-      if (gf && result_host_i32) {
-          ggml_set_output(result_host_i32);
-          ggml_build_forward_expand(gf, result_host_i32);
+      cb(result, "idxkv_topk_indices_k_T", -1);
+      if (gf && result) {
+          ggml_set_output(result);
+          ggml_build_forward_expand(gf, result);
       }
       // Also provide a float32 view for eval-callback visibility on platforms that skip integer dumps
       if (result) {
-          ggml_tensor * result_host = result;
-          if (result->buffer && !ggml_backend_buffer_is_host(result->buffer)) {
-              ggml_tensor * tmp = ggml_dup_tensor(ctx, result);
-              ggml_set_name(tmp, "idxkv_topk_indices_host");
-              result_host = ggml_cpy(ctx, result, tmp);
-          }
-          ggml_tensor * result_f32 = ggml_cast(ctx, result_host, GGML_TYPE_F32);
+          ggml_tensor * result_f32 = ggml_cast(ctx, result, GGML_TYPE_F32);
           cb(result_f32, "idxkv_topk_indices_k_T_f32", -1);
           if (gf) {
-              ggml_set_output(result_host);
               ggml_set_output(result_f32);
-              ggml_build_forward_expand(gf, result_host);
               ggml_build_forward_expand(gf, result_f32);
           }
       }
