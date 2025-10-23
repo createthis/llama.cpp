@@ -236,12 +236,6 @@ using std::function;
           // Clamp infinities from mask to large finite values to stabilize argsort/top-k
           ggml_tensor * scores_clamped = ggml_clamp(ctx, scores_for_topk, -1e30f, 1e30f);
           ggml_tensor * topk_tc = ggml_top_k(ctx, scores_clamped, k);
-          if (sched && backend_cpu) {
-              ggml_backend_sched_set_tensor_backend(sched, topk_tc, backend_cpu);
-              const char * bname = ggml_backend_name(backend_cpu);
-              printf("[TOPK] assigned backend for topk_tc: %s (non-null=%d)\n", bname ? bname : "null", backend_cpu ? 1 : 0);
-              fflush(stdout);
-          }
           if (t0 == 0) {
               ggml_tensor * topk_f32 = ggml_cast(ctx, topk_tc, GGML_TYPE_F32);
               ggml_tensor * idxkv_topk_idx_sum    = ggml_sum(ctx, topk_f32);
