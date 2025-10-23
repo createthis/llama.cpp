@@ -18,7 +18,8 @@ using std::function;
       ggml_tensor * weights,     // [H, T]
       ggml_tensor * kq_mask,     // [N_kv, T] or [N_kv, PAD(T)]
       int64_t top_k,
-      const std::function<void(ggml_tensor *, const char *, int)> & cb) {
+      const std::function<void(ggml_tensor *, const char *, int)> & cb,
+      ggml_cgraph * gf) {
       const int64_t D    = q_indexer->ne[0];
       const int64_t H    = q_indexer->ne[1];
       const int64_t T    = q_indexer->ne[2];
@@ -98,6 +99,12 @@ using std::function;
                   ggml_tensor * logits_relu_sum= ggml_sum(ctx, logits_relu);               // scalar
                   cb(logits_abs_sum,  "idxkv_logits_pre_abs_sum",  -1);
                   cb(logits_relu_sum, "idxkv_logits_pre_relu_sum", -1);
+                  if (gf) {
+                      ggml_set_output(logits_abs_sum);
+                      ggml_set_output(logits_relu_sum);
+                      ggml_build_forward_expand(gf, logits_abs_sum);
+                      ggml_build_forward_expand(gf, logits_relu_sum);
+                  }
                   // restore logits_h to pre-ReLU for normal flow
               }
 

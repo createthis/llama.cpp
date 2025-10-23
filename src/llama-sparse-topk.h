@@ -18,7 +18,8 @@ struct sparse_attn_topk {
         ggml_tensor * weights,     // [H_index, T]
         ggml_tensor * kq_mask,     // [N_kv, PAD(T)] or [N_kv, T]
         int64_t top_k,
-        const function<void(ggml_tensor *, const char *, int)> & cb);
+        const function<void(ggml_tensor *, const char *, int)> & cb,
+        ggml_cgraph * gf);
 };
 
 } // namespace llama
