@@ -211,6 +211,28 @@ using std::function;
               host_scores = ggml_cpy(ctx, scores_tc, host_scores);
               scores_for_topk = host_scores;
           }
+          if (sched) {
+              ggml_backend_t chosen_in = ggml_backend_sched_get_tensor_backend(sched, scores_for_topk);
+              const char * in_name = chosen_in ? ggml_backend_name(chosen_in) : NULL;
+              printf("[TOPK] chosen backend for scores_for_topk: %s (non-null=%d)\n", in_name ? in_name : "null", chosen_in ? 1 : 0);
+              fflush(stdout);
+          }
+          // Log scores_for_topk (tile 0 only) and reductions to materialize in eval-callback
+          if (t0 == 0) {
+              cb(scores_for_topk, "idxkv_scores_for_topk", -1);
+              ggml_tensor * sft_sum   = ggml_sum(ctx, scores_for_topk);
+              ggml_tensor * sft_sumsq = ggml_sum(ctx, ggml_sqr(ctx, scores_for_topk));
+              cb(sft_sum,   "idxkv_scores_for_topk_sum",   -1);
+              cb(sft_sumsq, "idxkv_scores_for_topk_sumsq", -1);
+              if (gf) {
+                  ggml_set_output(scores_for_topk);
+                  ggml_set_output(sft_sum);
+                  ggml_set_output(sft_sumsq);
+                  ggml_build_forward_expand(gf, scores_for_topk);
+                  ggml_build_forward_expand(gf, sft_sum);
+                  ggml_build_forward_expand(gf, sft_sumsq);
+              }
+          }
           ggml_tensor * topk_tc = ggml_top_k(ctx, scores_for_topk, k);
           if (sched && backend_cpu) {
               ggml_backend_sched_set_tensor_backend(sched, topk_tc, backend_cpu);
