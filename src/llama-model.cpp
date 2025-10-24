@@ -13942,12 +13942,10 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                     ggml_set_name(tmp, "kvaware_sparse_attn_out_sample_host");
                                     cur2d_host = ggml_cpy(ctx0, cur2d_sample, tmp);
                                 }
-                                ggml_tensor * cur2d_sum = ggml_sum(ctx0, cur2d_host);
-                                cb(cur2d_sum, "kvaware_sparse_attn_out_sample_sum", il);
+                                // schedule host sample on CPU and materialize it only (no device-side sum)
+                                ggml_backend_sched_set_tensor_backend(sched, cur2d_host, backend_cpu);
                                 ggml_set_output(cur2d_host);
-                                ggml_set_output(cur2d_sum);
                                 ggml_build_forward_expand(gf, cur2d_host);
-                                ggml_build_forward_expand(gf, cur2d_sum);
                             }
 
                             if (model.layers[il].wv_b) {
