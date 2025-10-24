@@ -58,6 +58,21 @@ using std::function;
       cb(Q2d_full, "idxkv_Q2d_full", -1);
 
 
+      // Diagnostics: sample K indexer head/tail once per call
+      {
+          const int64_t d0 = std::min<int64_t>(k_indexer->ne[0], (int64_t)8);
+          const int64_t c0 = std::min<int64_t>(k_indexer->ne[1], (int64_t)8);
+          // head columns
+          ggml_tensor * kidx_head = ggml_view_2d(ctx, k_indexer, d0, c0, k_indexer->nb[1], 0);
+          cb(kidx_head, "idxkv_k_indexer_head", -1);
+          // tail columns
+          if (k_indexer->ne[1] > c0) {
+              size_t off_tail = (k_indexer->ne[1] - c0) * k_indexer->nb[1];
+              ggml_tensor * kidx_tail = ggml_view_2d(ctx, k_indexer, d0, c0, k_indexer->nb[1], off_tail);
+              cb(kidx_tail, "idxkv_k_indexer_tail", -1);
+          }
+      }
+
       ggml_tensor * mask2d = nullptr;
       if (kq_mask) {
           cb(kq_mask, "idxkv_kq_mask", -1);
