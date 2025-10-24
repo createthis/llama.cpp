@@ -210,6 +210,18 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
 
     cb(q_indexer, "indexer_q", layer_idx);
 
+    // Diagnostic: sample small window of q_indexer [D_index, H_index, T]
+    {
+        const int64_t sd0 = std::min<int64_t>(q_indexer->ne[0], (int64_t)8);
+        const int64_t sd1 = std::min<int64_t>(q_indexer->ne[1], (int64_t)8);
+        const int64_t sd2 = std::min<int64_t>(q_indexer->ne[2], (int64_t)8);
+        ggml_tensor * q_sample = ggml_view_3d(ctx, q_indexer,
+                sd0, sd1, sd2,
+                q_indexer->nb[1], q_indexer->nb[2], 0);
+        cb(q_sample, "indexer_q_sample", layer_idx);
+    }
+
+
     // Approximate q_scale via per-(head, token) RMS of q_indexer across D_index
     // q_indexer: [D_index, H_index, T]
     ggml_tensor * q_sqr = ggml_sqr(ctx, q_indexer);                                  // [D_index, H, T]
@@ -218,10 +230,20 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     ggml_tensor * q_rms = ggml_sqrt(ctx, q_mean);                                     // [1, H, T]
     printf("[SPARSE-IDX-QRMS] L%d: computed q_rms over D_index; D_index=%" PRId64 " H=%" PRId64 " T=%" PRId64 "\n",
            layer_idx, D_index, H_index, n_tokens);
-    fflush(stdout);
 
     // Build base weights from projection on cur
     ggml_tensor * idx_weights = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_weights_proj, cur); // [H, T]
+
+    // Diagnostic: sample small window of idx_weights [H_index, T]
+    {
+        ggml_tensor * idxw = idx_weights;
+        const int64_t sw0 = std::min<int64_t>(idxw->ne[0], (int64_t)8);
+        const int64_t sw1 = std::min<int64_t>(idxw->ne[1], (int64_t)8);
+        ggml_tensor * idxw_sample = ggml_view_2d(ctx, idxw, sw0, sw1, idxw->nb[1], 0);
+        cb(idxw_sample, "indexer_weights_sample", layer_idx);
+    }
+
+    fflush(stdout);
     // Scale weights by 1/sqrt(H_index) and 1/sqrt(D_index), then multiply by q_rms
     idx_weights = ggml_scale(ctx, idx_weights, 1.0f / sqrtf((float) H_index));
     idx_weights = ggml_scale(ctx, idx_weights, 1.0f / sqrtf((float) D_index));
