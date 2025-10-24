@@ -128,6 +128,15 @@ using std::function;
               scores_t = ggml_add(ctx, scores_t, mask_bias);
           }
 
+
+              // diagnostic: sample masked scores at first/last token
+              if (t == 0 || t == T - 1) {
+                  const int64_t sm_cols = std::min<int64_t>(scores_t->ne[0], (int64_t)8);
+                  const int64_t sm_rows = std::min<int64_t>(scores_t->ne[1], (int64_t)8);
+                  ggml_tensor * s_sample = ggml_view_2d(ctx, scores_t, sm_cols, sm_rows, scores_t->nb[1], 0);
+                  cb(s_sample, "mla_scores_post_mask_sample", -1);
+              }
+
           // apply tanh softcap if enabled
           if (attn_softcap > 0.0f) {
               scores_t = ggml_scale(ctx, scores_t, 1.0f / attn_softcap);
