@@ -234,6 +234,23 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     // Build base weights from projection on cur
     ggml_tensor * idx_weights = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_weights_proj, cur); // [H, T]
 
+
+    // Diagnostic: sample small windows of K indexer cache [D_index, N_kv]
+    if (mctx) {
+        ggml_tensor * kidx_cache = mctx->get_k_indexer(const_cast<ggml_context*>(ctx), layer_idx);
+        if (kidx_cache) {
+            const int64_t d0 = std::min<int64_t>(kidx_cache->ne[0], (int64_t)8);
+            const int64_t c0 = std::min<int64_t>(kidx_cache->ne[1], (int64_t)8);
+            ggml_tensor * kcache_head = ggml_view_2d(ctx, kidx_cache, d0, c0, kidx_cache->nb[1], 0);
+            cb(kcache_head, "indexer_k_cache_head", layer_idx);
+            if (kidx_cache->ne[1] > c0) {
+                size_t off_tail = (kidx_cache->ne[1] - c0) * kidx_cache->nb[1];
+                ggml_tensor * kcache_tail = ggml_view_2d(ctx, kidx_cache, d0, c0, kidx_cache->nb[1], off_tail);
+                cb(kcache_tail, "indexer_k_cache_tail", layer_idx);
+            }
+        }
+    }
+
     // Diagnostic: sample small window of idx_weights [H_index, T]
     {
         ggml_tensor * idxw = idx_weights;
