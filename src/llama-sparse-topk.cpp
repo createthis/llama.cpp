@@ -94,7 +94,9 @@ using std::function;
           for (int64_t h = 0; h < H; ++h) {
               size_t h_off = h * Tc * Q2d_full->nb[1];
               ggml_tensor * Q_tile_h = ggml_view_2d(ctx, Q_tile_all, D, Tc, Q2d_full->nb[1], h_off);
+              cb(Q_tile_h, "idxkv_Q_tile_h", -1);
               ggml_tensor * logits_h = ggml_mul_mat(ctx, k_indexer, Q_tile_h); // [N_kv, Tc]
+              cb(logits_h, "idxkv_logits_h", -1);
 
               // Diagnostics (tile t0==0 only): pre-ReLU magnitude vs positive mass for head h=0
               if (t0 == 0 && h == 0) {
