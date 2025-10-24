@@ -137,7 +137,7 @@ using std::function;
               cb(scores_t, "mla_scores_pre_mask", -1);
           }
 
-          if (kq_mask) {
+          if (kq_mask && kq_mask->ne[0] == N_kv && kq_mask->ne[1] >= T) {
               // kq_mask is [N_kv, PAD(T)]; take column t -> [N_kv,1]
               ggml_tensor * mask_col = ggml_view_2d(ctx, kq_mask, kq_mask->ne[0], 1, kq_mask->nb[1], t * kq_mask->nb[1]);
               // convert to [1, N_kv] so get_rows yields [1, top_k, 1, 1]
@@ -145,6 +145,8 @@ using std::function;
               if (mask_vec->type != scores_t->type) {
                   mask_vec = ggml_cast(ctx, mask_vec, scores_t->type);
               }
+              // CUDA get_rows requires row-contiguous source
+              mask_vec = ggml_cont(ctx, mask_vec);
               ggml_tensor * mask_rows_4d = ggml_get_rows(ctx, mask_vec, idx_t_4d); // [1, top_k, 1, 1]
               // reshape to [top_k, 1]
               ggml_tensor * mask_rows_2d = ggml_reshape_2d(ctx, mask_rows_4d, top_k, 1); // [top_k,1]
@@ -165,6 +167,10 @@ using std::function;
 
               // add with column broadcast: [Hkv*top_k, Hq] + [Hkv*top_k, 1]
               scores_t = ggml_add(ctx, scores_t, mask_bias);
+          } else if (kq_mask) {
+              printf("[SPARSE-MLA] Skipping kq_mask: dims mismatched (mask=[%lld,%lld], K N_kv=%lld, T=%lld)\n",
+                     (long long) kq_mask->ne[0], (long long) kq_mask->ne[1], (long long) N_kv, (long long) T);
+              fflush(stdout);
           }
 
 
