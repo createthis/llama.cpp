@@ -137,10 +137,10 @@ using std::function;
           }
 
 
-              // diagnostic: sample masked scores at first/last token
-              if (t == 0 || t == T - 1) {
-                  cb(scores_t, "mla_scores_post_mask_bias", -1);
-              }
+          // diagnostic: sample masked scores at first/last token
+          if (t == 0 || t == T - 1) {
+            cb(scores_t, "mla_scores_post_mask_bias", -1);
+          }
 
 
           // apply tanh softcap if enabled
@@ -152,6 +152,9 @@ using std::function;
           // debug marker: scores post-mask/softcap
           printf("[SPARSE-DBG-MLA] t=%lld scores post-mask/softcap\n", (long long) t);
           ggml_tensor * weights_t = ggml_soft_max(ctx, scores_t);
+          if (t == 0 || t == T - 1) {
+              cb(weights_t, "mla_weights_sample", -1);
+          }
 
           ggml_tensor * out2d_t = ggml_mul_mat(ctx, weights_t, v_sel_2d); // [Hq, Dv]
           ggml_tensor * out2d_t_T = ggml_cont(ctx, ggml_transpose(ctx, out2d_t)); // [Dv, Hq]
