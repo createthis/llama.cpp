@@ -60,7 +60,9 @@ using std::function;
 
       ggml_tensor * mask2d = nullptr;
       if (kq_mask) {
+          cb(kq_mask, "idxkv_kq_mask", -1);
           mask2d = ggml_cont(ctx, kq_mask);
+          cb(mask2d, "idxkv_mask2d", -1);
           if (mask2d->ne[0] == N_kv && mask2d->ne[1] >= T) {
               mask2d = ggml_view_2d(ctx, mask2d, N_kv, T, mask2d->nb[1], 0);
           }
