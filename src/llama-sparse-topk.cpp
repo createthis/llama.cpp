@@ -186,6 +186,8 @@ using std::function;
                   mask_tc = ggml_cast(ctx, mask_tc, scores_tc->type);
                   mask_tc = ggml_cont(ctx, mask_tc);
               }
+              cb(mask_tc,  "idxkv_mask_tc",  -1);
+
               // Ensure both operands have row-contiguous layout for safe broadcast add
               GGML_ASSERT(scores_tc->nb[0] == (size_t) ggml_type_size(scores_tc->type));
               GGML_ASSERT(mask_tc->nb[0]   == (size_t) ggml_type_size(mask_tc->type));
