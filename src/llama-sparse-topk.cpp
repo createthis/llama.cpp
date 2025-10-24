@@ -236,6 +236,8 @@ using std::function;
           // Clamp infinities from mask to large finite values to stabilize argsort/top-k
           ggml_tensor * scores_clamped = ggml_clamp(ctx, scores_for_topk, -1e30f, 1e30f);
           ggml_tensor * topk_tc = ggml_top_k(ctx, scores_clamped, k);
+          cb(topk_tc->src[0], "idxkv_argsort", -1);
+          cb(topk_tc, "idxkv_topk", -1);
           if (t0 == 0) {
               ggml_tensor * topk_f32 = ggml_cast(ctx, topk_tc, GGML_TYPE_F32);
               ggml_tensor * idxkv_topk_idx_sum    = ggml_sum(ctx, topk_f32);
