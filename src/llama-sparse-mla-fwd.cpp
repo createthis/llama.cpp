@@ -102,6 +102,10 @@ using std::function;
           printf("[SPARSE-DBG-MLA] t=%lld scores pre-scale\n", (long long) t);
           scores_t = ggml_scale(ctx, scores_t, kq_scale);
           // add mask/alibi bias if provided: gather kq_mask rows by indices and add to scores
+          if (t == 0 || t == T - 1) {
+              cb(scores_t, "mla_scores_pre_mask", -1);
+          }
+
           if (kq_mask) {
               // kq_mask is [N_kv, PAD(T)]; take column t -> [N_kv,1]
               ggml_tensor * mask_col = ggml_view_2d(ctx, kq_mask, kq_mask->ne[0], 1, kq_mask->nb[1], t * kq_mask->nb[1]);
@@ -122,6 +126,10 @@ using std::function;
                   /*offset*/ 0);
 
               // repeat mask across heads only -> [Hkv*top_k, 1]
+              if (t == 0 || t == T - 1) {
+                  cb(scores_t, "mla_scores_post_mask", -1);
+              }
+
               ggml_tensor * mask_bias = ggml_repeat(ctx, mask_rows_2d, scores_col_view); // [Hkv*top_k, 1]
 
               // add with column broadcast: [Hkv*top_k, Hq] + [Hkv*top_k, 1]
@@ -131,11 +139,9 @@ using std::function;
 
               // diagnostic: sample masked scores at first/last token
               if (t == 0 || t == T - 1) {
-                  const int64_t sm_cols = std::min<int64_t>(scores_t->ne[0], (int64_t)8);
-                  const int64_t sm_rows = std::min<int64_t>(scores_t->ne[1], (int64_t)8);
-                  ggml_tensor * s_sample = ggml_view_2d(ctx, scores_t, sm_cols, sm_rows, scores_t->nb[1], 0);
-                  cb(s_sample, "mla_scores_post_mask_sample", -1);
+                  cb(scores_t, "mla_scores_post_mask_bias", -1);
               }
+
 
           // apply tanh softcap if enabled
           if (attn_softcap > 0.0f) {
