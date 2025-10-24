@@ -13935,18 +13935,11 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                 const int64_t dbg_rows = std::min<int64_t>(cur2d_dbg->ne[1], (int64_t)8);
                                 ggml_tensor * cur2d_sample = ggml_view_2d(ctx0, cur2d_dbg, dbg_cols, dbg_rows, cur2d_dbg->nb[1], 0);
                                 cb(cur2d_sample, "kvaware_sparse_attn_out_sample", il);
-                                // copy sample to host before reductions to avoid CUDA contiguous-allocation assert
-                                ggml_tensor * cur2d_host = cur2d_sample;
-                                if (cur2d_sample->buffer && !ggml_backend_buffer_is_host(cur2d_sample->buffer)) {
-                                    ggml_tensor * tmp = ggml_dup_tensor(ctx0, cur2d_sample);
-                                    ggml_set_name(tmp, "kvaware_sparse_attn_out_sample_host");
-                                    cur2d_host = ggml_cpy(ctx0, cur2d_sample, tmp);
-                                }
-                                ggml_tensor * cur2d_sum = ggml_sum(ctx0, cur2d_host);
+                                ggml_tensor * cur2d_sum = ggml_sum(ctx0, cur2d_sample);
                                 cb(cur2d_sum, "kvaware_sparse_attn_out_sample_sum", il);
-                                ggml_set_output(cur2d_host);
+                                ggml_set_output(cur2d_sample);
                                 ggml_set_output(cur2d_sum);
-                                ggml_build_forward_expand(gf, cur2d_host);
+                                ggml_build_forward_expand(gf, cur2d_sample);
                                 ggml_build_forward_expand(gf, cur2d_sum);
                             }
 
