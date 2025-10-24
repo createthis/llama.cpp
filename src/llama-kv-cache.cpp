@@ -1081,7 +1081,7 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
 
 
 
-ggml_tensor * llama_kv_cache::get_k_indexer(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
+ggml_tensor * llama_kv_cache::get_k_indexer(ggml_context * ctx, int32_t il, uint32_t /*n_kv*/, const slot_info & sinfo) const {
     const int32_t ikv = map_layer_ids.at(il);
     ggml_tensor * kidx = layers[ikv].k_indexer;
     GGML_ASSERT(kidx && "Indexer K cache not allocated for this layer");
@@ -1089,12 +1089,23 @@ ggml_tensor * llama_kv_cache::get_k_indexer(ggml_context * ctx, int32_t il, uint
     const uint64_t kv_size = get_size();
     const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
 
-    // view as [D_index, n_kv, ns]
+    // Always expose the full KV width for the indexer: [D_index, kv_size, ns]
+    // Note: if multiple streams are active, merge the stream dimension to ensure a
+    // single contiguous KV axis so the indexer can see the entire KV range.
+    if (kidx->ne[2] > 1) {
+        ggml_tensor * kidx_2d = ggml_reshape_2d(ctx, kidx, kidx->ne[0], kv_size * kidx->ne[2]);
+        // view back to 3D with ns streams starting from sinfo.s0
+        return ggml_view_3d(ctx, kidx_2d,
+                kidx->ne[0], kv_size, ns,
+                ggml_row_size(kidx->type, kidx->ne[0]),
+                ggml_row_size(kidx->type, kidx->ne[0]) * kv_size,
+                ggml_row_size(kidx->type, kidx->ne[0]) * kv_size * sinfo.s0);
+    }
     return ggml_view_3d(ctx, kidx,
-            kidx->ne[0], n_kv, ns,
+            kidx->ne[0], kv_size, ns,
             ggml_row_size(kidx->type, kidx->ne[0]),
-            ggml_row_size(kidx->type, kidx->ne[0])*kv_size,
-            ggml_row_size(kidx->type, kidx->ne[0])*kv_size*sinfo.s0);
+            ggml_row_size(kidx->type, kidx->ne[0]) * kv_size,
+            ggml_row_size(kidx->type, kidx->ne[0]) * kv_size * sinfo.s0);
 }
 
 ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const {

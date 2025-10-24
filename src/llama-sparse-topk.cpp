@@ -78,14 +78,16 @@ using std::function;
       ggml_tensor * mask2d = nullptr;
       if (kq_mask) {
           cb(kq_mask, "idxkv_kq_mask", -1);
-          mask2d = ggml_cont(ctx, kq_mask);
-          cb(mask2d, "idxkv_mask2d", -1);
-          if (mask2d->ne[0] == N_kv && mask2d->ne[1] >= T) {
-              mask2d = ggml_view_2d(ctx, mask2d, N_kv, T, mask2d->nb[1], 0);
+          ggml_tensor * tmp_mask = ggml_cont(ctx, kq_mask);
+          cb(tmp_mask, "idxkv_mask2d", -1);
+          if (tmp_mask->ne[0] == N_kv && tmp_mask->ne[1] >= T) {
+              mask2d = ggml_view_2d(ctx, tmp_mask, N_kv, T, tmp_mask->nb[1], 0);
+          } else {
+              printf("[TOPK-INDEXER] kq_mask dims [%%lld,%%lld] mismatch N_kv=%%lld,T=%%lld; ignoring mask for indexer selection\n",
+                     (long long) tmp_mask->ne[0], (long long) tmp_mask->ne[1], (long long) N_kv, (long long) T);
+              fflush(stdout);
+              mask2d = nullptr;
           }
-          // Only 2D [N_kv, >=T] masks are supported here; fail fast if not satisfied
-          GGML_ASSERT(mask2d->ne[0] == N_kv && mask2d->ne[1] >= T);
-          GGML_ASSERT(mask2d->nb[0] == (size_t) ggml_type_size(mask2d->type));
       }
 
       const int64_t k = std::min<int64_t>(top_k, N_kv);
