@@ -65,11 +65,13 @@ using std::function;
           // head columns
           ggml_tensor * kidx_head = ggml_view_2d(ctx, k_indexer, d0, c0, k_indexer->nb[1], 0);
           cb(kidx_head, "idxkv_k_indexer_head", -1);
+          if (gf) { ggml_set_output(kidx_head); ggml_build_forward_expand(gf, kidx_head); }
           // tail columns
           if (k_indexer->ne[1] > c0) {
               size_t off_tail = (k_indexer->ne[1] - c0) * k_indexer->nb[1];
               ggml_tensor * kidx_tail = ggml_view_2d(ctx, k_indexer, d0, c0, k_indexer->nb[1], off_tail);
               cb(kidx_tail, "idxkv_k_indexer_tail", -1);
+              if (gf) { ggml_set_output(kidx_tail); ggml_build_forward_expand(gf, kidx_tail); }
           }
       }
 
