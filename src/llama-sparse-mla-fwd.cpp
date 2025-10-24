@@ -40,12 +40,43 @@ using std::function;
       const function<void(ggml_tensor *, const char *, int)> & cb) {
       (void)n_tokens;
 
-      const int64_t Dk   = k_cache->ne[0];
-      const int64_t Hkv  = k_cache->ne[1];
-      const int64_t N_kv = k_cache->ne[2];
-      const int64_t Dv   = v_cache->ne[0];
-      const int64_t Hkv_v= v_cache->ne[1];
-      const int64_t N_kv_v=v_cache->ne[2];
+      int64_t Dk   = k_cache->ne[0];
+      int64_t Hkv  = k_cache->ne[1];
+      int64_t N_kv = k_cache->ne[2];
+      int64_t Dv   = v_cache->ne[0];
+      int64_t Hkv_v= v_cache->ne[1];
+      int64_t N_kv_v= v_cache->ne[2];
+
+      // Normalize V layout: expected effective layout is [Dv, Hkv_v, N_kv]
+      // Some builds return V cache with transposed layout [N_kv, Hkv_v, Dv, ns].
+      ggml_tensor * V_gather_src = nullptr;
+      if (N_kv_v == N_kv) {
+          // Normal layout: [Dv, Hkv_v, N_kv, ns]
+          V_gather_src = v_cache;
+      } else if (Dv == N_kv) {
+          // Transposed layout: [N_kv, Hkv_v, Dv, ns] -> permute to [Dv, Hkv_v, N_kv, ns]
+          ggml_tensor * v_perm = ggml_permute(ctx, v_cache, 2, 1, 0, 3);
+          v_perm = ggml_cont(ctx, v_perm);
+          Dv     = v_perm->ne[0];
+          Hkv_v  = v_perm->ne[1];
+          N_kv_v = v_perm->ne[2];
+          V_gather_src = v_perm;
+      } else {
+          // Unexpected; proceed without permute but warn
+          printf("[SPARSE-MLA][WARN] V cache unexpected layout: v_cache=[%lld,%lld,%lld,%lld], K N_kv=%lld\n",
+                 (long long) v_cache->ne[0], (long long) v_cache->ne[1], (long long) v_cache->ne[2], (long long) v_cache->ne[3], (long long) N_kv);
+          fflush(stdout);
+          V_gather_src = v_cache;
+          // best effort: if v_cache->ne[0] == N_kv, treat as transposed
+          if (v_cache->ne[0] == N_kv) {
+              ggml_tensor * v_perm = ggml_permute(ctx, v_cache, 2, 1, 0, 3);
+              v_perm = ggml_cont(ctx, v_perm);
+              Dv     = v_perm->ne[0];
+              Hkv_v  = v_perm->ne[1];
+              N_kv_v = v_perm->ne[2];
+              V_gather_src = v_perm;
+          }
+      }
 
       const int64_t Dq   = q_cur->ne[0];
       const int64_t Hq   = q_cur->ne[1];
@@ -67,7 +98,7 @@ using std::function;
       fflush(stdout);
 
       ggml_tensor * K4d = ggml_reshape_4d(ctx, k_cache, Dk*Hkv, N_kv, 1, 1);
-      ggml_tensor * V4d = ggml_reshape_4d(ctx, v_cache, Dv*Hkv_v, N_kv_v, 1, 1);
+      ggml_tensor * V4d = ggml_reshape_4d(ctx, V_gather_src, Dv*Hkv_v, N_kv_v, 1, 1);
 
       ggml_tensor * q_all_2d = ggml_reshape_2d(ctx, q_cur, Dq, Hq*T);
 
@@ -159,6 +190,8 @@ using std::function;
           ggml_tensor * out2d_t = ggml_mul_mat(ctx, weights_t, v_sel_2d); // [Hq, Dv]
           ggml_tensor * out2d_t_T = ggml_cont(ctx, ggml_transpose(ctx, out2d_t)); // [Dv, Hq]
           ggml_tensor * out3d_t = ggml_reshape_3d(ctx, out2d_t_T, Dv, Hq, 1);
+          // Sanity guard: Dv should be kv_lora_rank for MLA path; for MHA path Dv should be n_embd_head_v
+          // We don't have kv_lora_rank here; the caller asserts later. No-op here.
 
           if (!output_acc) output_acc = out3d_t; else output_acc = ggml_concat(ctx, output_acc, out3d_t, 2);
       }
