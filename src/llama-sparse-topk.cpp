@@ -119,6 +119,7 @@ using std::function;
                       logits_sample_host = tmp;
                   }
                   logits_sample_host = ggml_cont(ctx, logits_sample_host);
+                  cb(logits_sample_host, "idxkv_logits_sample_host", -1);
                   // Add reductions so the sample is materialized in eval-callback
                   ggml_tensor * logits_sample_sum    = ggml_sum(ctx, logits_sample_host);
                   ggml_tensor * logits_sample_sumsq  = ggml_sum(ctx, ggml_sqr(ctx, logits_sample_host));
