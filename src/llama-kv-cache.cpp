@@ -2028,6 +2028,30 @@ ggml_tensor * llama_kv_cache_context::get_k_indexer(ggml_context * ctx, int32_t 
     return kv->get_k_indexer(ctx, il, n_kv, sinfos[i_cur]);
 }
 
+ggml_tensor * llama_kv_cache::get_k_full(ggml_context * ctx, int32_t il) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    auto * k = layers[ikv].k;
+    const uint64_t kv_size      = get_size();
+    const uint64_t n_embd_k_gqa = k->ne[0];
+    return ggml_view_3d(ctx, k,
+            n_embd_k_gqa, kv_size, k->ne[2],
+            ggml_row_size(k->type, n_embd_k_gqa),
+            ggml_row_size(k->type, n_embd_k_gqa),
+            ggml_row_size(k->type, n_embd_k_gqa)*kv_size);
+}
+
+ggml_tensor * llama_kv_cache::get_v_full(ggml_context * ctx, int32_t il) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    auto * v = layers[ikv].v;
+    const uint64_t kv_size      = get_size();
+    const uint64_t n_embd_v_gqa = v->ne[0];
+    return ggml_view_3d(ctx, v,
+            n_embd_v_gqa, kv_size, v->ne[2],
+            ggml_row_size(v->type, n_embd_v_gqa),
+            ggml_row_size(v->type, n_embd_v_gqa),
+            ggml_row_size(v->type, n_embd_v_gqa)*kv_size);
+}
+
 ggml_tensor * llama_kv_cache_context::cpy_k_indexer(ggml_context * ctx, ggml_tensor * kidx_cur, ggml_tensor * k_idxs, int32_t il) const {
     const auto & sinfo = sinfos[i_cur];
     return kv->cpy_k_indexer(ctx, kidx_cur, k_idxs, il, sinfo);

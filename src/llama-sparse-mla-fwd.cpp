@@ -188,6 +188,8 @@ using std::function;
           }
           // debug marker: scores post-mask/softcap
           printf("[SPARSE-DBG-MLA] t=%lld scores post-mask/softcap\n", (long long) t);
+          // Clamp infinities to large finite values to avoid NaNs in softmax when all entries are masked
+          scores_t = ggml_clamp(ctx, scores_t, -1e30f, 1e30f);
           ggml_tensor * weights_t = ggml_soft_max(ctx, scores_t);
           if (t == 0 || t == T - 1) {
               cb(weights_t, "mla_weights_sample", -1);
