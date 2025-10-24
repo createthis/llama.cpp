@@ -13927,8 +13927,37 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                        il, (int64_t) model.layers[il].wv_b->ne[0], (int64_t) model.layers[il].wv_b->ne[1], kv_lora_rank, (int64_t) n_embd_head_v);
                             }
                             GGML_ASSERT(cur->ne[0] == (int64_t) kv_lora_rank);
+                            // Diagnostic: sample kvaware_sparse_attn_out before V projection
+                            {
+                                ggml_tensor * cur_dbg_cont = ggml_cont(ctx0, cur);
+                                ggml_tensor * cur2d_dbg = ggml_reshape_2d(ctx0, cur_dbg_cont, cur_dbg_cont->ne[0], cur_dbg_cont->ne[1]*cur_dbg_cont->ne[2]);
+                                const int64_t dbg_cols = std::min<int64_t>(cur2d_dbg->ne[0], (int64_t)8);
+                                const int64_t dbg_rows = std::min<int64_t>(cur2d_dbg->ne[1], (int64_t)8);
+                                ggml_tensor * cur2d_sample = ggml_view_2d(ctx0, cur2d_dbg, dbg_cols, dbg_rows, cur2d_dbg->nb[1], 0);
+                                cb(cur2d_sample, "kvaware_sparse_attn_out_sample", il);
+                                ggml_tensor * cur2d_sum = ggml_sum(ctx0, cur2d_sample);
+                                cb(cur2d_sum, "kvaware_sparse_attn_out_sample_sum", il);
+                                ggml_set_output(cur2d_sample);
+                                ggml_set_output(cur2d_sum);
+                                ggml_build_forward_expand(gf, cur2d_sample);
+                                ggml_build_forward_expand(gf, cur2d_sum);
+                            }
+
                             if (model.layers[il].wv_b) {
                                 GGML_ASSERT(model.layers[il].wv_b->ne[0] == (int64_t) kv_lora_rank);
+                            // Diagnostic: sample sparse attn output before V projection
+                            {
+                                const int64_t sd0 = std::min<int64_t>(cur->ne[0], (int64_t)8);
+                                const int64_t sd1 = std::min<int64_t>(cur->ne[1], (int64_t)8);
+                                const int64_t sd2 = std::min<int64_t>(cur->ne[2], (int64_t)8);
+                                ggml_tensor * cur_sample = ggml_view_3d(ctx0, cur,
+                                        sd0, sd1, sd2,
+                                        cur->nb[1], cur->nb[2], 0);
+                                cb(cur_sample, "kvaware_sparse_attn_out_sample", il);
+                                ggml_set_output(cur_sample);
+                                ggml_build_forward_expand(gf, cur_sample);
+                            }
+
                                 GGML_ASSERT(model.layers[il].wv_b->ne[1] == (int64_t) n_embd_head_v);
                             }
                         }
