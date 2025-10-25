@@ -313,6 +313,13 @@ ggml_tensor * sparse_attn_indexer::build_kvaware_topk_indices(
     IndexerKVTriplet trip = compute_indexer_triplet(ctx, model, layer_idx, cur, n_tokens, mctx, k_idxs,
         inp_pos, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,
         cb, gf);
+    // Use full-width indexer K view only for DeepSeek V3.2
+    if (model.arch == LLM_ARCH_DEEPSEEK3_2 && mctx) {
+        ggml_tensor * kidx_full = mctx->get_k_indexer(const_cast<ggml_context*>(ctx), layer_idx);
+        if (kidx_full && kidx_full->ne[1] >= trip.k_indexer_cache->ne[1]) {
+            trip.k_indexer_cache = kidx_full;
+        }
+    }
     ggml_tensor * Kindexer_cache = trip.k_indexer_cache;
     if (top_k <= 0) {
         top_k = std::max<int64_t>(64, std::min<int64_t>(1024, Kindexer_cache->ne[1]));

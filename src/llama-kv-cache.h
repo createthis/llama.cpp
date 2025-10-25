@@ -148,6 +148,9 @@ public:
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
     ggml_tensor * get_k_indexer(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
 
+    // DeepSeek V3.2: full-width indexer K view
+    ggml_tensor * get_k_indexer_full(ggml_context * ctx, int32_t il, const slot_info & sinfo) const;
+
     // Full-width KV accessors for sparse paths (ignore micro-window)
     ggml_tensor * get_k_full(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v_full(ggml_context * ctx, int32_t il) const;
@@ -328,6 +331,7 @@ public:
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_k_indexer(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_k_indexer_full(ggml_context * ctx, int32_t il) const; // DeepSeek V3.2 only
     // Full-width KV accessors for sparse paths (ignore micro-window)
     ggml_tensor * get_k_full(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v_full(ggml_context * ctx, int32_t il) const;
