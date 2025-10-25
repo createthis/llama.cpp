@@ -371,11 +371,9 @@ bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
 
     bool res = true;
 
-    printf("[SET_INPUT_KV][iswa] micro(base)=[%lld,%lld,%lld,%lld] micro(swa)=[%lld,%lld,%lld,%lld]\n",
+    printf("[SET_INPUT_KV][iswa] micro(base)=[%lld,%lld,%lld,%lld]\n",
            (long long) self_kq_mask->ne[0], (long long) self_kq_mask->ne[1],
-           (long long) self_kq_mask->ne[2], (long long) self_kq_mask->ne[3],
-           (long long) self_kq_mask_swa->ne[0], (long long) self_kq_mask_swa->ne[1],
-           (long long) self_kq_mask_swa->ne[2], (long long) self_kq_mask_swa->ne[3]);
+           (long long) self_kq_mask->ne[2], (long long) self_kq_mask->ne[3]);
     fflush(stdout);
 
 

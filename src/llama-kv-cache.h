@@ -342,6 +342,8 @@ public:
     ggml_tensor * get_k_indexer(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_k_indexer_full(ggml_context * ctx, int32_t il) const; // DeepSeek V3.2 only
     // Full-width KV accessors for sparse paths (ignore micro-window)
+    void set_input_kq_mask_full_2d(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
+
     ggml_tensor * get_k_full(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v_full(ggml_context * ctx, int32_t il) const;
 

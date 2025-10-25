@@ -2069,6 +2069,10 @@ bool llama_kv_cache_context::is_arch_deepseek_v3_2() const {
     return kv->is_arch_deepseek_v3_2();
 }
 
+void llama_kv_cache_context::set_input_kq_mask_full_2d(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const {
+    kv->set_input_kq_mask_full_2d(dst, ubatch, causal_attn);
+}
+
 ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) const {
     return kv->get_k(ctx, il, n_kv, sinfos[i_cur]);
 }
