@@ -21,7 +21,11 @@ class llama_kv_cache : public llama_memory_i {
 public:
     static uint32_t get_padding(const llama_cparams & cparams);
 
+    // Return true if the underlying model architecture is DeepSeek V3.2 (sparse attention)
+    bool is_arch_deepseek_v3_2() const;
+
     struct stream_copy_info {
+
         bool empty() const {
             assert(ssrc.size() == sdst.size());
             return ssrc.empty();
@@ -190,11 +194,14 @@ public:
 
     void set_input_k_shift(ggml_tensor * dst) const;
 
+    void set_input_kq_mask_full_2d(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
+
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
 private:
     const llama_model & model;
+
     const llama_hparams & hparams;
 
     struct kv_layer {
@@ -326,6 +333,8 @@ public:
     //
 
     uint32_t get_n_kv() const;
+
+    bool is_arch_deepseek_v3_2() const;
 
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;

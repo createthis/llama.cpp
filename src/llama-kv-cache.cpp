@@ -222,6 +222,10 @@ llama_kv_cache::llama_kv_cache(
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
 }
 
+bool llama_kv_cache::is_arch_deepseek_v3_2() const {
+    return model.arch == LLM_ARCH_DEEPSEEK3_2;
+}
+
 void llama_kv_cache::clear(bool data) {
     for (uint32_t s = 0; s < n_stream; ++s) {
         v_cells[s].reset();
@@ -1369,6 +1373,37 @@ size_t llama_kv_cache::total_size() const {
     return size;
 }
 
+void llama_kv_cache::set_input_kq_mask_full_2d(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const {
+    GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
+    float * data = (float *) dst->data;
+
+    const int64_t kv_size = get_size();
+    const int64_t T_pad   = dst->ne[1];
+    const int64_t T       = ubatch->n_tokens;
+
+    std::fill(data, data + kv_size * T_pad, -INFINITY);
+
+    // For each token i in the batch, mark valid KV positions across the full cache width
+    for (uint32_t i = 0; i < T; ++i) {
+        // Use first seq_id for mask (consistent with existing set_input_kq_mask)
+        const llama_seq_id seq_id = ubatch->seq_id[i][0];
+        const auto & cells = v_cells[seq_to_stream[seq_id]];
+        const llama_pos p1 = ubatch->pos[i];
+
+        for (uint32_t j = 0; j < kv_size; ++j) {
+            if (cells.is_empty(j)) continue;
+            if (!cells.seq_has(j, seq_id)) continue;
+            const llama_pos p0 = cells.pos_get(j);
+            if (causal_attn && p0 > p1) continue;
+            if (is_masked_swa(p0, p1)) continue;
+
+            // Row major: ne[0] = kv_size, ne[1] = T_pad
+            // offset = row + col*row_stride
+            data[j + i * kv_size] = hparams.use_alibi ? -std::abs(p0 - p1) : 0.0f;
+        }
+    }
+}
+
 size_t llama_kv_cache::size_k_bytes() const {
     size_t size_k_bytes = 0;
 
@@ -2028,6 +2063,10 @@ const llama_ubatch & llama_kv_cache_context::get_ubatch() const {
 
 uint32_t llama_kv_cache_context::get_n_kv() const {
     return n_kv;
+}
+
+bool llama_kv_cache_context::is_arch_deepseek_v3_2() const {
+    return kv->is_arch_deepseek_v3_2();
 }
 
 ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) const {

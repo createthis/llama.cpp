@@ -13907,7 +13907,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             // Use full-width KV cache for sparse MLA to match indexer indices
                             ggml_tensor * Kcache = mctx_cur2->get_k_full(ctx0, il);
                             ggml_tensor * Vcache = mctx_cur2->get_v_full(ctx0, il);
-                            ggml_tensor * KQmask2 = inp_attn->get_kq_mask();
+                            ggml_tensor * KQmask2 = inp_attn->get_kq_mask_full_2d();
 
                             const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
                             top_k = env_topk ? std::max<int64_t>(1, atoll(env_topk)) : 1024;
@@ -14010,7 +14010,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             // Use full-width KV cache for sparse MLA to match indexer indices
                             ggml_tensor * Kcache = mctx_cur2->get_k_full(ctx0, il);
                             ggml_tensor * Vcache = mctx_cur2->get_v_full(ctx0, il);
-                            ggml_tensor * KQmask2 = inp_attn->get_kq_mask();
+                            ggml_tensor * KQmask2 = inp_attn->get_kq_mask_full_2d();
 
                             const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
                             top_k = env_topk ? std::max<int64_t>(1, atoll(env_topk)) : 1024;
