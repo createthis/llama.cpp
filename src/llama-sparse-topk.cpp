@@ -27,16 +27,21 @@ using std::function;
       const int64_t T    = q_indexer->ne[2];
       const int64_t N_kv = k_indexer->ne[1];
 
-      printf("SPARSE TOPK KV-AWARE (INDEXER): q_indexer [D,H,T]=[%" PRId64 ",%" PRId64 ",%" PRId64 "]\n", D, H, T);
-      printf("SPARSE TOPK KV-AWARE (INDEXER): k_indexer dims=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "]\n",
-             k_indexer->ne[0], k_indexer->ne[1], k_indexer->ne[2], k_indexer->ne[3]);
-      printf("SPARSE TOPK KV-AWARE (INDEXER): weights [H,T]=[%" PRId64 ",%" PRId64 "]\n",
-             weights ? weights->ne[0] : -1, weights ? weights->ne[1] : -1);
-      if (kq_mask) {
-          printf("SPARSE TOPK KV-AWARE (INDEXER): kq_mask dims=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] type=%d\n",
-                 kq_mask->ne[0], kq_mask->ne[1], kq_mask->ne[2], kq_mask->ne[3], (int)kq_mask->type);
+      const char * ENV_SPARSE_DEBUG = getenv("LLAMA_SPARSE_DEBUG");
+      const bool dbg = (ENV_SPARSE_DEBUG && atoi(ENV_SPARSE_DEBUG) != 0);
+
+      if (dbg) {
+          printf("SPARSE TOPK KV-AWARE (INDEXER): q_indexer [D,H,T]=[%" PRId64 ",%" PRId64 ",%" PRId64 "]\n", D, H, T);
+          printf("SPARSE TOPK KV-AWARE (INDEXER): k_indexer dims=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "]\n",
+                 k_indexer->ne[0], k_indexer->ne[1], k_indexer->ne[2], k_indexer->ne[3]);
+          printf("SPARSE TOPK KV-AWARE (INDEXER): weights [H,T]=[%" PRId64 ",%" PRId64 "]\n",
+                 weights ? weights->ne[0] : -1, weights ? weights->ne[1] : -1);
+          if (kq_mask) {
+              printf("SPARSE TOPK KV-AWARE (INDEXER): kq_mask dims=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] type=%d\n",
+                     kq_mask->ne[0], kq_mask->ne[1], kq_mask->ne[2], kq_mask->ne[3], (int)kq_mask->type);
+          }
+          fflush(stdout);
       }
-      fflush(stdout);
 
       // Shape/contiguity assertions for weights [H, T]
       GGML_ASSERT(D > 0 && H > 0 && T > 0 && N_kv > 0);
@@ -59,7 +64,7 @@ using std::function;
 
 
       // Diagnostics: sample K indexer head/tail once per call
-      {
+      if (dbg) {
           const int64_t d0 = std::min<int64_t>(k_indexer->ne[0], (int64_t)8);
           const int64_t c0 = std::min<int64_t>(k_indexer->ne[1], (int64_t)8);
           // head columns
@@ -96,9 +101,11 @@ using std::function;
           long v = strtol(env, nullptr, 10);
           if (v > 0 && v <= 4096) TILE_T = v;
       }
-      printf("[TOPK-INDEXER] N_kv=%lld T=%lld k=%lld TILE_T=%lld H=%lld D=%lld\n",
-             (long long) N_kv, (long long) T, (long long) k, (long long) TILE_T, (long long) H, (long long) D);
-      fflush(stdout);
+      if (dbg) {
+          printf("[TOPK-INDEXER] N_kv=%lld T=%lld k=%lld TILE_T=%lld H=%lld D=%lld\n",
+                 (long long) N_kv, (long long) T, (long long) k, (long long) TILE_T, (long long) H, (long long) D);
+          fflush(stdout);
+      }
 
       ggml_tensor * result = nullptr; // [k, T]
       for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {
@@ -109,92 +116,43 @@ using std::function;
           ggml_tensor * Q_tile_all = ggml_view_2d(ctx, Q2d_full, D, H * Tc, Q2d_full->nb[1], q_off);
 
           // Accumulate per-head contributions into [N_kv, Tc]
-          ggml_tensor * scores_tc = nullptr;
-          for (int64_t h = 0; h < H; ++h) {
-              size_t h_off = h * Tc * Q2d_full->nb[1];
-              ggml_tensor * Q_tile_h = ggml_view_2d(ctx, Q_tile_all, D, Tc, Q2d_full->nb[1], h_off);
-              cb(Q_tile_h, "idxkv_Q_tile_h", -1);
-              ggml_tensor * logits_h = ggml_mul_mat(ctx, k_indexer, Q_tile_h); // [N_kv, Tc]
-              cb(logits_h, "idxkv_logits_h", -1);
-
-              // Diagnostics (tile t0==0 only): pre-ReLU magnitude vs positive mass for head h=0
-              if (t0 == 0 && h == 0) {
-                  ggml_tensor * logits_abs_sum = ggml_sum(ctx, ggml_abs(ctx, logits_h));   // scalar
-                  ggml_tensor * logits_relu    = ggml_relu(ctx, logits_h);
-                  ggml_tensor * logits_relu_sum= ggml_sum(ctx, logits_relu);               // scalar
-                  cb(logits_abs_sum,  "idxkv_logits_pre_abs_sum",  -1);
-                  cb(logits_relu_sum, "idxkv_logits_pre_relu_sum", -1);
-                  // Also log a small sample of logits_h before ReLU for inspection
-                  const int64_t sample_rows = std::min<int64_t>(logits_h->ne[1], 8);
-                  const int64_t sample_cols = std::min<int64_t>(logits_h->ne[0], 4);
-                  ggml_tensor * logits_sample = ggml_view_2d(ctx, logits_h, sample_cols, sample_rows, logits_h->nb[1], 0);
-                  cb(logits_sample, "idxkv_logits_sample_pre_relu", -1);
-                  // Ensure contiguous host buffer for sample reductions to avoid CUDA assert
-                  ggml_tensor * logits_sample_host = logits_sample;
-                  if (logits_sample->buffer && !ggml_backend_buffer_is_host(logits_sample->buffer)) {
-                      ggml_tensor * tmp = ggml_dup_tensor(ctx, logits_sample);
-                      ggml_set_name(tmp, "idxkv_logits_sample_pre_relu_host");
-                      tmp = ggml_cpy(ctx, logits_sample, tmp);
-                      logits_sample_host = tmp;
-                  }
-                  logits_sample_host = ggml_cont(ctx, logits_sample_host);
-                  cb(logits_sample_host, "idxkv_logits_sample_host", -1);
-                  // Add reductions so the sample is materialized in eval-callback
-                  ggml_tensor * logits_sample_sum    = ggml_sum(ctx, logits_sample_host);
-                  ggml_tensor * logits_sample_sumsq  = ggml_sum(ctx, ggml_sqr(ctx, logits_sample_host));
-                  cb(logits_sample_sum,   "idxkv_logits_sample_pre_relu_sum",   -1);
-                  cb(logits_sample_sumsq, "idxkv_logits_sample_pre_relu_sumsq", -1);
-                  if (gf) {
-                      ggml_set_output(logits_abs_sum);
-                      ggml_set_output(logits_relu_sum);
-                      ggml_set_output(logits_sample);
-                      ggml_set_output(logits_sample_sum);
-                      ggml_set_output(logits_sample_sumsq);
-                      ggml_build_forward_expand(gf, logits_abs_sum);
-                      ggml_build_forward_expand(gf, logits_relu_sum);
-                      ggml_build_forward_expand(gf, logits_sample);
-                      ggml_build_forward_expand(gf, logits_sample_sum);
-                      ggml_build_forward_expand(gf, logits_sample_sumsq);
-                  }
-                  // restore logits_h to pre-ReLU for normal flow
-              }
-
-              logits_h = ggml_relu(ctx, logits_h);
-
-              // weights[h, t0:t0+Tc] -> [1, Tc] -> broadcast to [N_kv, Tc]
-              // Bounds checks for per-head slice
-              GGML_ASSERT(h >= 0 && h < weights->ne[0]);
-              GGML_ASSERT(t0 >= 0 && t0 + Tc <= weights->ne[1]);
-              ggml_tensor * w_tile = ggml_view_2d(ctx, weights, 1, Tc, weights->nb[1], h*weights->nb[0] + t0*weights->nb[1]);
-              if (t0 == 0 && h == 0) {
-                  ggml_tensor * w_tile_abs_sum = ggml_sum(ctx, ggml_abs(ctx, w_tile)); // scalar
-                  cb(w_tile_abs_sum, "idxkv_w_tile_abs_sum", -1);
-                  if (gf) {
-                      ggml_set_output(w_tile_abs_sum);
-                      ggml_build_forward_expand(gf, w_tile_abs_sum);
-                  }
-              }
-              ggml_tensor * w_b    = ggml_repeat(ctx, w_tile, logits_h);
-              ggml_tensor * contrib = ggml_mul(ctx, logits_h, w_b);
-
-              scores_tc = scores_tc ? ggml_add(ctx, scores_tc, contrib) : contrib;
+          ggml_tensor * scores_tc = nullptr; // unused placeholder
+          // Compute logits for all heads in one GEMM: [N_kv, H*Tc]
+          ggml_tensor * logits_all = ggml_mul_mat(ctx, k_indexer, Q_tile_all);
+          if (dbg && t0 == 0) {
+              cb(logits_all, "idxkv_logits_all", -1);
           }
+          // Reshape and apply ReLU: [N_kv, H, Tc]
+          ggml_tensor * logits_resh = ggml_reshape_3d(ctx, logits_all, N_kv, H, Tc);
+          ggml_tensor * logits_act  = ggml_relu(ctx, logits_resh);
+          // Weights slice [H, Tc] and broadcast-mul, then sum over H → [N_kv, Tc]
+          ggml_tensor * w_slice = ggml_view_2d(ctx, weights, H, Tc, weights->nb[1], t0*weights->nb[1]);
+          // reshape to [1, H, Tc] so it can broadcast across N_kv
+          ggml_tensor * w3 = ggml_reshape_3d(ctx, w_slice, 1, H, Tc);
+          ggml_tensor * w_bcast = ggml_repeat(ctx, w3, logits_act);
+          ggml_tensor * contrib  = ggml_mul(ctx, logits_act, w_bcast);   // [N_kv, H, Tc]
+          // Sum over head dimension (ne1): permute to [H, N_kv, Tc] and sum rows
+          ggml_tensor * contrib_perm = ggml_permute(ctx, contrib, 1, 0, 2, 3);
+          ggml_tensor * sum_h = ggml_sum_rows(ctx, contrib_perm);        // [1, N_kv, Tc]
+          scores_tc = ggml_reshape_2d(ctx, sum_h, N_kv, Tc);             // [N_kv, Tc]
 
 
           // Debug (cb): per-tile scalar sums (no deref)
-          ggml_tensor * idxkv_scores_sum = ggml_sum(ctx, scores_tc);
-          ggml_tensor * idxkv_scores_ssq = ggml_sum(ctx, ggml_sqr(ctx, scores_tc));
-          ggml_tensor * idxkv_scores_post_abs_sum = nullptr;
-          if (t0 == 0) {
-              idxkv_scores_post_abs_sum = ggml_sum(ctx, ggml_abs(ctx, scores_tc));
-              cb(idxkv_scores_post_abs_sum, "idxkv_scores_post_abs_sum", -1);
-              if (gf) {
-                  ggml_set_output(idxkv_scores_post_abs_sum);
-                  ggml_build_forward_expand(gf, idxkv_scores_post_abs_sum);
+          if (dbg) {
+              ggml_tensor * idxkv_scores_sum = ggml_sum(ctx, scores_tc);
+              ggml_tensor * idxkv_scores_ssq = ggml_sum(ctx, ggml_sqr(ctx, scores_tc));
+              ggml_tensor * idxkv_scores_post_abs_sum = nullptr;
+              if (t0 == 0) {
+                  idxkv_scores_post_abs_sum = ggml_sum(ctx, ggml_abs(ctx, scores_tc));
+                  cb(idxkv_scores_post_abs_sum, "idxkv_scores_post_abs_sum", -1);
+                  if (gf) {
+                      ggml_set_output(idxkv_scores_post_abs_sum);
+                      ggml_build_forward_expand(gf, idxkv_scores_post_abs_sum);
+                  }
               }
+              cb(idxkv_scores_sum,  "idxkv_scores_sum",  -1);
+              cb(idxkv_scores_ssq,  "idxkv_scores_ssq",  -1);
           }
-          cb(idxkv_scores_sum,  "idxkv_scores_sum",  -1);
-          cb(idxkv_scores_ssq,  "idxkv_scores_ssq",  -1);
 
           scores_tc = ggml_cont(ctx, scores_tc);
 
@@ -206,7 +164,7 @@ using std::function;
                   mask_tc = ggml_cast(ctx, mask_tc, scores_tc->type);
                   mask_tc = ggml_cont(ctx, mask_tc);
               }
-              cb(mask_tc,  "idxkv_mask_tc",  -1);
+              if (dbg) cb(mask_tc,  "idxkv_mask_tc",  -1);
 
               // Ensure both operands have row-contiguous layout for safe broadcast add
               GGML_ASSERT(scores_tc->nb[0] == (size_t) ggml_type_size(scores_tc->type));
@@ -231,20 +189,21 @@ using std::function;
           // top-k for this tile -> [k, Tc]
           // Ensure top-k runs on CPU to avoid CUDA backend returning invalid indices for generic shapes
           ggml_tensor * scores_for_topk = scores_tc;
-          if (scores_tc->buffer && !ggml_backend_buffer_is_host(scores_tc->buffer)) {
+          // Keep on device by default; only copy to host in debug mode
+          if (dbg && scores_tc->buffer && !ggml_backend_buffer_is_host(scores_tc->buffer)) {
               ggml_tensor * host_scores = ggml_dup_tensor(ctx, scores_tc);
               ggml_set_name(host_scores, "idxkv_scores_tc_host");
               host_scores = ggml_cpy(ctx, scores_tc, host_scores);
               scores_for_topk = host_scores;
           }
-          if (sched) {
+          if (dbg && sched) {
               ggml_backend_t chosen_in = ggml_backend_sched_get_tensor_backend(sched, scores_for_topk);
               const char * in_name = chosen_in ? ggml_backend_name(chosen_in) : NULL;
               printf("[TOPK] chosen backend for scores_for_topk: %s (non-null=%d)\n", in_name ? in_name : "null", chosen_in ? 1 : 0);
               fflush(stdout);
           }
           // Log scores_for_topk (tile 0 only) and reductions to materialize in eval-callback
-          if (t0 == 0) {
+          if (dbg && t0 == 0) {
               cb(scores_for_topk, "idxkv_scores_for_topk", -1);
               ggml_tensor * sft_sum   = ggml_sum(ctx, scores_for_topk);
               ggml_tensor * sft_sumsq = ggml_sum(ctx, ggml_sqr(ctx, scores_for_topk));
@@ -262,19 +221,21 @@ using std::function;
           // Clamp infinities from mask to large finite values to stabilize argsort/top-k
           ggml_tensor * scores_clamped = ggml_clamp(ctx, scores_for_topk, -1e30f, 1e30f);
           ggml_tensor * topk_tc = ggml_top_k(ctx, scores_clamped, k);
-          cb(topk_tc->src[0], "idxkv_argsort", -1);
-          cb(topk_tc, "idxkv_topk", -1);
-          if (t0 == 0) {
-              ggml_tensor * topk_f32 = ggml_cast(ctx, topk_tc, GGML_TYPE_F32);
-              ggml_tensor * idxkv_topk_idx_sum    = ggml_sum(ctx, topk_f32);
-              ggml_tensor * idxkv_topk_idx_sumsq  = ggml_sum(ctx, ggml_sqr(ctx, topk_f32));
-              cb(idxkv_topk_idx_sum,   "idxkv_topk_idx_sum",   -1);
-              cb(idxkv_topk_idx_sumsq, "idxkv_topk_idx_sumsq", -1);
-              if (gf) {
-                  ggml_set_output(idxkv_topk_idx_sum);
-                  ggml_set_output(idxkv_topk_idx_sumsq);
-                  ggml_build_forward_expand(gf, idxkv_topk_idx_sum);
-                  ggml_build_forward_expand(gf, idxkv_topk_idx_sumsq);
+          if (dbg) {
+              cb(topk_tc->src[0], "idxkv_argsort", -1);
+              cb(topk_tc, "idxkv_topk", -1);
+              if (t0 == 0) {
+                  ggml_tensor * topk_f32 = ggml_cast(ctx, topk_tc, GGML_TYPE_F32);
+                  ggml_tensor * idxkv_topk_idx_sum    = ggml_sum(ctx, topk_f32);
+                  ggml_tensor * idxkv_topk_idx_sumsq  = ggml_sum(ctx, ggml_sqr(ctx, topk_f32));
+                  cb(idxkv_topk_idx_sum,   "idxkv_topk_idx_sum",   -1);
+                  cb(idxkv_topk_idx_sumsq, "idxkv_topk_idx_sumsq", -1);
+                  if (gf) {
+                      ggml_set_output(idxkv_topk_idx_sum);
+                      ggml_set_output(idxkv_topk_idx_sumsq);
+                      ggml_build_forward_expand(gf, idxkv_topk_idx_sum);
+                      ggml_build_forward_expand(gf, idxkv_topk_idx_sumsq);
+                  }
               }
           }
           result = result ? ggml_concat(ctx, result, topk_tc, 1) : topk_tc;

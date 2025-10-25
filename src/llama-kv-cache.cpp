@@ -2028,6 +2028,14 @@ ggml_tensor * llama_kv_cache_context::get_k_indexer(ggml_context * ctx, int32_t 
     return kv->get_k_indexer(ctx, il, n_kv, sinfos[i_cur]);
 }
 
+ggml_tensor * llama_kv_cache_context::get_k_full(ggml_context * ctx, int32_t il) const {
+    return kv->get_k_full(ctx, il);
+}
+
+ggml_tensor * llama_kv_cache_context::get_v_full(ggml_context * ctx, int32_t il) const {
+    return kv->get_v_full(ctx, il);
+}
+
 ggml_tensor * llama_kv_cache::get_k_full(ggml_context * ctx, int32_t il) const {
     const int32_t ikv = map_layer_ids.at(il);
     auto * k = layers[ikv].k;

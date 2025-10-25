@@ -13904,8 +13904,9 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         // Use sparse attention with top-k tokens (KV-aware)
                         {
                             const auto * mctx_cur2 = inp_attn->mctx;
-                            ggml_tensor * Kcache = mctx_cur2->get_k(ctx0, il);
-                            ggml_tensor * Vcache = mctx_cur2->get_v(ctx0, il);
+                            // Use full-width KV cache for sparse MLA to match indexer indices
+                            ggml_tensor * Kcache = mctx_cur2->get_k_full(ctx0, il);
+                            ggml_tensor * Vcache = mctx_cur2->get_v_full(ctx0, il);
                             ggml_tensor * KQmask2 = inp_attn->get_kq_mask();
 
                             const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
@@ -14006,8 +14007,9 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         // Use sparse attention with top-k tokens (KV-aware)
                         {
                             const auto * mctx_cur2 = inp_attn->mctx;
-                            ggml_tensor * Kcache = mctx_cur2->get_k(ctx0, il);
-                            ggml_tensor * Vcache = mctx_cur2->get_v(ctx0, il);
+                            // Use full-width KV cache for sparse MLA to match indexer indices
+                            ggml_tensor * Kcache = mctx_cur2->get_k_full(ctx0, il);
+                            ggml_tensor * Vcache = mctx_cur2->get_v_full(ctx0, il);
                             ggml_tensor * KQmask2 = inp_attn->get_kq_mask();
 
                             const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
