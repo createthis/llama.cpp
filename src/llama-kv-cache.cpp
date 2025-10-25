@@ -2072,6 +2072,12 @@ ggml_tensor * llama_kv_cache::get_v_full(ggml_context * ctx, int32_t il) const {
             ggml_row_size(v->type, n_embd_v_gqa)*kv_size);
 }
 
+ggml_tensor * llama_kv_cache_context::get_k_indexer_full(ggml_context * ctx, int32_t il) const {
+    // Full-width indexer K view for DeepSeek V3.2
+    const auto & sinfo = sinfos[i_cur];
+    return kv->get_k_indexer_full(ctx, il, sinfo);
+}
+
 ggml_tensor * llama_kv_cache_context::cpy_k_indexer(ggml_context * ctx, ggml_tensor * kidx_cur, ggml_tensor * k_idxs, int32_t il) const {
     const auto & sinfo = sinfos[i_cur];
     return kv->cpy_k_indexer(ctx, kidx_cur, k_idxs, il, sinfo);

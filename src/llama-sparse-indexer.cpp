@@ -237,7 +237,7 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
 
     // Diagnostic: sample small windows of K indexer cache [D_index, N_kv]
     if (mctx) {
-        ggml_tensor * kidx_cache = mctx->get_k_indexer(const_cast<ggml_context*>(ctx), layer_idx);
+        ggml_tensor * kidx_cache = mctx->get_k_indexer_full(const_cast<ggml_context*>(ctx), layer_idx);
         if (kidx_cache) {
             const int64_t d0 = std::min<int64_t>(kidx_cache->ne[0], (int64_t)8);
             const int64_t c0 = std::min<int64_t>(kidx_cache->ne[1], (int64_t)8);
@@ -270,7 +270,7 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     idx_weights = ggml_mul(ctx, idx_weights, q_rms_2d);                               // [H, T]
 
     cb(idx_weights, "indexer_weights", layer_idx);
-    ggml_tensor * Kindexer_cache = mctx ? mctx->get_k_indexer(ctx, layer_idx)
+    ggml_tensor * Kindexer_cache = mctx ? mctx->get_k_indexer_full(ctx, layer_idx)
                                         : ggml_reshape_2d(ctx, Kindexer_cur, D_index, n_tokens);
     IndexerKVTriplet out{ q_indexer, Kindexer_cache, idx_weights };
     return out;
@@ -315,12 +315,13 @@ ggml_tensor * sparse_attn_indexer::build_kvaware_topk_indices(
         cb, gf);
     // Use full-width indexer K view only for DeepSeek V3.2
     if (model.arch == LLM_ARCH_DEEPSEEK3_2 && mctx) {
-        ggml_tensor * kidx_full = mctx->get_k_indexer(const_cast<ggml_context*>(ctx), layer_idx);
+        ggml_tensor * kidx_full = mctx->get_k_indexer_full(const_cast<ggml_context*>(ctx), layer_idx);
         if (kidx_full && kidx_full->ne[1] >= trip.k_indexer_cache->ne[1]) {
             trip.k_indexer_cache = kidx_full;
         }
     }
     ggml_tensor * Kindexer_cache = trip.k_indexer_cache;
+
     if (top_k <= 0) {
         top_k = std::max<int64_t>(64, std::min<int64_t>(1024, Kindexer_cache->ne[1]));
     }
