@@ -113,6 +113,9 @@ using std::function;
 
           ggml_tensor * k_sel_2d = ggml_reshape_2d(ctx, k_sel_4d, Dk, Hkv*top_k);
           ggml_tensor * v_sel_2d = ggml_reshape_2d(ctx, v_sel_4d, Dv, Hkv_v*top_k);
+          // CUDA matmul requires row-contiguous inputs
+          k_sel_2d = ggml_cont(ctx, k_sel_2d);
+
           // ensure contiguous [Hkv_v*top_k, Dv] without extra transpose memory when possible
           if (ggml_is_contiguous(k_sel_2d) && ggml_is_contiguous(v_sel_2d)) {
               v_sel_2d = ggml_view_2d(ctx, v_sel_2d, Hkv_v*top_k, Dv, v_sel_2d->nb[1], 0);
@@ -128,6 +131,8 @@ using std::function;
           size_t q_off = t * Hq * q_all_2d->nb[1];
           ggml_tensor * q_t_2d = ggml_view_2d(ctx, q_all_2d, Dq, Hq, q_all_2d->nb[1], q_off);
 
+          // Ensure RHS is contiguous for CUDA matmul
+          q_t_2d = ggml_cont(ctx, q_t_2d);
           ggml_tensor * scores_t = ggml_mul_mat(ctx, k_sel_2d, q_t_2d); // [Hkv*top_k, Hq]
           // debug marker: scores computed pre-scale
           printf("[SPARSE-DBG-MLA] t=%lld scores pre-scale\n", (long long) t);
@@ -191,6 +196,10 @@ using std::function;
           // Clamp infinities to large finite values to avoid NaNs in softmax when all entries are masked
           scores_t = ggml_clamp(ctx, scores_t, -1e30f, 1e30f);
           ggml_tensor * weights_t = ggml_soft_max(ctx, scores_t);
+          // Be conservative: ensure operands of second matmul are contiguous
+          weights_t = ggml_cont(ctx, weights_t);
+          v_sel_2d  = ggml_cont(ctx, v_sel_2d);
+
           if (t == 0 || t == T - 1) {
               cb(weights_t, "mla_weights_sample", -1);
           }
