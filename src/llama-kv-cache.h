@@ -333,6 +333,8 @@ public:
     //
 
     uint32_t get_n_kv() const;
+    uint32_t get_kv_size() const;
+
 
     bool is_arch_deepseek_v3_2() const;
 

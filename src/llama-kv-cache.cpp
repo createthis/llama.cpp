@@ -2073,6 +2073,10 @@ void llama_kv_cache_context::set_input_kq_mask_full_2d(ggml_tensor * dst, const 
     kv->set_input_kq_mask_full_2d(dst, ubatch, causal_attn);
 }
 
+uint32_t llama_kv_cache_context::get_kv_size() const {
+    return kv->get_size();
+}
+
 ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) const {
     return kv->get_k(ctx, il, n_kv, sinfos[i_cur]);
 }

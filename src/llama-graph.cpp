@@ -1520,7 +1520,7 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
         ggml_set_input(inp->self_kq_mask);
         // Full-width KV-aware 2D mask for indexer/sparse MLA (DeepSeek V3.2 only)
         if (mctx_cur->is_arch_deepseek_v3_2()) {
-            const auto kv_size_full = mctx_cur->get_n_kv();
+            const auto kv_size_full = mctx_cur->get_kv_size();
             inp->self_kq_mask_full_2d = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, kv_size_full, GGML_PAD(n_tokens, GGML_KQ_MASK_PAD));
             ggml_set_input(inp->self_kq_mask_full_2d);
         }

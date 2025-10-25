@@ -13912,6 +13912,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
                             top_k = env_topk ? std::max<int64_t>(1, atoll(env_topk)) : 1024;
                             top_k = std::min<int64_t>(top_k, (int64_t) Kcache->ne[2]);
+                            ggml_build_forward_expand(gf, KQmask2);
                             ggml_tensor * kvaware_indices = llama::sparse_attn_indexer::build_kvaware_topk_indices(
                                 ctx0, model, il, cur, n_tokens, mctx_cur2, inp_attn->get_k_idxs(), KQmask2, top_k,
                                 inp_pos, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,
@@ -14015,6 +14016,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
                             top_k = env_topk ? std::max<int64_t>(1, atoll(env_topk)) : 1024;
                             top_k = std::min<int64_t>(top_k, (int64_t) Kcache->ne[2]);
+                            ggml_build_forward_expand(gf, KQmask2);
                             ggml_tensor * kvaware_indices = llama::sparse_attn_indexer::build_kvaware_topk_indices(
                                 ctx0, model, il, cur, n_tokens, mctx_cur2, inp_attn->get_k_idxs(), KQmask2, top_k,
                                 inp_pos, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,
