@@ -2039,11 +2039,13 @@ ggml_tensor * llama_kv_cache_context::get_k_indexer(ggml_context * ctx, int32_t 
 }
 
 ggml_tensor * llama_kv_cache_context::get_k_full(ggml_context * ctx, int32_t il) const {
-    return kv->get_k_full(ctx, il);
+    const auto & sinfo = sinfos[i_cur];
+    return kv->get_k(ctx, il, kv->get_size(), sinfo);
 }
 
 ggml_tensor * llama_kv_cache_context::get_v_full(ggml_context * ctx, int32_t il) const {
-    return kv->get_v_full(ctx, il);
+    const auto & sinfo = sinfos[i_cur];
+    return kv->get_v(ctx, il, kv->get_size(), sinfo);
 }
 
 ggml_tensor * llama_kv_cache::get_k_full(ggml_context * ctx, int32_t il) const {
