@@ -133,6 +133,7 @@ using std::function;
           ggml_tensor * contrib  = ggml_mul(ctx, logits_act, w_bcast);   // [N_kv, H, Tc]
           // Sum over head dimension (ne1): permute to [H, N_kv, Tc] and sum rows
           ggml_tensor * contrib_perm = ggml_permute(ctx, contrib, 1, 0, 2, 3);
+          contrib_perm = ggml_cont(ctx, contrib_perm);
           ggml_tensor * sum_h = ggml_sum_rows(ctx, contrib_perm);        // [1, N_kv, Tc]
           scores_tc = ggml_reshape_2d(ctx, sum_h, N_kv, Tc);             // [N_kv, Tc]
 
