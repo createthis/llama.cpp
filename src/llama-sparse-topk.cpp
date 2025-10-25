@@ -83,7 +83,7 @@ using std::function;
           if (tmp_mask->ne[0] == N_kv && tmp_mask->ne[1] >= T) {
               mask2d = ggml_view_2d(ctx, tmp_mask, N_kv, T, tmp_mask->nb[1], 0);
           } else {
-              printf("[TOPK-INDEXER] kq_mask dims [%%lld,%%lld] mismatch N_kv=%%lld,T=%%lld; ignoring mask for indexer selection\n",
+              printf("[TOPK-INDEXER] kq_mask dims [%lld,%lld] mismatch N_kv=%lld,T=%lld; ignoring mask for indexer selection\n",
                      (long long) tmp_mask->ne[0], (long long) tmp_mask->ne[1], (long long) N_kv, (long long) T);
               fflush(stdout);
               mask2d = nullptr;
