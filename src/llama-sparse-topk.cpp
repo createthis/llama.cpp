@@ -151,6 +151,11 @@ using std::function;
           // Debug (cb): per-tile scalar sums (no deref)
           if (dbg) {
               ggml_tensor * idxkv_scores_sum = ggml_sum(ctx, scores_tc);
+              // Safe K-scale proxy application after head reduction
+              // Broadcast [N_kv, 1] -> [N_kv, Tc] using scores_tc as the target shape
+              ggml_tensor * k_scale_bcast = ggml_repeat(ctx, k_scale_2d, scores_tc);
+              scores_tc = ggml_mul(ctx, scores_tc, k_scale_bcast);
+
               ggml_tensor * idxkv_scores_ssq = ggml_sum(ctx, ggml_sqr(ctx, scores_tc));
               ggml_tensor * idxkv_scores_post_abs_sum = nullptr;
               if (t0 == 0) {
