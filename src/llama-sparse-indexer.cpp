@@ -233,9 +233,9 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     idx_weights = ggml_scale(ctx, idx_weights, 1.0f / sqrtf((float) H_index));
     idx_weights = ggml_scale(ctx, idx_weights, 1.0f / sqrtf((float) D_index));
 
-    // Broadcast q_rms [1,H,T] to [H,T] and multiply
-    ggml_tensor * q_rms_2d = ggml_reshape_2d(ctx, q_rms, H_index, n_tokens);          // [H, T]
-    idx_weights = ggml_mul(ctx, idx_weights, q_rms_2d);                               // [H, T]
+    // Broadcast q_scale proxy [1,H,T] to [H,T] and multiply
+    ggml_tensor * q_scale_proxy = ggml_reshape_2d(ctx, q_rms, H_index, n_tokens);     // [H, T]
+    idx_weights = ggml_mul(ctx, idx_weights, q_scale_proxy);                          // [H, T]
 
     cb(idx_weights, "indexer_weights", layer_idx);
     ggml_tensor * Kindexer_cache = mctx ? mctx->get_k_indexer_full(ctx, layer_idx)

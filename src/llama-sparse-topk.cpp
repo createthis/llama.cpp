@@ -107,6 +107,15 @@ using std::function;
           fflush(stdout);
       }
 
+      // K-scale proxy: RMS over D for each KV column
+      ggml_tensor * k_sqr = ggml_sqr(ctx, k_indexer);                  // [D, N_kv]
+      ggml_tensor * k_sum = ggml_sum_rows(ctx, k_sqr);                  // [1, N_kv]
+      ggml_tensor * k_mean = ggml_scale(ctx, k_sum, 1.0f / (float) D);  // [1, N_kv]
+      ggml_tensor * k_scale_vec = ggml_sqrt(ctx, k_mean);               // [1, N_kv]
+      ggml_tensor * k_scale_2d = ggml_transpose(ctx, k_scale_vec);      // [N_kv, 1]
+      k_scale_2d = ggml_cont(ctx, k_scale_2d);
+      cb(k_scale_2d, "idxkv_k_scale_proxy", -1);
+
       ggml_tensor * result = nullptr; // [k, T]
       for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {
           const int64_t Tc = std::min<int64_t>(TILE_T, T - t0);
@@ -127,6 +136,7 @@ using std::function;
           ggml_tensor * logits_act  = ggml_relu(ctx, logits_resh);
           // Weights slice [H, Tc] and broadcast-mul, then sum over H → [N_kv, Tc]
           ggml_tensor * w_slice = ggml_view_2d(ctx, weights, H, Tc, weights->nb[1], t0*weights->nb[1]);
+
           // reshape to [1, H, Tc] so it can broadcast across N_kv
           ggml_tensor * w3 = ggml_reshape_3d(ctx, w_slice, 1, H, Tc);
           ggml_tensor * w_bcast = ggml_repeat(ctx, w3, logits_act);
