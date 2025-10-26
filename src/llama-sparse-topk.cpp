@@ -193,6 +193,9 @@ using std::function;
                   fflush(stdout);
               }
               scores_tc = ggml_add(ctx, scores_tc, mask_tc);
+              // Clamp after mask to avoid inf in diagnostics and stabilize top-k
+              scores_tc = ggml_clamp(ctx, scores_tc, -1e30f, 1e30f);
+
               if (t0 == 0) {
                   ggml_tensor * idxkv_scores_post_mask_abs_sum = ggml_sum(ctx, ggml_abs(ctx, scores_tc));
                   cb(idxkv_scores_post_mask_abs_sum, "idxkv_scores_post_mask_abs_sum", -1);
