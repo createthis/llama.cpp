@@ -1399,7 +1399,8 @@ void llama_kv_cache::set_input_kq_mask_full_2d(ggml_tensor * dst, const llama_ub
 
             // Row major: ne[0] = kv_size, ne[1] = T_pad
             // offset = row + col*row_stride
-            data[j + i * kv_size] = hparams.use_alibi ? -std::abs(p0 - p1) : 0.0f;
+            // validity-only mask for top-k selection: 0.0f for valid entries
+            data[j + i * kv_size] = 0.0f;
         }
     }
 }
