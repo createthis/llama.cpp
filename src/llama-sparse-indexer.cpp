@@ -61,7 +61,7 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     ggml_tensor * K_centered = ggml_sub(ctx, K3d, K_mean_rep);                     // [D,1,T]
     ggml_tensor * K_var = ggml_sum_rows(ctx, ggml_sqr(ctx, K_centered));           // [1,1,T]
     K_var = ggml_scale(ctx, K_var, 1.0f / (float) D_index);                        // [1,1,T]
-    ggml_tensor * K_var_eps = ggml_clamp(ctx, K_var, 1e-5f, 1e9f);                 // [1,1,T]
+    ggml_tensor * K_var_eps = ggml_clamp(ctx, K_var, 1e-6f, 1e9f);                 // [1,1,T]
     ggml_tensor * K_std = ggml_sqrt(ctx, K_var_eps);                                // [1,1,T]
     ggml_tensor * K_std_rep = ggml_repeat(ctx, K_std, K_centered);                  // [D,1,T]
     ggml_tensor * K_normed = ggml_div(ctx, K_centered, K_std_rep);                  // [D,1,T]
