@@ -80,18 +80,18 @@ using std::function;
           }
       }
 
-      ggml_tensor * mask2d = nullptr;
+      ggml_tensor * mask_full = nullptr;
       if (kq_mask) {
           cb(kq_mask, "idxkv_kq_mask", -1);
           ggml_tensor * tmp_mask = ggml_cont(ctx, kq_mask);
           cb(tmp_mask, "idxkv_mask2d", -1);
           if (tmp_mask->ne[0] == N_kv && tmp_mask->ne[1] >= T) {
-              mask2d = ggml_view_2d(ctx, tmp_mask, N_kv, T, tmp_mask->nb[1], 0);
+              mask_full = tmp_mask; // full-width [N_kv, PAD(T)] for slicing per tile
           } else {
               printf("[TOPK-INDEXER] kq_mask dims [%lld,%lld] mismatch N_kv=%lld,T=%lld; ignoring mask for indexer selection\n",
                      (long long) tmp_mask->ne[0], (long long) tmp_mask->ne[1], (long long) N_kv, (long long) T);
               fflush(stdout);
-              mask2d = nullptr;
+              mask_full = nullptr;
           }
       }
 
@@ -174,8 +174,8 @@ using std::function;
           scores_tc = ggml_cont(ctx, scores_tc);
 
           // mask tile if available
-          if (mask2d) {
-              ggml_tensor * mask_tc = ggml_view_2d(ctx, mask2d, N_kv, Tc, mask2d->nb[1], t0 * mask2d->nb[1]);
+          if (mask_full) {
+              ggml_tensor * mask_tc = ggml_view_2d(ctx, mask_full, N_kv, Tc, mask_full->nb[1], t0 * mask_full->nb[1]);
               mask_tc = ggml_cont(ctx, mask_tc);
               if (mask_tc->type != scores_tc->type) {
                   mask_tc = ggml_cast(ctx, mask_tc, scores_tc->type);
