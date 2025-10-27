@@ -116,12 +116,8 @@ using std::function;
           // CUDA matmul requires row-contiguous inputs
           k_sel_2d = ggml_cont(ctx, k_sel_2d);
 
-          // ensure contiguous [Hkv_v*top_k, Dv] without extra transpose memory when possible
-          if (ggml_is_contiguous(k_sel_2d) && ggml_is_contiguous(v_sel_2d)) {
-              v_sel_2d = ggml_view_2d(ctx, v_sel_2d, Hkv_v*top_k, Dv, v_sel_2d->nb[1], 0);
-          } else {
-              v_sel_2d = ggml_cont(ctx, ggml_transpose(ctx, v_sel_2d));
-          }
+          // ensure contiguous [Hkv_v*top_k, Dv] with a real transpose to avoid stride/view aliasing
+          v_sel_2d = ggml_cont(ctx, ggml_transpose(ctx, v_sel_2d));
           // Note: cannot read tensor->data during graph build; only log shapes here to avoid invalid dereference
           if (t < 2) {
               printf("[SPARSE-DBG-INDICES] t=%lld: top_k=%lld N_kv=%lld\n",
