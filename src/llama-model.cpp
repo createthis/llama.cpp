@@ -13928,7 +13928,6 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                 ctx0, model, il, cur, n_tokens, mctx_cur2, inp_attn->get_k_idxs(), KQmask2, top_k,
                                 inp_pos, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,
                                 cb_wrapper, gf, sched, backend_cpu);
-                            ggml_backend_sched_set_tensor_backend(sched, kvaware_indices, backend_cpu);
                             cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
                                 ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, cb_wrapper);
                             // Sanity checks for MLA sparse attention output vs expected V-dim (kv_lora_rank)
@@ -14039,7 +14038,6 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                 ctx0, model, il, cur, n_tokens, mctx_cur2, inp_attn->get_k_idxs(), KQmask2, top_k,
                                 inp_pos, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,
                                 cb_wrapper, gf, sched, backend_cpu);
-                            ggml_backend_sched_set_tensor_backend(sched, kvaware_indices, backend_cpu);
                             cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
                                 ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, cb_wrapper);
                             // Sanity checks for MHA sparse attention output vs expected V-dim (n_embd_head_v)

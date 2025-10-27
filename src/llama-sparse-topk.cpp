@@ -96,7 +96,7 @@ using std::function;
       }
 
       const int64_t k = std::min<int64_t>(top_k, N_kv);
-      int64_t TILE_T = 32;
+      int64_t TILE_T = 128; // larger default tile improves GEMM utilization; overridable via env
       if (const char *env = getenv("LLAMA_SPARSE_TOPK_TILE_T")) {
           long v = strtol(env, nullptr, 10);
           if (v > 0 && v <= 4096) TILE_T = v;
@@ -267,7 +267,7 @@ using std::function;
           ggml_build_forward_expand(gf, result);
       }
       // Also provide a float32 view for eval-callback visibility on platforms that skip integer dumps
-      if (result) {
+      if (dbg && result) {
           ggml_tensor * result_f32 = ggml_cast(ctx, result, GGML_TYPE_F32);
           cb(result_f32, "idxkv_topk_indices_k_T_f32", -1);
           if (gf) {
@@ -280,15 +280,7 @@ using std::function;
                  result->ne[0], result->ne[1], result->ne[2], result->ne[3], (int)result->type);
           fflush(stdout);
       }
-      // prefer CPU backend for the final indices tensor using scheduler API
-      if (sched && backend_cpu) {
-          ggml_backend_sched_set_tensor_backend(sched, result, backend_cpu);
-          if (dbg) {
-              const char * bname2 = ggml_backend_name(backend_cpu);
-              printf("[TOPK] assigned backend for kvaware_topk_indices: %s (non-null=%d)\n", bname2 ? bname2 : "null", backend_cpu ? 1 : 0);
-              fflush(stdout);
-          }
-      }
+      // Keep indices on device by default to avoid host syncs during get_rows
       return result;
   }
 
