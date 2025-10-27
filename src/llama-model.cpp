@@ -13945,10 +13945,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             }
                         }
 
-                        if (!cparams.offload_kqv) {
-                            /* sparse: follow dense behavior by placing on CPU when not offloading */
-                        ggml_backend_sched_set_tensor_backend(sched, cur, backend_cpu);
-                        }
+                        /* keep sparse attention output on device to avoid backend hops */
 
                         // Project kv_lora_rank -> n_embd_head_v per head using wv_b and flatten heads before WO
                         ggml_tensor * cur_perm = ggml_permute(ctx0, cur, 0, 2, 1, 3); // [kv_lora_rank, n_tokens, n_head]
@@ -14047,10 +14044,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             GGML_ASSERT(cur->ne[0] == (int64_t) n_embd_head_v);
                         }
 
-                        if (!cparams.offload_kqv) {
-                            /* sparse: follow dense behavior by placing on CPU when not offloading */
-                        ggml_backend_sched_set_tensor_backend(sched, cur, backend_cpu);
-                        }
+                        /* keep sparse attention output on device to avoid backend hops */
 
                         // Flatten heads before WO
                         ggml_tensor * cur_perm2 = ggml_permute(ctx0, cur, 0, 2, 1, 3); // [n_embd_head_v, n_tokens, n_head]
