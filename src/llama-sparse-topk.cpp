@@ -131,21 +131,20 @@ using std::function;
           if (dbg && t0 == 0) {
               cb(logits_all, "idxkv_logits_all", -1);
           }
-          // Reshape and apply ReLU: [N_kv, H, Tc]
-          ggml_tensor * logits_resh = ggml_reshape_3d(ctx, logits_all, N_kv, H, Tc);
-          ggml_tensor * logits_act  = ggml_relu(ctx, logits_resh);
-          // Weights slice [H, Tc] and broadcast-mul, then sum over H → [N_kv, Tc]
-          ggml_tensor * w_slice = ggml_view_2d(ctx, weights, H, Tc, weights->nb[1], t0*weights->nb[1]);
-
-          // reshape to [1, H, Tc] so it can broadcast across N_kv
-          ggml_tensor * w3 = ggml_reshape_3d(ctx, w_slice, 1, H, Tc);
-          ggml_tensor * w_bcast = ggml_repeat(ctx, w3, logits_act);
-          ggml_tensor * contrib  = ggml_mul(ctx, logits_act, w_bcast);   // [N_kv, H, Tc]
-          // Sum over head dimension (ne1): permute to [H, N_kv, Tc] and sum rows
-          ggml_tensor * contrib_perm = ggml_permute(ctx, contrib, 1, 0, 2, 3);
-          contrib_perm = ggml_cont(ctx, contrib_perm);
-          ggml_tensor * sum_h = ggml_sum_rows(ctx, contrib_perm);        // [1, N_kv, Tc]
-          scores_tc = ggml_reshape_2d(ctx, sum_h, N_kv, Tc);             // [N_kv, Tc]
+          // Streaming per-head accumulation to avoid [N_kv, H, Tc] temporaries
+          for (int64_t h = 0; h < H; ++h) {
+              size_t off_h = (size_t) h * (size_t) Tc * logits_all->nb[1];
+              ggml_tensor * logits_h = ggml_view_2d(ctx, logits_all, N_kv, Tc, logits_all->nb[1], off_h);
+              ggml_tensor * logits_h_act = ggml_relu(ctx, logits_h);
+              size_t w_off = (size_t) h * weights->nb[0];
+              ggml_tensor * w_row = ggml_view_2d(ctx, weights, 1, Tc, weights->nb[1], t0*weights->nb[1] + w_off);
+              if (w_row->type != logits_h_act->type) {
+                  w_row = ggml_cast(ctx, w_row, logits_h_act->type);
+              }
+              ggml_tensor * w_bcast = ggml_repeat(ctx, w_row, logits_h_act); // [N_kv, Tc]
+              ggml_tensor * contrib = ggml_mul(ctx, logits_h_act, w_bcast);  // [N_kv, Tc]
+              scores_tc = scores_tc ? ggml_add(ctx, scores_tc, contrib) : contrib;
+          }
 
 
           // Safe K-scale proxy application after head reduction (always apply)
