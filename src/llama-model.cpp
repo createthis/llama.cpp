@@ -13914,7 +13914,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_build_forward_expand(gf, KQmask2);
                             {
                                 int64_t used_kv = mctx_cur2->get_n_kv();
-                                int64_t n_kv_cache = (int64_t) Kcache->ne[1];
+                                int64_t n_kv_cache = (int64_t) Kcache->ne[2];
                                 ggml_tensor * Kindexer_full = mctx_cur2->get_k_indexer_full(ctx0, il);
                                 int64_t n_kv_indexer = Kindexer_full ? (int64_t) Kindexer_full->ne[1] : n_kv_cache;
                                 int64_t available_kv = std::min(used_kv, std::min(n_kv_cache, n_kv_indexer));
@@ -14026,7 +14026,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_build_forward_expand(gf, KQmask2);
                             {
                                 int64_t used_kv = mctx_cur2->get_n_kv();
-                                int64_t n_kv_cache = (int64_t) Kcache->ne[1];
+                                int64_t n_kv_cache = (int64_t) Kcache->ne[2];
                                 ggml_tensor * Kindexer_full = mctx_cur2->get_k_indexer_full(ctx0, il);
                                 int64_t n_kv_indexer = Kindexer_full ? (int64_t) Kindexer_full->ne[1] : n_kv_cache;
                                 int64_t available_kv = std::min(used_kv, std::min(n_kv_cache, n_kv_indexer));
