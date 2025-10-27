@@ -49,6 +49,10 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     float beta_slow,
     const function<void(ggml_tensor *, const char *, int)> & cb,
     ggml_cgraph * gf) {
+
+    const char * ENV_SPARSE_DEBUG = getenv("LLAMA_SPARSE_DEBUG");
+    const bool dbg = (ENV_SPARSE_DEBUG && atoi(ENV_SPARSE_DEBUG) != 0);
+
     // Compute Indexer K for current tokens and (optionally) write to cache
     ggml_tensor * Kindexer_cur = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_wk, cur);
 
@@ -117,8 +121,10 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
             ggml_tensor * gamma_q = model.layers[layer_idx].attn_q_a_norm;
             ggml_tensor * gamma_q_r = ggml_repeat(ctx, gamma_q, qsrc);
             qsrc = ggml_mul(ctx, qsrc, gamma_q_r);
-            printf("[SPARSE-IDX-Q] L%d: applied attn_q_a_norm to indexer qsrc\n", layer_idx);
-            fflush(stdout);
+            if (dbg) {
+                printf("[SPARSE-IDX-Q] L%d: applied attn_q_a_norm to indexer qsrc\n", layer_idx);
+                fflush(stdout);
+            }
         } else {
             printf("[SPARSE-IDX-Q][WARN] L%d: attn_q_a_norm not found; using plain RMSNorm for indexer qsrc\n", layer_idx);
             fflush(stdout);
@@ -127,19 +133,21 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
         qsrc = ggml_norm(ctx, cur, 1e-5f);
     }
 
-    // Logging and sanity checks for potential lite-config mismatch
-    const int64_t qsrc_in_dim = qsrc ? qsrc->ne[0] : -1;
-    const int64_t wq_b_in_dim = model.layers[layer_idx].attn_indexer_wq_b ? model.layers[layer_idx].attn_indexer_wq_b->ne[0] : -1;
-    const int64_t wq_b_out_dim = model.layers[layer_idx].attn_indexer_wq_b ? model.layers[layer_idx].attn_indexer_wq_b->ne[1] : -1;
-    printf("[SPARSE-IDX-Q] L%d: has_wq_a=%d qsrc_in=%lld wq_b_in=%lld wq_b_out=%lld\n",
-           layer_idx, (int)has_wq_a, (long long)qsrc_in_dim, (long long)wq_b_in_dim, (long long)wq_b_out_dim);
-    fflush(stdout);
+    if (dbg) {
+        // Logging and sanity checks for potential lite-config mismatch
+        const int64_t qsrc_in_dim = qsrc ? qsrc->ne[0] : -1;
+        const int64_t wq_b_in_dim = model.layers[layer_idx].attn_indexer_wq_b ? model.layers[layer_idx].attn_indexer_wq_b->ne[0] : -1;
+        const int64_t wq_b_out_dim = model.layers[layer_idx].attn_indexer_wq_b ? model.layers[layer_idx].attn_indexer_wq_b->ne[1] : -1;
+        printf("[SPARSE-IDX-Q] L%d: has_wq_a=%d qsrc_in=%lld wq_b_in=%lld wq_b_out=%lld\n",
+               layer_idx, (int)has_wq_a, (long long)qsrc_in_dim, (long long)wq_b_in_dim, (long long)wq_b_out_dim);
+        fflush(stdout);
 
-    if (model.layers[layer_idx].attn_indexer_wq_b && qsrc) {
-        if (wq_b_in_dim != qsrc_in_dim) {
-            printf("[SPARSE-IDX-Q][WARN] L%d: attn_indexer_wq_b input dim (%lld) != qsrc dim (%lld). Lite config?\n",
-                   layer_idx, (long long) wq_b_in_dim, (long long) qsrc_in_dim);
-            fflush(stdout);
+        if (model.layers[layer_idx].attn_indexer_wq_b && qsrc) {
+            if (wq_b_in_dim != qsrc_in_dim) {
+                printf("[SPARSE-IDX-Q][WARN] L%d: attn_indexer_wq_b input dim (%lld) != qsrc dim (%lld). Lite config?\n",
+                       layer_idx, (long long) wq_b_in_dim, (long long) qsrc_in_dim);
+                fflush(stdout);
+            }
         }
     }
 
@@ -196,7 +204,7 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     ggml_tensor * q_sum = ggml_sum_rows(ctx, q_sqr);                                  // [1, H, T]
     ggml_tensor * q_mean= ggml_scale(ctx, q_sum, 1.0f / (float) D_index);             // [1, H, T]
     ggml_tensor * q_rms = ggml_sqrt(ctx, q_mean);                                     // [1, H, T]
-    printf("[SPARSE-IDX-QRMS] L%d: computed q_rms over D_index; D_index=%" PRId64 " H=%" PRId64 " T=%" PRId64 "\n",
+    if (dbg) printf("[SPARSE-IDX-QRMS] L%d: computed q_rms over D_index; D_index=%" PRId64 " H=%" PRId64 " T=%" PRId64 "\n",
            layer_idx, D_index, H_index, n_tokens);
 
     // Build base weights from projection on cur
@@ -269,15 +277,22 @@ ggml_tensor * sparse_attn_indexer::build_kvaware_topk_indices(
     ggml_backend_sched_t sched,
     ggml_backend_t backend_cpu)
 {
-    printf("=== SPARSE INDEXER: build_kvaware_topk_indices L%d ===\n", layer_idx);
-    size_t initial_mem = ggml_used_mem(ctx);
-    printf("Initial memory usage: %s\n", format_memory_size(initial_mem).c_str());
-    fflush(stdout);
-    // Dump indexer dims and sanity-check shapes
-    const int64_t D_index_dbg = model.layers[layer_idx].attn_indexer_wk->ne[1];
-    const int64_t H_index_dbg = model.layers[layer_idx].attn_indexer_wq_b->ne[1] / D_index_dbg;
-    printf("[SPARSE-DBG-IDX] L%d: D_index=%" PRId64 " H_index=%" PRId64 " n_tokens=%" PRId64 "\n", layer_idx, (int64_t) D_index_dbg, (int64_t) H_index_dbg, (int64_t) n_tokens);
-    fflush(stdout);
+    const char * ENV_SPARSE_DEBUG = getenv("LLAMA_SPARSE_DEBUG");
+    const bool dbg = (ENV_SPARSE_DEBUG && atoi(ENV_SPARSE_DEBUG) != 0);
+
+    size_t initial_mem = 0;
+    if (dbg) {
+        printf("=== SPARSE INDEXER: build_kvaware_topk_indices L%d ===\n", layer_idx);
+        initial_mem = ggml_used_mem(ctx);
+        printf("Initial memory usage: %s\n", format_memory_size(initial_mem).c_str());
+        fflush(stdout);
+
+        // Dump indexer dims and sanity-check shapes
+        const int64_t D_index_dbg = model.layers[layer_idx].attn_indexer_wk->ne[1];
+        const int64_t H_index_dbg = model.layers[layer_idx].attn_indexer_wq_b->ne[1] / D_index_dbg;
+        printf("[SPARSE-DBG-IDX] L%d: D_index=%" PRId64 " H_index=%" PRId64 " n_tokens=%" PRId64 "\n", layer_idx, (int64_t) D_index_dbg, (int64_t) H_index_dbg, (int64_t) n_tokens);
+        fflush(stdout);
+    }
     IndexerKVTriplet trip = compute_indexer_triplet(ctx, model, layer_idx, cur, n_tokens, mctx, k_idxs,
         inp_pos, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,
         cb, gf);
@@ -295,11 +310,13 @@ ggml_tensor * sparse_attn_indexer::build_kvaware_topk_indices(
     }
     ggml_tensor * kvaware_indices = llama::sparse_attn_topk::select_topk_tokens_indexer_kvaware(
         ctx, trip.q_indexer, Kindexer_cache, trip.idx_weights, kq_mask, top_k, cb, gf, sched, backend_cpu);
-    printf("SPARSE INDEXER: Final topk_indices [k,T]=[%" PRId64 ", %" PRId64 "]\n",
-           kvaware_indices->ne[0], kvaware_indices->ne[1]);
-    printf("Final memory usage: %s (total delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(),
-           format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());
-    fflush(stdout);
+    if (dbg) {
+        printf("SPARSE INDEXER: Final topk_indices [k,T]=[%" PRId64 ", %" PRId64 "]\n",
+               kvaware_indices->ne[0], kvaware_indices->ne[1]);
+        printf("Final memory usage: %s (total delta: %s)\n", format_memory_size(ggml_used_mem(ctx)).c_str(),
+               format_memory_size(ggml_used_mem(ctx) - initial_mem).c_str());
+        fflush(stdout);
+    }
     return kvaware_indices;
 }
 

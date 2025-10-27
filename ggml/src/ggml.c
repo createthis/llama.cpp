@@ -3401,10 +3401,12 @@ struct ggml_tensor * ggml_reshape_2d(
         int64_t               ne0,
         int64_t               ne1) {
     GGML_ASSERT(ggml_is_contiguous(a));
+    /*
     printf("ggml_reshape_2d: a=[%5" PRId64 ", %5" PRId64 "], ne0=%5" PRId64 ", ne1=%5" PRId64 "\n",
                 a->ne[0], a->ne[1],
                 ne0, ne1);
     fflush(stdout);
+    */
     GGML_ASSERT(ggml_nelements(a) == ne0*ne1);
 
     const int64_t ne[2] = { ne0, ne1 };
@@ -3424,10 +3426,12 @@ struct ggml_tensor * ggml_reshape_3d(
         int64_t               ne1,
         int64_t               ne2) {
     GGML_ASSERT(ggml_is_contiguous(a));
+    /*
     printf("ggml_reshape_3d: a=[%5" PRId64 ", %5" PRId64 ", %5" PRId64 "], ne0=%5" PRId64 ", ne1=%5" PRId64 ", ne2=%5" PRId64 "\n",
                 a->ne[0], a->ne[1], a->ne[2],
                 ne0, ne1, ne2);
     fflush(stdout);
+    */
     GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2);
 
     const int64_t ne[3] = { ne0, ne1, ne2 };

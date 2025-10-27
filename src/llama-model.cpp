@@ -6578,7 +6578,7 @@ struct llm_build_llama : public llm_graph_context {
                 inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
             }
 
-            ggml_tensor * ffn_inp = llama_add_dbg(ctx0, cur, inpSA, "ffn_inp", il);
+            ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
             cb(ffn_inp, "ffn_inp", il);
 
             // feed-forward network (non-MoE)
@@ -6753,7 +6753,7 @@ struct llm_build_llama_iswa : public llm_graph_context {
                 inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
             }
 
-            ggml_tensor * ffn_inp = llama_add_dbg(ctx0, cur, inpSA, "ffn_inp", il);
+            ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
             cb(ffn_inp, "ffn_inp", il);
 
             // feed-forward network (non-MoE)
@@ -13730,6 +13730,9 @@ struct llm_build_deepseek2 : public llm_graph_context {
 
 struct llm_build_deepseek3_2 : public llm_graph_context {
     llm_build_deepseek3_2(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
+        const char * ENV_SPARSE_DEBUG = getenv("LLAMA_SPARSE_DEBUG");
+        const bool dbg = (ENV_SPARSE_DEBUG && atoi(ENV_SPARSE_DEBUG) != 0);
+
         bool is_lite = (hparams.n_layer == 27);
 
         const bool is_mla = (hparams.n_embd_head_k_mla != 0 && hparams.n_embd_head_v_mla != 0);
@@ -13749,7 +13752,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
         const float kq_scale = 1.0f*mscale*mscale/sqrtf(float(n_embd_head_k));
         const float attn_factor = 1.0f / (1.0f + 0.1f * logf(1.0f / freq_scale));
 
-        printf("[deepseek3_2] layer init: attn_factor=%g mscale=%g dense_kq_scale=%g (n_embd_head_k=%lld)\n", attn_factor, mscale, kq_scale, (long long) n_embd_head_k);
+        if (dbg) printf("[deepseek3_2] layer init: attn_factor=%g mscale=%g dense_kq_scale=%g (n_embd_head_k=%lld)\n", attn_factor, mscale, kq_scale, (long long) n_embd_head_k);
 
         ggml_tensor * cur;
         ggml_tensor * inpL;
@@ -13932,7 +13935,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             if (cur->ne[0] != (int64_t) kv_lora_rank) {
                                 printf("[SPARSE-DBG-MLA] L%d: sparse attn out Dv=%" PRId64 " but kv_lora_rank=%u (mismatch)\n", il, cur->ne[0], kv_lora_rank);
                             }
-                            if (model.layers[il].wv_b) {
+                            if (dbg && model.layers[il].wv_b) {
                                 printf("[SPARSE-DBG-MLA] L%d: wv_b dims=[%" PRId64 ", %" PRId64 "] expected=[%u, %" PRId64 "]\n",
                                        il, (int64_t) model.layers[il].wv_b->ne[0], (int64_t) model.layers[il].wv_b->ne[1], kv_lora_rank, (int64_t) n_embd_head_v);
                             }
@@ -13967,7 +13970,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         cb(cur, "sparse_attn_out", il);
 
                         // Log that we're using sparse attention
-                        LLAMA_LOG_INFO("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d\n",
+                        LLAMA_LOG_DEBUG("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d\n",
                                       (int)top_k, il);
                     } else {
                         // note: MLA with the absorption optimzation converts into MQA (ie: GQA with 1 group)
@@ -14066,7 +14069,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         cur = ggml_cont(ctx0, cur);
 
                         // Log that we're using sparse attention
-                        LLAMA_LOG_INFO("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d\n",
+                        LLAMA_LOG_DEBUG("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d\n",
                                       (int)top_k, il);
                     } else {
                         // note: MLA without the absorption optimization converts into MHA (ie: GQA with full n_head groups)
@@ -14083,7 +14086,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                 inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
             }
 
-            ggml_tensor * ffn_inp = llama_add_dbg(ctx0, cur, inpSA, "ffn_inp", il);
+            ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
             cb(ffn_inp, "ffn_inp", il);
 
             cur = build_norm(ffn_inp,

@@ -186,7 +186,7 @@ using std::function;
               // Ensure both operands have row-contiguous layout for safe broadcast add
               GGML_ASSERT(scores_tc->nb[0] == (size_t) ggml_type_size(scores_tc->type));
               GGML_ASSERT(mask_tc->nb[0]   == (size_t) ggml_type_size(mask_tc->type));
-              if (t0 == 0) {
+              if (dbg && t0 == 0) {
                   printf("[TOPK-INDEXER-DBG] (INDEXER) add mask: scores_tc ne=[%" PRId64 ",%" PRId64 "] nb=[%zu,%zu] type=%d | mask_tc ne=[%" PRId64 ",%" PRId64 "] nb=[%zu,%zu] type=%d\n",
                          scores_tc->ne[0], scores_tc->ne[1], scores_tc->nb[0], scores_tc->nb[1], (int) scores_tc->type,
                          mask_tc->ne[0], mask_tc->ne[1], mask_tc->nb[0], mask_tc->nb[1], (int) mask_tc->type);
@@ -275,7 +275,7 @@ using std::function;
               ggml_build_forward_expand(gf, result_f32);
           }
       }
-      if (result) {
+      if (dbg && result) {
           printf("SPARSE TOPK KV-AWARE (INDEXER): result topk_indices dims=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] type=%d\n",
                  result->ne[0], result->ne[1], result->ne[2], result->ne[3], (int)result->type);
           fflush(stdout);
@@ -283,9 +283,11 @@ using std::function;
       // prefer CPU backend for the final indices tensor using scheduler API
       if (sched && backend_cpu) {
           ggml_backend_sched_set_tensor_backend(sched, result, backend_cpu);
-          const char * bname2 = ggml_backend_name(backend_cpu);
-          printf("[TOPK] assigned backend for kvaware_topk_indices: %s (non-null=%d)\n", bname2 ? bname2 : "null", backend_cpu ? 1 : 0);
-          fflush(stdout);
+          if (dbg) {
+              const char * bname2 = ggml_backend_name(backend_cpu);
+              printf("[TOPK] assigned backend for kvaware_topk_indices: %s (non-null=%d)\n", bname2 ? bname2 : "null", backend_cpu ? 1 : 0);
+              fflush(stdout);
+          }
       }
       return result;
   }

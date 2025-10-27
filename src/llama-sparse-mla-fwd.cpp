@@ -5,21 +5,6 @@
 #include <cstdio>
 #include <cinttypes>
 
-// Helper function to get memory usage in human-readable format
-static std::string format_memory_size(size_t bytes) {
-    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-    size_t unit_idx = 0;
-    double size = bytes;
-
-    while (size >= 1024.0 && unit_idx < 4) {
-        size /= 1024.0;
-        unit_idx++;
-    }
-
-    char buffer[32];
-    snprintf(buffer, sizeof(buffer), "%.2f %s", size, units[unit_idx]);
-    return std::string(buffer);
-}
 
 namespace llama {
 
@@ -46,6 +31,9 @@ using std::function;
       int64_t Dv   = v_cache->ne[0];
       int64_t Hkv_v= v_cache->ne[1];
       int64_t N_kv_v= v_cache->ne[2];
+
+      const char * ENV_SPARSE_DEBUG = getenv("LLAMA_SPARSE_DEBUG");
+      const bool dbg = (ENV_SPARSE_DEBUG && atoi(ENV_SPARSE_DEBUG) != 0);
 
       // Normalize V layout: expected effective layout is [Dv, Hkv_v, N_kv]
       // Some builds return V cache with transposed layout [N_kv, Hkv_v, Dv, ns].
@@ -82,20 +70,22 @@ using std::function;
       const int64_t Hq   = q_cur->ne[1];
       const int64_t T    = q_cur->ne[2];
 
-      cb(k_cache, "kvaware_k_cache", -1);
-      cb(v_cache, "kvaware_v_cache", -1);
-      cb(q_cur,   "kvaware_q_cur",   -1);
-      cb(topk_indices, "kvaware_topk_indices", -1);
-      printf("[SPARSE-MLA] Dq=%lld Hq=%lld T=%lld Dk=%lld Hkv=%lld N_kv=%lld Dv=%lld Hkv_v=%lld\n",
-             (long long) Dq, (long long) Hq, (long long) T,
-             (long long) Dk, (long long) Hkv, (long long) N_kv,
-             (long long) Dv, (long long) Hkv_v);
-      fflush(stdout);
+      if (dbg) {
+          cb(k_cache, "kvaware_k_cache", -1);
+          cb(v_cache, "kvaware_v_cache", -1);
+          cb(q_cur,   "kvaware_q_cur",   -1);
+          cb(topk_indices, "kvaware_topk_indices", -1);
+          printf("[SPARSE-MLA] Dq=%lld Hq=%lld T=%lld Dk=%lld Hkv=%lld N_kv=%lld Dv=%lld Hkv_v=%lld\n",
+                 (long long) Dq, (long long) Hq, (long long) T,
+                 (long long) Dk, (long long) Hkv, (long long) N_kv,
+                 (long long) Dv, (long long) Hkv_v);
+          fflush(stdout);
 
-      printf("SPARSE MLA KV-AWARE DBG: Q=[%" PRId64 ",%" PRId64 ",%" PRId64 "] K=[%" PRId64 ",%" PRId64 ",%" PRId64 "] V=[%" PRId64 ",%" PRId64 ",%" PRId64 "] topk=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "]\n",
-             Dq, Hq, T, Dk, Hkv, N_kv, Dv, Hkv_v, N_kv_v,
-             topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);
-      fflush(stdout);
+          printf("SPARSE MLA KV-AWARE DBG: Q=[%" PRId64 ",%" PRId64 ",%" PRId64 "] K=[%" PRId64 ",%" PRId64 ",%" PRId64 "] V=[%" PRId64 ",%" PRId64 ",%" PRId64 "] topk=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "]\n",
+                 Dq, Hq, T, Dk, Hkv, N_kv, Dv, Hkv_v, N_kv_v,
+                 topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);
+          fflush(stdout);
+      }
 
       ggml_tensor * K4d = ggml_reshape_4d(ctx, k_cache, Dk*Hkv, N_kv, 1, 1);
       ggml_tensor * V4d = ggml_reshape_4d(ctx, V_gather_src, Dv*Hkv_v, N_kv_v, 1, 1);
@@ -119,7 +109,7 @@ using std::function;
           // ensure contiguous [Hkv_v*top_k, Dv] with a real transpose to avoid stride/view aliasing
           v_sel_2d = ggml_cont(ctx, ggml_transpose(ctx, v_sel_2d));
           // Note: cannot read tensor->data during graph build; only log shapes here to avoid invalid dereference
-          if (t < 2) {
+          if (dbg && t < 2) {
               printf("[SPARSE-DBG-INDICES] t=%lld: top_k=%lld N_kv=%lld\n",
                      (long long) t, (long long) top_k, (long long) N_kv);
           }
@@ -131,10 +121,10 @@ using std::function;
           q_t_2d = ggml_cont(ctx, q_t_2d);
           ggml_tensor * scores_t = ggml_mul_mat(ctx, k_sel_2d, q_t_2d); // [Hkv*top_k, Hq]
           // debug marker: scores computed pre-scale
-          printf("[SPARSE-DBG-MLA] t=%lld scores pre-scale\n", (long long) t);
+          if (dbg) printf("[SPARSE-DBG-MLA] t=%lld scores pre-scale\n", (long long) t);
           scores_t = ggml_scale(ctx, scores_t, kq_scale);
           // add mask/alibi bias if provided: gather kq_mask rows by indices and add to scores
-          if (t == 0 || t == T - 1) {
+          if (dbg && (t == 0 || t == T - 1)) {
               cb(scores_t, "mla_scores_pre_mask", -1);
           }
 
@@ -188,7 +178,7 @@ using std::function;
               scores_t = ggml_scale(ctx, scores_t, attn_softcap);
           }
           // debug marker: scores post-mask/softcap
-          printf("[SPARSE-DBG-MLA] t=%lld scores post-mask/softcap\n", (long long) t);
+          if (dbg) printf("[SPARSE-DBG-MLA] t=%lld scores post-mask/softcap\n", (long long) t);
           // Clamp infinities to large finite values to avoid NaNs in softmax when all entries are masked
           scores_t = ggml_clamp(ctx, scores_t, -1e30f, 1e30f);
           ggml_tensor * weights_t = ggml_soft_max(ctx, scores_t);
@@ -196,7 +186,7 @@ using std::function;
           weights_t = ggml_cont(ctx, weights_t);
           v_sel_2d  = ggml_cont(ctx, v_sel_2d);
 
-          if (t == 0 || t == T - 1) {
+          if (dbg && (t == 0 || t == T - 1)) {
               cb(weights_t, "mla_weights_sample", -1);
           }
 

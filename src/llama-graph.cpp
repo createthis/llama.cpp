@@ -348,17 +348,21 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
 
     mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
 
+    /*
     printf("[SET_INPUT_KV][base] micro=[%lld,%lld,%lld,%lld] full2d=%p\n",
            (long long) self_kq_mask->ne[0], (long long) self_kq_mask->ne[1],
            (long long) self_kq_mask->ne[2], (long long) self_kq_mask->ne[3],
            (void*) self_kq_mask_full_2d);
     fflush(stdout);
+    */
 
     if (self_kq_mask_full_2d) {
+        /*
         printf("[SET_INPUT_KV][base] full2d=[%lld,%lld,%lld,%lld]\n",
                (long long) self_kq_mask_full_2d->ne[0], (long long) self_kq_mask_full_2d->ne[1],
                (long long) self_kq_mask_full_2d->ne[2], (long long) self_kq_mask_full_2d->ne[3]);
         fflush(stdout);
+        */
         mctx->set_input_kq_mask_full_2d(self_kq_mask_full_2d, ubatch, cparams.causal_attn);
     }
 
@@ -371,10 +375,12 @@ bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
 
     bool res = true;
 
+    /*
     printf("[SET_INPUT_KV][iswa] micro(base)=[%lld,%lld,%lld,%lld]\n",
            (long long) self_kq_mask->ne[0], (long long) self_kq_mask->ne[1],
            (long long) self_kq_mask->ne[2], (long long) self_kq_mask->ne[3]);
     fflush(stdout);
+    */
 
 
     res &= self_k_idxs->ne[0] == params.ubatch.n_tokens;
