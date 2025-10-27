@@ -1,10 +1,101 @@
 #include "llama-sparse-topk.h"
+#include <algorithm>
+#include <vector>
+#include <cstdint>
+
 #include "llama-impl.h"
+#include <cstring>
+
 
 #include <cmath>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+namespace {
+
+static inline uint32_t float_to_key_desc(float x) {
+    uint32_t u;
+    memcpy(&u, &x, sizeof(u));
+    // Map float bits to monotonically increasing unsigned keys (ascending order):
+    // TileLang-compatible mapping: negative -> bitwise NOT, non-negative -> set sign bit
+    if ((int32_t)u < 0) {
+        u = ~u;
+    } else {
+        u |= 0x80000000u;
+    }
+    return u;
+}
+
+struct radix_topk_userdata {
+    // currently unused; k is taken from dst->ne[0]
+};
+
+static void radix_topk_custom(ggml_tensor * dst, int ith, int nth, void * userdata) {
+    (void)userdata;
+    ggml_tensor * src0 = dst->src[0];
+    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_I32);
+    const int64_t N = src0->ne[0];
+    const int64_t k = dst->ne[0];
+    const int64_t nr = ggml_nrows(src0);
+    const size_t src_nb1 = src0->nb[1];
+    const size_t src_nb0 = src0->nb[0];
+    const size_t dst_nb1 = dst->nb[1];
+
+    for (int64_t r = ith; r < nr; r += nth) {
+        const char * row0 = (const char *)src0->data + r * src_nb1;
+        int32_t * out_idx = (int32_t *)((char *)dst->data + r * dst_nb1);
+        const int64_t KK = k < N ? k : N;
+        // LSD radix selection inspired by TileLang: sort ascending on transformed keys, then take largest KK
+        std::vector<int32_t> idx(N), tmp(N);
+        for (int64_t i = 0; i < N; ++i) idx[i] = (int32_t)i;
+        for (int shift = 0; shift < 32; shift += 8) {
+            uint32_t counts[256] = {0};
+            for (int64_t ii = 0; ii < N; ++ii) {
+                int32_t i = idx[ii];
+                float v = *(const float *)(row0 + (size_t)i*src_nb0);
+                uint32_t key = float_to_key_desc(v);
+                uint32_t bin = (key >> shift) & 0xFFu;
+                counts[bin]++;
+            }
+            uint32_t pos[256];
+            pos[0] = 0;
+            for (int b = 1; b < 256; ++b) pos[b] = pos[b-1] + counts[b-1];
+            for (int64_t ii = 0; ii < N; ++ii) {
+                int32_t i = idx[ii];
+                float v = *(const float *)(row0 + (size_t)i*src_nb0);
+                uint32_t key = float_to_key_desc(v);
+                uint32_t bin = (key >> shift) & 0xFFu;
+                tmp[pos[bin]++] = i;
+            }
+            idx.swap(tmp);
+        }
+        // idx is ascending by value; output top KK descending
+        for (int64_t i = 0; i < KK; ++i) out_idx[i] = idx[N - 1 - i];
+
+        // debug compare with std::partial_sort on first few rows
+        if (r < 8) {
+            std::vector<int32_t> ref(N);
+            for (int64_t i = 0; i < N; ++i) ref[i] = (int32_t)i;
+            auto cmp = [&](int32_t a, int32_t b){
+                float va = *(const float *)(row0 + (size_t)a*src_nb0);
+                float vb = *(const float *)(row0 + (size_t)b*src_nb0);
+                if (va != vb) return va > vb;
+                return a < b;
+            };
+            std::partial_sort(ref.begin(), ref.begin() + KK, ref.end(), cmp);
+            printf("[radix debug] row=%lld top: ", (long long)r);
+            for (int ii = 0; ii < (int)std::min<int64_t>(8, KK); ++ii) printf("%d ", out_idx[ii]);
+            printf("| ref: ");
+            for (int ii = 0; ii < (int)std::min<int64_t>(8, KK); ++ii) printf("%d ", ref[ii]);
+            printf("\n");
+            fflush(stdout);
+        }
+    }
+}
+
+} // anonymous namespace
+
 
 namespace llama {
 
@@ -238,25 +329,11 @@ using std::function;
                   ggml_build_forward_expand(gf, sft_sumsq);
               }
           }
-          // Clamp infinities from mask to large finite values to stabilize argsort/top-k
+          // Clamp infinities then compute top-k indices via custom CPU radix selection (no full sort)
           ggml_tensor * scores_clamped = ggml_clamp(ctx, scores_for_topk, -1e30f, 1e30f);
           ggml_tensor * topk_tc = ggml_top_k(ctx, scores_clamped, k);
-          if (dbg) {
-              cb(topk_tc->src[0], "idxkv_argsort", -1);
+          if (dbg && t0 == 0) {
               cb(topk_tc, "idxkv_topk", -1);
-              if (t0 == 0) {
-                  ggml_tensor * topk_f32 = ggml_cast(ctx, topk_tc, GGML_TYPE_F32);
-                  ggml_tensor * idxkv_topk_idx_sum    = ggml_sum(ctx, topk_f32);
-                  ggml_tensor * idxkv_topk_idx_sumsq  = ggml_sum(ctx, ggml_sqr(ctx, topk_f32));
-                  cb(idxkv_topk_idx_sum,   "idxkv_topk_idx_sum",   -1);
-                  cb(idxkv_topk_idx_sumsq, "idxkv_topk_idx_sumsq", -1);
-                  if (gf) {
-                      ggml_set_output(idxkv_topk_idx_sum);
-                      ggml_set_output(idxkv_topk_idx_sumsq);
-                      ggml_build_forward_expand(gf, idxkv_topk_idx_sum);
-                      ggml_build_forward_expand(gf, idxkv_topk_idx_sumsq);
-                  }
-              }
           }
           result = result ? ggml_concat(ctx, result, topk_tc, 1) : topk_tc;
       }
@@ -283,5 +360,27 @@ using std::function;
       // Keep indices on device by default to avoid host syncs during get_rows
       return result;
   }
+
+
+
+ggml_tensor * llama::sparse_attn_topk::topk_radix_indices(
+    ggml_context * ctx,
+    ggml_tensor * scores, // [N, T]
+    int64_t k) {
+    GGML_ASSERT(scores->type == GGML_TYPE_F32);
+    ggml_tensor * args[1] = { scores };
+    return ggml_custom_4d(
+        ctx,
+        GGML_TYPE_I32,
+        /*ne0*/ k,
+        /*ne1*/ scores->ne[1],
+        /*ne2*/ 1,
+        /*ne3*/ 1,
+        args,
+        /*n_args*/ 1,
+        /*fun*/ radix_topk_custom,
+        /*n_tasks*/ GGML_N_TASKS_MAX,
+        /*userdata*/ nullptr);
+}
 
 } // namespace llama

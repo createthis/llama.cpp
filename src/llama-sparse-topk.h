@@ -23,6 +23,12 @@ struct sparse_attn_topk {
         ggml_cgraph * gf,
         ggml_backend_sched_t sched,
         ggml_backend_t backend_cpu);
+
+    // new: compute top-k indices per column for a scores matrix [N, T]
+    static ggml_tensor * topk_radix_indices(
+        ggml_context * ctx,
+        ggml_tensor * scores, // [N, T]
+        int64_t k);
 };
 
 } // namespace llama

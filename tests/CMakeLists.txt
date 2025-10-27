@@ -233,3 +233,6 @@ target_include_directories(test-sparse-attn PRIVATE ${PROJECT_SOURCE_DIR}/ggml/s
 
 # Reproducer for no_alloc sparse indexer crash
 llama_build_and_test(test-sparse-attn-noalloc.cpp)
+
+# Radix top-k unit test for sparse indexer
+llama_build_and_test(test-sparse-topk-radix.cpp)
