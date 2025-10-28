@@ -11,6 +11,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <climits>
 namespace {
 
 static inline uint32_t float_to_key_desc(float x) {
@@ -197,6 +198,13 @@ using std::function;
       ggml_tensor * weights,     // [H, T]
       ggml_tensor * kq_mask,     // [N_kv, T] or [N_kv, PAD(T)]
       int64_t top_k,
+      if (dbg) {
+          size_t bytes_scores_tc = (size_t)scores_tc->ne[0] * (size_t)scores_tc->ne[1] * ggml_type_size(scores_tc->type);
+          printf("[TOPK-INDEXER-DBG] scores_tc pre-mask: ne=[%lld,%lld] bytes=%zu nb=[%zu,%zu]\n",
+                 (long long)scores_tc->ne[0], (long long)scores_tc->ne[1], bytes_scores_tc, scores_tc->nb[0], scores_tc->nb[1]);
+          fflush(stdout);
+      }
+
       const std::function<void(ggml_tensor *, const char *, int)> & cb,
       ggml_cgraph * gf,
       ggml_backend_sched_t sched,
@@ -325,6 +333,14 @@ using std::function;
           contrib_perm = ggml_cont(ctx, contrib_perm);
           ggml_tensor * sum_h = ggml_sum_rows(ctx, contrib_perm);        // [1, N_kv, Tc]
           scores_tc = ggml_reshape_2d(ctx, sum_h, N_kv, Tc);             // [N_kv, Tc]
+          if (dbg) {
+              size_t nb_logits_act = (size_t)logits_act->ne[0]*(size_t)logits_act->ne[1]*(size_t)logits_act->ne[2]*ggml_type_size(logits_act->type);
+              size_t proj_bytes = (size_t)N_kv*(size_t)H*(size_t)Tc*ggml_type_size(logits_act->type);
+              printf("[TOPK-INDEXER-DBG] logits_act ne=[%lld,%lld,%lld] bytes=%zu; w_bcast proj bytes=%zu (INT_MAX=%d)\n",
+                     (long long)logits_act->ne[0], (long long)logits_act->ne[1], (long long)logits_act->ne[2], nb_logits_act, proj_bytes, INT_MAX);
+              fflush(stdout);
+          }
+
 
 
           // Safe K-scale proxy application after head reduction (always apply)
