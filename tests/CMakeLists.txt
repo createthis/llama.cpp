@@ -239,3 +239,6 @@ llama_build_and_test(test-sparse-topk-radix.cpp)
 # Large scores radix top-k stress test (to reproduce large GGML CUDA cpy)
 llama_build_and_test(test-sparse-topk-large-cuda.cpp)
 
+# Indexer radix top-k repro harness
+llama_build_and_test(test-sparse-topk-indexer-repro.cpp)
+
