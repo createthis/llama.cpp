@@ -294,6 +294,7 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
             (long long)src1->ne[0], (long long)src1->ne[1], (long long)src1->ne[2], (long long)src1->ne[3],
             (long long)src1->nb[0], (long long)src1->nb[1], (long long)src1->nb[2], (long long)src1->nb[3],
             (long long)ggml_nbytes(src1));
+    fflush(stderr);
     #endif
 
     GGML_ASSERT(ggml_nbytes(src0) <= INT_MAX);
