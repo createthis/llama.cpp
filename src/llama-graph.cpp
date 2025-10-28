@@ -1365,6 +1365,12 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
         cb(cur, LLAMA_TENSOR_NAME_FATTN, il);
+              {
+                  char nbuf[64];
+                  snprintf(nbuf, sizeof(nbuf), "fattn_mla_cur_perm12_L%d", il);
+                  ggml_set_name(cur, nbuf);
+              }
+
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
@@ -1383,6 +1389,12 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             cb(cur, "fattn_mla", il);
             cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
             cur = ggml_cont(ctx0, cur); // Needed because ggml_reshape_2d expects contiguous inputs.
+              {
+                  char nbuf[64];
+                  snprintf(nbuf, sizeof(nbuf), "fattn_mla_cur_perm21_L%d", il);
+                  ggml_set_name(cur, nbuf);
+              }
+
 #endif
         }
 
