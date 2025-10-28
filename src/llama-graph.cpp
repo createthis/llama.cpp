@@ -1323,10 +1323,25 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     q = ggml_view_4d(ctx0, q, q->ne[0], q->ne[1], q->ne[2]/n_stream, n_stream, q->nb[1], q->nb[2], q->nb[3]/n_stream, 0);
 
     q = ggml_permute(ctx0, q, 0, 2, 1, 3);
+    // name permuted Q/K/V for debug tracing
+    {
+        char nbuf[64];
+        snprintf(nbuf, sizeof(nbuf), "attn_q_permuted_L%d", il);
+        ggml_set_name(q, nbuf);
+    }
+
     k = ggml_permute(ctx0, k, 0, 2, 1, 3);
     v = ggml_permute(ctx0, v, 0, 2, 1, 3);
 
     const auto n_kv = k->ne[1];
+    {
+        char nbuf[64];
+        snprintf(nbuf, sizeof(nbuf), "attn_k_permuted_L%d", il);
+        ggml_set_name(k, nbuf);
+        snprintf(nbuf, sizeof(nbuf), "attn_v_permuted_L%d", il);
+        ggml_set_name(v, nbuf);
+    }
+
 
     ggml_tensor * cur;
 
