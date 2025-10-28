@@ -262,10 +262,10 @@ using std::function;
       ggml_tensor * mask_full = nullptr;
       if (kq_mask) {
           cb(kq_mask, "idxkv_kq_mask", -1);
-          ggml_tensor * tmp_mask = ggml_cont(ctx, kq_mask);
+          ggml_tensor * tmp_mask = kq_mask;
           cb(tmp_mask, "idxkv_mask2d", -1);
           if (tmp_mask->ne[0] == N_kv && tmp_mask->ne[1] >= T) {
-              mask_full = tmp_mask; // full-width [N_kv, PAD(T)] for slicing per tile
+              mask_full = tmp_mask; // use original mask; slice per tile and only contiguize the tile
           } else {
               printf("[TOPK-INDEXER] kq_mask dims [%lld,%lld] mismatch N_kv=%lld,T=%lld; ignoring mask for indexer selection\n",
                      (long long) tmp_mask->ne[0], (long long) tmp_mask->ne[1], (long long) N_kv, (long long) T);
