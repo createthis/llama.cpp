@@ -1386,6 +1386,12 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             // The permutations are noops and only change how the tensor data is interpreted.
             cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
             cur = ggml_mul_mat(ctx0, v_mla, cur);
+              {
+                  char nbuf[64];
+                  snprintf(nbuf, sizeof(nbuf), "fattn_mla_cur_perm12_L%d", il);
+                  ggml_set_name(cur, nbuf);
+              }
+
             cb(cur, "fattn_mla", il);
             cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
             cur = ggml_cont(ctx0, cur); // Needed because ggml_reshape_2d expects contiguous inputs.
