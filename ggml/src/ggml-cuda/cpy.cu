@@ -276,6 +276,11 @@ static void ggml_cpy_f32_iq4_nl_cuda(
     cpy_f32_q<cpy_blck_f32_iq4_nl, QK4_NL><<<num_blocks, 1, 0, stream>>>
         (cx, cdst, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, cdst_indirect, graph_cpynode_index++);
 }
+
+void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, ggml_tensor * src1, bool disable_indirection_for_this_node) {
+    const int64_t ne = ggml_nelements(src0);
+    GGML_ASSERT(ne == ggml_nelements(src1));
+
     // DEBUG: print offending tensor names and sizes before assert
     #ifdef GGML_USE_CUDA
     extern "C" const char * ggml_get_name(const struct ggml_tensor *);
@@ -290,11 +295,6 @@ static void ggml_cpy_f32_iq4_nl_cuda(
             (long long)src1->nb[0], (long long)src1->nb[1], (long long)src1->nb[2], (long long)src1->nb[3],
             (long long)ggml_nbytes(src1));
     #endif
-
-
-void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, ggml_tensor * src1, bool disable_indirection_for_this_node) {
-    const int64_t ne = ggml_nelements(src0);
-    GGML_ASSERT(ne == ggml_nelements(src1));
 
     GGML_ASSERT(ggml_nbytes(src0) <= INT_MAX);
     GGML_ASSERT(ggml_nbytes(src1) <= INT_MAX);
