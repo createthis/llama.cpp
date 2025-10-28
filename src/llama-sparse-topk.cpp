@@ -32,6 +32,8 @@ struct radix_topk_userdata {
 
 static void radix_topk_custom(ggml_tensor * dst, int ith, int nth, void * userdata) {
     (void)userdata;
+    const char * ENV_SPARSE_DEBUG = getenv("LLAMA_SPARSE_DEBUG");
+    const bool dbg = (ENV_SPARSE_DEBUG && atoi(ENV_SPARSE_DEBUG) != 0);
     ggml_tensor * src0 = dst->src[0];
     GGML_ASSERT(src0->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type == GGML_TYPE_I32);
@@ -168,12 +170,14 @@ static void radix_topk_custom(ggml_tensor * dst, int ith, int nth, void * userda
                 return a < b;
             };
             std::partial_sort(ref.begin(), ref.begin() + KK, ref.end(), cmp);
-            printf("[radix debug] row=%lld top: ", (long long)r);
-            for (int ii = 0; ii < (int)std::min<int64_t>(8, KK); ++ii) printf("%d ", out_idx[ii]);
-            printf("| ref: ");
-            for (int ii = 0; ii < (int)std::min<int64_t>(8, KK); ++ii) printf("%d ", ref[ii]);
-            printf("\n");
-            fflush(stdout);
+            if (dbg) {
+                printf("[radix debug] row=%lld top: ", (long long)r);
+                for (int ii = 0; ii < (int)std::min<int64_t>(8, KK); ++ii) printf("%d ", out_idx[ii]);
+                printf("| ref: ");
+                for (int ii = 0; ii < (int)std::min<int64_t>(8, KK); ++ii) printf("%d ", ref[ii]);
+                printf("\n");
+                fflush(stdout);
+            }
         }
     }
 }
