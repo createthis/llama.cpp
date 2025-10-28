@@ -46,34 +46,118 @@ static void radix_topk_custom(ggml_tensor * dst, int ith, int nth, void * userda
         const char * row0 = (const char *)src0->data + r * src_nb1;
         int32_t * out_idx = (int32_t *)((char *)dst->data + r * dst_nb1);
         const int64_t KK = k < N ? k : N;
-        // LSD radix selection inspired by TileLang: sort ascending on transformed keys, then take largest KK
-        std::vector<int32_t> idx(N), tmp(N);
-        for (int64_t i = 0; i < N; ++i) idx[i] = (int32_t)i;
-        for (int shift = 0; shift < 32; shift += 8) {
-            uint32_t counts[256] = {0};
-            for (int64_t ii = 0; ii < N; ++ii) {
-                int32_t i = idx[ii];
-                float v = *(const float *)(row0 + (size_t)i*src_nb0);
-                uint32_t key = float_to_key_desc(v);
-                uint32_t bin = (key >> shift) & 0xFFu;
-                counts[bin]++;
-            }
-            uint32_t pos[256];
-            pos[0] = 0;
-            for (int b = 1; b < 256; ++b) pos[b] = pos[b-1] + counts[b-1];
-            for (int64_t ii = 0; ii < N; ++ii) {
-                int32_t i = idx[ii];
-                float v = *(const float *)(row0 + (size_t)i*src_nb0);
-                uint32_t key = float_to_key_desc(v);
-                uint32_t bin = (key >> shift) & 0xFFu;
-                tmp[pos[bin]++] = i;
-            }
-            idx.swap(tmp);
-        }
-        // idx is ascending by value; output top KK descending
-        for (int64_t i = 0; i < KK; ++i) out_idx[i] = idx[N - 1 - i];
 
-        // debug compare with std::partial_sort on first few rows
+        // Precompute keys for this row
+        std::vector<uint32_t> keys(N);
+        for (int64_t i = 0; i < N; ++i) {
+            float v = *(const float *)(row0 + (size_t)i*src_nb0);
+            keys[i] = float_to_key_desc(v);
+        }
+
+        // Stage 1: histogram of high 8 bits (bits 31..24)
+        uint32_t counts[256] = {0};
+        for (int64_t i = 0; i < N; ++i) {
+            uint32_t bin = (keys[i] >> 24) & 0xFFu;
+            counts[bin]++;
+        }
+        // Find threshold bin: number of items with bin > thr0 is sum of counts above thr0
+        auto sum_greater = [&](int b){ uint32_t s=0; for (int bb=b+1; bb<256; ++bb) s += counts[bb]; return s; };
+        int thr0 = 0;
+        uint32_t gt = 0;
+        for (int b = 255; b >= 0; --b) {
+            uint32_t sgt = sum_greater(b);
+            uint32_t eq  = counts[b];
+            if (sgt < (uint32_t)KK && sgt + eq >= (uint32_t)KK) { thr0 = b; gt = sgt; break; }
+        }
+        uint32_t eq0 = counts[thr0];
+        int64_t remaining = (int64_t)KK - (int64_t)gt;
+        if (remaining < 0) remaining = 0;
+
+        // Collect selected (> thr0) and eq candidates
+        std::vector<int32_t> selected; selected.reserve(KK);
+        std::vector<int32_t> eq_list; eq_list.reserve(eq0);
+        for (int64_t i = 0; i < N; ++i) {
+            uint32_t bin = (keys[i] >> 24) & 0xFFu;
+            if ((int)bin > thr0) {
+                if ((int64_t)selected.size() < KK) selected.push_back((int32_t)i);
+            } else if ((int)bin == thr0) {
+                eq_list.push_back((int32_t)i);
+            }
+        }
+        remaining = (int64_t)KK - (int64_t)selected.size();
+
+        // Safety check: ensure we have enough candidates to fill K
+        if ((int64_t)selected.size() + (int64_t)eq_list.size() < KK) {
+            // Fallback: use partial_sort to guarantee correctness
+            std::vector<int32_t> idx(N);
+            for (int64_t i = 0; i < N; ++i) idx[i] = (int32_t)i;
+            auto cmp = [&](int32_t a, int32_t b){
+                float va = *(const float *)(row0 + (size_t)a*src_nb0);
+                float vb = *(const float *)(row0 + (size_t)b*src_nb0);
+                if (va != vb) return va > vb;
+                return a < b;
+            };
+            std::partial_sort(idx.begin(), idx.begin() + KK, idx.end(), cmp);
+            for (int64_t i = 0; i < KK; ++i) out_idx[i] = idx[i];
+            continue;
+        }
+
+        // Tail passes for equal bin
+        int shifts[3] = {16, 8, 0};
+        for (int pass = 0; pass < 3 && remaining > 0 && !eq_list.empty(); ++pass) {
+            uint32_t c2[256] = {0};
+            for (int idx : eq_list) {
+                uint32_t bin = (keys[idx] >> shifts[pass]) & 0xFFu;
+                c2[bin]++;
+            }
+            auto sum_greater2 = [&](int b){ uint32_t s=0; for (int bb=b+1; bb<256; ++bb) s += c2[bb]; return s; };
+            int thr = 255;
+            for (int b = 255; b >= 0; --b) {
+                uint32_t sgt = sum_greater2(b);
+                uint32_t eq  = c2[b];
+                if (sgt < (uint32_t)remaining && sgt + eq >= (uint32_t)remaining) { thr = b; break; }
+            }
+            std::vector<int32_t> next_eq; next_eq.reserve(c2[thr]);
+            // Add strictly greater than thr
+            for (int idx : eq_list) {
+                uint32_t bin = (keys[idx] >> shifts[pass]) & 0xFFu;
+                if ((int)bin > thr) {
+                    if ((int64_t)selected.size() < KK) { selected.push_back(idx); }
+                } else if ((int)bin == thr) {
+                    next_eq.push_back(idx);
+                }
+            }
+            eq_list.swap(next_eq);
+            remaining = (int64_t)KK - (int64_t)selected.size();
+            if ((int64_t)selected.size() + (int64_t)eq_list.size() < remaining) {
+                // Fallback safety
+                break;
+            }
+        }
+        // Final fill from eq_list if still remaining
+        for (int64_t i = 0; i < (int64_t)eq_list.size() && (int64_t)selected.size() < KK; ++i) {
+            selected.push_back(eq_list[i]);
+        }
+
+        // As a final fallback, if still not enough, use partial_sort
+        if ((int64_t)selected.size() < KK) {
+            std::vector<int32_t> idx(N);
+            for (int64_t i = 0; i < N; ++i) idx[i] = (int32_t)i;
+            auto cmp = [&](int32_t a, int32_t b){
+                float va = *(const float *)(row0 + (size_t)a*src_nb0);
+                float vb = *(const float *)(row0 + (size_t)b*src_nb0);
+                if (va != vb) return va > vb;
+                return a < b;
+            };
+            std::partial_sort(idx.begin(), idx.begin() + KK, idx.end(), cmp);
+            for (int64_t i = 0; i < KK; ++i) out_idx[i] = idx[i];
+            continue;
+        }
+
+        // Output first KK indices (order arbitrary)
+        for (int64_t i = 0; i < KK; ++i) out_idx[i] = selected[i];
+
+        // Debug: compare with partial_sort for a few rows
         if (r < 8) {
             std::vector<int32_t> ref(N);
             for (int64_t i = 0; i < N; ++i) ref[i] = (int32_t)i;
