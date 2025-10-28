@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cinttypes>
 
+#include <climits>
 
 namespace llama {
 
