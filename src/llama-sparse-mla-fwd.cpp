@@ -36,6 +36,13 @@ using std::function;
       const bool dbg = (ENV_SPARSE_DEBUG && atoi(ENV_SPARSE_DEBUG) != 0);
 
       // Normalize V layout: expected effective layout is [Dv, Hkv_v, N_kv]
+      if (dbg) {
+          size_t bytes_topk = (size_t)topk_indices->ne[0] * (size_t)topk_indices->ne[1] * ggml_type_size(topk_indices->type);
+          printf("[MLA-DBG] topk_indices ne=[%lld,%lld] bytes=%zu (INT_MAX=%d)\n",
+                 (long long)topk_indices->ne[0], (long long)topk_indices->ne[1], bytes_topk, INT_MAX);
+          fflush(stdout);
+      }
+
       // Some builds return V cache with transposed layout [N_kv, Hkv_v, Dv, ns].
       ggml_tensor * V_gather_src = nullptr;
       if (N_kv_v == N_kv) {
@@ -107,6 +114,16 @@ using std::function;
           k_sel_2d = ggml_cont(ctx, k_sel_2d);
 
           // ensure contiguous [Hkv_v*top_k, Dv] with a real transpose to avoid stride/view aliasing
+          if (dbg && t < 2) {
+              size_t bytes_k_sel = (size_t)k_sel_2d->ne[0]*(size_t)k_sel_2d->ne[1]*ggml_type_size(k_sel_2d->type);
+              size_t bytes_v_sel = (size_t)v_sel_2d->ne[0]*(size_t)v_sel_2d->ne[1]*ggml_type_size(v_sel_2d->type);
+              size_t bytes_scores = (size_t)(Hkv*top_k)*(size_t)Hq*ggml_type_size(GGML_TYPE_F32);
+              printf("[MLA-DBG] t=%lld k_sel_2d ne=[%lld,%lld] bytes=%zu; v_sel_2d ne=[%lld,%lld] bytes=%zu; scores bytes=%zu\n",
+                     (long long)t, (long long)k_sel_2d->ne[0], (long long)k_sel_2d->ne[1], bytes_k_sel,
+                     (long long)v_sel_2d->ne[0], (long long)v_sel_2d->ne[1], bytes_v_sel, bytes_scores);
+              fflush(stdout);
+          }
+
           v_sel_2d = ggml_cont(ctx, ggml_transpose(ctx, v_sel_2d));
           // Note: cannot read tensor->data during graph build; only log shapes here to avoid invalid dereference
           if (dbg && t < 2) {
