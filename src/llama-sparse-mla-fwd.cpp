@@ -7,6 +7,7 @@
 
 #include <climits>
 
+#include <ggml-backend.h>
 namespace llama {
 
 using std::function;
@@ -92,6 +93,17 @@ using std::function;
           printf("SPARSE MLA KV-AWARE DBG: Q=[%" PRId64 ",%" PRId64 ",%" PRId64 "] K=[%" PRId64 ",%" PRId64 ",%" PRId64 "] V=[%" PRId64 ",%" PRId64 ",%" PRId64 "] topk=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "]\n",
                  Dq, Hq, T, Dk, Hkv, N_kv, Dv, Hkv_v, N_kv_v,
                  topk_indices->ne[0], topk_indices->ne[1], topk_indices->ne[2], topk_indices->ne[3]);
+        if (dbg) {
+            auto buf_k = k_cache->buffer;
+            auto buf_v = v_cache->buffer;
+            const char * bk = (buf_k && ggml_backend_buffer_is_host(buf_k)) ? "host" : (buf_k ? "device" : "null");
+            const char * bv = (buf_v && ggml_backend_buffer_is_host(buf_v)) ? "host" : (buf_v ? "device" : "null");
+            size_t nbytes_k = (size_t)k_cache->ne[0]*k_cache->ne[1]*k_cache->ne[2]*ggml_type_size(k_cache->type);
+            size_t nbytes_v = (size_t)v_cache->ne[0]*v_cache->ne[1]*v_cache->ne[2]*ggml_type_size(v_cache->type);
+            printf("[MLA-DBG] K4d src buffer=%s nbytes=%zu; V4d src buffer=%s nbytes=%zu (INT_MAX=%d)\n", bk, nbytes_k, bv, nbytes_v, INT_MAX);
+            fflush(stdout);
+        }
+
           fflush(stdout);
       }
 
@@ -115,6 +127,13 @@ using std::function;
           k_sel_2d = ggml_cont(ctx, k_sel_2d);
 
           // ensure contiguous [Hkv_v*top_k, Dv] with a real transpose to avoid stride/view aliasing
+            if (dbg && (t < 2 || t == T - 1)) {
+                const char * bbk = (k_sel_2d->buffer && ggml_backend_buffer_is_host(k_sel_2d->buffer)) ? "host" : (k_sel_2d->buffer ? "device" : "null");
+                const char * bbv = (v_sel_2d->buffer && ggml_backend_buffer_is_host(v_sel_2d->buffer)) ? "host" : (v_sel_2d->buffer ? "device" : "null");
+                printf("[MLA-DBG] t=%lld buffers: k_sel_2d=%s v_sel_2d=%s\n", (long long)t, bbk, bbv);
+                fflush(stdout);
+            }
+
           if (dbg && t < 2) {
               size_t bytes_k_sel = (size_t)k_sel_2d->ne[0]*(size_t)k_sel_2d->ne[1]*ggml_type_size(k_sel_2d->type);
               size_t bytes_v_sel = (size_t)v_sel_2d->ne[0]*(size_t)v_sel_2d->ne[1]*ggml_type_size(v_sel_2d->type);
