@@ -343,13 +343,6 @@ using std::function;
 
           // Debug (cb): per-tile scalar sums (no deref)
           if (dbg) {
-              size_t bytes_scores_tc = (size_t)N_kv * (size_t)Tc * ggml_type_size(scores_tc->type);
-              printf("[TOPK-INDEXER-DBG] scores_tc pre-mask: ne=[%lld,%lld] bytes=%zu nb=[%zu,%zu]\n",
-                     (long long)scores_tc->ne[0], (long long)scores_tc->ne[1], bytes_scores_tc, scores_tc->nb[0], scores_tc->nb[1]);
-              fflush(stdout);
-          }
-
-          if (dbg) {
               ggml_tensor * idxkv_scores_sum = ggml_sum(ctx, scores_tc);
               ggml_tensor * idxkv_scores_ssq = ggml_sum(ctx, ggml_sqr(ctx, scores_tc));
               ggml_tensor * idxkv_scores_post_abs_sum = nullptr;

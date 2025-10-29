@@ -5,10 +5,6 @@
 #include "ggml-musa/mudnn.cuh"
 #endif // GGML_USE_MUSA && GGML_MUSA_MUDNN_COPY
 
-// forward-declare ggml types for debug prints
-struct ggml_tensor;
-extern "C" const char * ggml_get_name(const struct ggml_tensor *);
-
 typedef void (*cpy_kernel_t)(const char * cx, char * cdst);
 
 template <cpy_kernel_t cpy_1>
@@ -284,19 +280,6 @@ static void ggml_cpy_f32_iq4_nl_cuda(
 void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, ggml_tensor * src1, bool disable_indirection_for_this_node) {
     const int64_t ne = ggml_nelements(src0);
     GGML_ASSERT(ne == ggml_nelements(src1));
-
-    // DEBUG: print offending tensor names and sizes before assert
-    fprintf(stderr, "[GGML-CUDA-CPY] src0 name=%s ne=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] nbytes=%lld\n",
-            ggml_get_name(src0),
-            (long long)src0->ne[0], (long long)src0->ne[1], (long long)src0->ne[2], (long long)src0->ne[3],
-            (long long)src0->nb[0], (long long)src0->nb[1], (long long)src0->nb[2], (long long)src0->nb[3],
-            (long long)ggml_nbytes(src0));
-    fprintf(stderr, "[GGML-CUDA-CPY] src1 name=%s ne=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] nbytes=%lld\n",
-            ggml_get_name(src1),
-            (long long)src1->ne[0], (long long)src1->ne[1], (long long)src1->ne[2], (long long)src1->ne[3],
-            (long long)src1->nb[0], (long long)src1->nb[1], (long long)src1->nb[2], (long long)src1->nb[3],
-            (long long)ggml_nbytes(src1));
-    fflush(stderr);
 
     GGML_ASSERT(ggml_nbytes(src0) <= INT_MAX);
     GGML_ASSERT(ggml_nbytes(src1) <= INT_MAX);
