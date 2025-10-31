@@ -1,6 +1,7 @@
 #include "topk-radix.cuh"
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include "../../include/ggml-cuda-radix.h"
 
 
 // simple bitonic top-k per column (descending)
@@ -96,7 +97,7 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     const float * col = scores + (size_t)ld * t;
     // find thr0 from gt_counts
     int thr0 = 0;
-    uint32_t gt = 0;
+    uint32_t gt = 0; (void)gt;
     for (int b = 255; b >= 0; --b) {
         uint32_t sgt = gt_counts[b + 256*t];
         // reconstruct eq as gt_counts[b] - gt_counts[b-1] with special case; approximate by counting on-the-fly
