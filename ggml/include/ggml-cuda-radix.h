@@ -9,6 +9,13 @@ extern "C" {
 // Writes indices into idx (shape [k, T], same storage rule: idx[i + k*t]).
 void ggml_cuda_topk_radix_indices_host(const float * scores, int N, int T, int k, int * idx);
 
+// Build per-column histogram on the top byte of float->key mapping.
+// scores: [N, T] row-major. Outputs:
+//  - gt_counts: size 256*T, gt_counts[b + 256*t] = sum_{bb>b} counts[bb]
+//  - thr_bins:  size T (currently placeholder; can be 0)
+void ggml_cuda_topk_histogram_host(const float * scores, int N, int T,
+                                   unsigned int * gt_counts, unsigned int * thr_bins);
+
 #ifdef __cplusplus
 }
 #endif

@@ -188,18 +188,23 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
                                          const float * scores_d, int N, int T, int k,
                                          int * idx_d) {
     cudaStream_t stream = ctx.stream();
-    // Simple bitonic per-column argsort then take top-k indices
-    int ncols = N;
-    int nrows = T;
-    int ncols_pad = 1; while (ncols_pad < ncols) ncols_pad <<= 1;
-    dim3 block_dims(ncols_pad, 1, 1);
-    dim3 grid_dims(1, nrows, 1);
-    size_t shmem = ncols_pad * sizeof(int);
-    k_topk_desc_f32_i32<<<grid_dims, block_dims, shmem, stream>>>(scores_d, idx_d, ncols, nrows, k, ncols_pad);
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("CUDA topk kernel launch error: %s\n", cudaGetErrorString(err));
-    }
+    // Radix-like path: histogram top byte + select with tie refinement
+    uint32_t * gt_counts_d = nullptr;
+    uint32_t * thr_bins_d  = nullptr;
+    cudaMalloc(&gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T);
+    cudaMalloc(&thr_bins_d,  sizeof(uint32_t) * (size_t)T);
+
+    const int hist_threads = 256;
+    const size_t hist_shmem = 256 * sizeof(uint32_t);
+    k_histogram_topbyte<<<T, hist_threads, hist_shmem, stream>>>(scores_d, N, T, /*ld=*/N, thr_bins_d, gt_counts_d);
+
+    // Equal-bin selection kernel; uses shared memory for eq candidates (worst-case N indices)
+    const int sel_threads = 256;
+    const size_t sel_shmem = (size_t) N * sizeof(int);
+    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, gt_counts_d, idx_d);
+
+    cudaFree(gt_counts_d);
+    cudaFree(thr_bins_d);
 }
 
 extern "C" void ggml_cuda_topk_radix_indices_host(const float * scores_h, int N, int T, int k, int * idx_h) {
@@ -216,4 +221,30 @@ extern "C" void ggml_cuda_topk_radix_indices_host(const float * scores_h, int N,
     cudaStreamSynchronize(stream);
     cudaFree(scores_d);
     cudaFree(idx_d);
+}
+
+extern "C" void ggml_cuda_topk_histogram_host(const float * scores_h, int N, int T,
+                                               unsigned int * gt_counts_h, unsigned int * thr_bins_h) {
+    ggml_backend_cuda_context ctx(0);
+    cudaStream_t stream = ctx.stream();
+    float * scores_d = nullptr;
+    uint32_t * gt_counts_d = nullptr;
+    uint32_t * thr_bins_d = nullptr;
+    cudaMalloc(&scores_d, sizeof(float) * (size_t)N * T);
+    cudaMalloc(&gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T);
+    cudaMalloc(&thr_bins_d,  sizeof(uint32_t) * (size_t)T);
+
+    cudaMemcpyAsync(scores_d, scores_h, sizeof(float) * (size_t)N * T, cudaMemcpyHostToDevice, stream);
+
+    const int hist_threads = 256;
+    const size_t hist_shmem = 256 * sizeof(uint32_t);
+    k_histogram_topbyte<<<T, hist_threads, hist_shmem, stream>>>(scores_d, N, T, /*ld=*/N, thr_bins_d, gt_counts_d);
+
+    cudaMemcpyAsync(gt_counts_h, gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T, cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(thr_bins_h,  thr_bins_d,  sizeof(uint32_t) * (size_t)T,        cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    cudaFree(scores_d);
+    cudaFree(gt_counts_d);
+    cudaFree(thr_bins_d);
 }
