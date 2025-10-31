@@ -241,6 +241,6 @@ llama_build_and_test(test-sparse-topk-radix.cpp)
 if (GGML_CUDA)
     llama_build_and_test(test-sparse-topk-radix-cuda.cpp)
 
-    llama_build_and_test(test-sparse-topk-histogram-cuda)
+    llama_build_and_test(test-sparse-topk-histogram-cuda.cpp)
 endif()
 
