@@ -39,7 +39,7 @@ int main() {
     const int64_t T = 8;
     const int64_t H = 4;
     const int64_t D = 64;
-    const int64_t k = 64;
+    // removed unused variable k
 
     // Initialize GGML context
     ggml_init_params p{};
@@ -75,32 +75,6 @@ int main() {
     fill_tensor(k_indexer, Khost);
     fill_tensor(weights,   Whost);
 
-    // Build top-k indices via our new radix top-k on precomputed scores
-    // First, form the scores matrix for all tokens T: [N_kv, T]
-    ggml_tensor * q_perm = ggml_permute(ctx, q_indexer, 0, 2, 1, 3); // [D, T, H]
-    ggml_tensor * q_cont = ggml_cont(ctx, q_perm);
-    ggml_tensor * Q2d    = ggml_reshape_2d(ctx, q_cont, D, T*H);     // [D, T*H]
-    ggml_tensor * logits_all = ggml_mul_mat(ctx, k_indexer, Q2d);    // [N_kv, T*H]
-    ggml_tensor * logits_resh= ggml_reshape_3d(ctx, logits_all, N_kv, H, T);
-    ggml_tensor * logits_act = ggml_relu(ctx, logits_resh);
-    ggml_tensor * w = ggml_reshape_3d(ctx, weights, 1, H, T);
-    ggml_tensor * w_bc = ggml_repeat(ctx, w, logits_act);
-    ggml_tensor * contrib = ggml_mul(ctx, logits_act, w_bc);
-    ggml_tensor * contrib_perm = ggml_permute(ctx, contrib, 1, 0, 2, 3);
-    contrib_perm = ggml_cont(ctx, contrib_perm);
-    ggml_tensor * sum_h = ggml_sum_rows(ctx, contrib_perm);          // [1, N_kv, T]
-    ggml_tensor * scores_2d = ggml_reshape_2d(ctx, sum_h, N_kv, T);  // [N_kv, T]
-    // Apply k_scale proxy
-    ggml_tensor * k_sqr = ggml_sqr(ctx, k_indexer);
-    ggml_tensor * k_sum = ggml_sum_rows(ctx, k_sqr);
-    ggml_tensor * k_mean= ggml_scale(ctx, k_sum, 1.0f/float(D));
-    ggml_tensor * k_scale_vec = ggml_sqrt(ctx, k_mean);              // [1, N_kv]
-    ggml_tensor * k_scale_2d = ggml_transpose(ctx, k_scale_vec);     // [N_kv, 1]
-    k_scale_2d = ggml_cont(ctx, k_scale_2d);
-    ggml_tensor * k_scale_b = ggml_repeat(ctx, k_scale_2d, scores_2d);
-    ggml_tensor * scores_scaled = ggml_mul(ctx, scores_2d, k_scale_b);
-
-    ggml_tensor * scores_cont = ggml_cont(ctx, scores_scaled);
     int status = 0;
 #ifdef GGML_USE_CUDA
     // also run CUDA host-wrapper validation

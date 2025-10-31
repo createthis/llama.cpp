@@ -5,7 +5,7 @@
 
 
 // simple bitonic top-k per column (descending)
-static __global__ void k_topk_desc_f32_i32(const float * x, int * dst, int ncols, int nrows, int k, int ncols_pad) {
+static __global__ __attribute__((unused)) void k_topk_desc_f32_i32(const float * x, int * dst, int ncols, int nrows, int k, int ncols_pad) {
     int col = threadIdx.x;
     int row = blockIdx.y;
     if (row >= nrows) return;
