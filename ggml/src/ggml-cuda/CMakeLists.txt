@@ -42,8 +42,10 @@ if (CUDAToolkit_FOUND)
 
     file(GLOB   GGML_HEADERS_CUDA "*.cuh")
     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
+    list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda-radix.h")
 
     file(GLOB   GGML_SOURCES_CUDA "*.cu")
+    list(APPEND GGML_SOURCES_CUDA "topk-radix.cu")
     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
     file(GLOB   SRCS "template-instances/mmq*.cu")

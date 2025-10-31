@@ -236,3 +236,8 @@ llama_build_and_test(test-sparse-attn-noalloc.cpp)
 
 # Radix top-k unit test for sparse indexer
 llama_build_and_test(test-sparse-topk-radix.cpp)
+
+# CUDA radix top-k host wrapper quick test: reuse same source (it includes CUDA-only path)
+if (GGML_CUDA)
+    llama_build_and_test(test-sparse-topk-radix-cuda.cpp)
+endif()
