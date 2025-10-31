@@ -248,3 +248,30 @@ extern "C" void ggml_cuda_topk_histogram_host(const float * scores_h, int N, int
     cudaFree(gt_counts_d);
     cudaFree(thr_bins_d);
 }
+
+extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T, int k,
+                                            const unsigned int * gt_counts_h, int * idx_h) {
+    ggml_backend_cuda_context ctx(0);
+    cudaStream_t stream = ctx.stream();
+    float * scores_d = nullptr;
+    uint32_t * gt_counts_d = nullptr;
+    int * idx_d = nullptr;
+    cudaMalloc(&scores_d, sizeof(float) * (size_t)N * T);
+    cudaMalloc(&gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T);
+    cudaMalloc(&idx_d, sizeof(int) * (size_t)k * T);
+
+    cudaMemcpyAsync(scores_d, scores_h, sizeof(float) * (size_t)N * T, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(gt_counts_d, gt_counts_h, sizeof(uint32_t) * 256 * (size_t)T, cudaMemcpyHostToDevice, stream);
+
+    const int sel_threads = 256;
+    const size_t sel_shmem = (size_t) N * sizeof(int);
+    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, gt_counts_d, idx_d);
+
+    cudaMemcpyAsync(idx_h, idx_d, sizeof(int) * (size_t)k * T, cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    cudaFree(scores_d);
+    cudaFree(gt_counts_d);
+    cudaFree(idx_d);
+}
+
