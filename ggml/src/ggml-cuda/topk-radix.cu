@@ -42,7 +42,7 @@ static __global__ void k_histogram_topbyte(const float * __restrict__ scores,
         uint32_t key = float_to_key_desc(col[i]);
         atomicAdd(&hist[(key >> 24) & 0xFFu], 1u);
     }
-    __syncthreads();
+__syncthreads();
 
     // Compute thr bin: find largest b such that sum_{bb>b} hist[bb] < K <= sum_{bb>=b} hist[bb]
     // We cannot know K here; we just store histogram; instead, to keep kernels simple we output prefix sums of greater counts
@@ -65,7 +65,8 @@ static __global__ void k_histogram_topbyte(const float * __restrict__ scores,
 static __global__ void k_select_topk_bins(const float * __restrict__ scores,
                                           int N, int T, int ld, int k,
                                           const uint32_t * __restrict__ gt_counts, // [256, T]
-                                          int * __restrict__ idx_out) {            // [k, T]
+                                          int * __restrict__ idx_out,              // [k, T]
+                                          int use_streaming) {
     int t = blockIdx.x;
     if (t >= T) return;
 
@@ -89,12 +90,14 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     int * eq_buf = shared; // temporary storage of eq indices, length N in worst case; we limit by blockDim.x cooperative compaction
     __shared__ int eq_count;
     __shared__ int sel_count;
+    __shared__ int s_sel_count;
     if (threadIdx.x == 0) { eq_count = 0; sel_count = 0; }
     __syncthreads();
     if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL && threadIdx.x == 0) {
         printf("[t=%d] start collect: eq_count=%d sel_count=%d\n", t, eq_count, sel_count);
     }
 
+    if (!use_streaming) {
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
         uint32_t key = float_to_key_desc(col[i]);
         int bin = (key >> 24) & 0xFF;
@@ -106,6 +109,17 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
             if (pos < N) eq_buf[pos] = i;
         }
     }
+    } else {
+        // streaming: select only bin>thr0 first pass (no eq_buf)
+        for (int i = threadIdx.x; i < N; i += blockDim.x) {
+            uint32_t key = float_to_key_desc(col[i]);
+            int bin = (key >> 24) & 0xFF;
+            if (bin > thr0) {
+                int pos = atomicAdd(&sel_count, 1);
+                if (pos < k) idx_out[pos + k*t] = i;
+            }
+        }
+    }
     __syncthreads();
 
     int remaining = k - sel_count;
@@ -114,21 +128,37 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     }
     if (remaining <= 0) return;
 
-    // If eq_count is large, do a simple partial selection by values among eq candidates
-    // For simplicity, do a block-wide partial selection using naive nth_element-like iterations (small k typical, e.g., <= 128)
-    // We will fill remaining slots with the largest values among eq_buf.
-
-    // First: load values of eq candidates into shared memory in chunks
-    // Use simple repeated passes selecting max remaining each time
+    // Fill remaining from thr0 by value. Use eq_buf if present, else streaming scan.
     for (int r = 0; r < remaining; ++r) {
+        if (threadIdx.x == 0) s_sel_count = sel_count;
+        __syncthreads();
         float best_val = -1.0e30f;
         int best_idx = -1;
-        for (int i0 = threadIdx.x; i0 < eq_count; i0 += blockDim.x) {
-            int idx = eq_buf[i0];
-            if (idx < 0) continue; // skip removed entries
-            float v = col[idx];
-            if (v > best_val || (v == best_val && idx < best_idx)) {
-                best_val = v; best_idx = idx;
+        if (!use_streaming) {
+            for (int i0 = threadIdx.x; i0 < eq_count; i0 += blockDim.x) {
+                int idx = eq_buf[i0];
+                if (idx < 0) continue; // skip removed entries
+                float v = col[idx];
+                if (v > best_val || (v == best_val && idx < best_idx)) {
+                    best_val = v; best_idx = idx;
+                }
+            }
+        } else {
+            // streaming: scan column for thr0 bin and exclude previously selected
+            for (int i = threadIdx.x; i < N; i += blockDim.x) {
+                uint32_t key = float_to_key_desc(col[i]);
+                int bin = (key >> 24) & 0xFF;
+                if (bin != thr0) continue;
+                // check not already selected
+                bool already = false;
+                for (int j = 0; j < s_sel_count; ++j) {
+                    if (idx_out[j + k*t] == i) { already = true; break; }
+                }
+                if (already) continue;
+                float v = col[i];
+                if (v > best_val || (v == best_val && i < best_idx)) {
+                    best_val = v; best_idx = i;
+                }
             }
         }
         // reduce to find block-best
@@ -193,8 +223,9 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
 
     // Equal-bin selection kernel; uses shared memory for eq candidates (worst-case N indices)
     const int sel_threads = 256;
-    const size_t sel_shmem = (size_t) N * sizeof(int);
-    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, gt_counts_d, idx_d);
+    bool use_streaming = ((size_t)N * sizeof(int) > 48*1024);
+    const size_t sel_shmem = use_streaming ? 0 : (size_t) N * sizeof(int);
+    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, gt_counts_d, idx_d, use_streaming ? 1 : 0);
 
     cudaFree(gt_counts_d);
     cudaFree(thr_bins_d);
@@ -257,8 +288,9 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
     cudaMemcpyAsync(gt_counts_d, gt_counts_h, sizeof(uint32_t) * 256 * (size_t)T, cudaMemcpyHostToDevice, stream);
 
     const int sel_threads = 256;
-    const size_t sel_shmem = (size_t) N * sizeof(int);
-    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, gt_counts_d, idx_d);
+    bool use_streaming = ((size_t)N * sizeof(int) > 48*1024);
+    const size_t sel_shmem = use_streaming ? 0 : (size_t) N * sizeof(int);
+    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, gt_counts_d, idx_d, use_streaming ? 1 : 0);
 
     cudaMemcpyAsync(idx_h, idx_d, sizeof(int) * (size_t)k * T, cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
