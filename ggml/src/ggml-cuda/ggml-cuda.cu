@@ -46,6 +46,7 @@
 #include "ggml-cuda/mean.cuh"
 #include "ggml-cuda/tsembd.cuh"
 #include "ggml-cuda/topk-moe.cuh"
+#include "ggml-cuda/topk-radix.cuh"
 #include "ggml-cuda/unary.cuh"
 #include "ggml-cuda/upscale.cuh"
 #include "ggml-cuda/wkv.cuh"
@@ -2518,6 +2519,17 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_OPT_STEP_SGD:
             ggml_cuda_opt_step_sgd(ctx, dst);
             break;
+        case GGML_OP_SPARSE_TOPK_RADIX:
+            {
+                ggml_tensor * scores = dst->src[0];
+                int k = (int)ggml_get_op_params_i32(dst, 0);
+                GGML_ASSERT(scores->type == GGML_TYPE_F32);
+                GGML_ASSERT(dst->type == GGML_TYPE_I32);
+                int N = (int)scores->ne[0];
+                int T = (int)ggml_nrows(scores);
+                ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+            }
+            break;
         default:
             return false;
     }
@@ -3375,6 +3387,16 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 case GGML_UNARY_OP_EXP:
                 case GGML_UNARY_OP_ELU:
                     return ggml_is_contiguous(op->src[0]);
+                case GGML_OP_SPARSE_TOPK_RADIX:
+                    {
+                        const struct ggml_tensor * a = op->src[0];
+                        if (a == nullptr) return false;
+                        if (a->type != GGML_TYPE_F32) return false;
+                        if (op->type != GGML_TYPE_I32) return false;
+                        if (a->ne[2] != 1 || a->ne[3] != 1) return false;
+                        if (op->ne[2] != 1 || op->ne[3] != 1) return false;
+                            return ggml_is_contiguous(a);
+                    } break;
                 default:
                     return false;
             }

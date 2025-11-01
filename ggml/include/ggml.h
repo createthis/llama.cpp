@@ -555,6 +555,7 @@ extern "C" {
         GGML_OP_OPT_STEP_ADAMW,
         GGML_OP_OPT_STEP_SGD,
 
+        GGML_OP_SPARSE_TOPK_RADIX,
         GGML_OP_GLU,
 
         GGML_OP_COUNT,
@@ -731,6 +732,13 @@ extern "C" {
     // returns whether the tensor elements can be iterated over with a flattened index (no gaps, no permutation)
     GGML_API bool ggml_is_contiguous  (const struct ggml_tensor * tensor);
     GGML_API bool ggml_is_contiguous_0(const struct ggml_tensor * tensor); // same as ggml_is_contiguous()
+
+    // radix-based sparse top-k indices per column (specialized CUDA path with CPU fallback)
+    GGML_API struct ggml_tensor * ggml_sparse_topk_radix(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * scores,
+            int                   k);
+
     GGML_API bool ggml_is_contiguous_1(const struct ggml_tensor * tensor); // contiguous for dims >= 1
     GGML_API bool ggml_is_contiguous_2(const struct ggml_tensor * tensor); // contiguous for dims >= 2
 

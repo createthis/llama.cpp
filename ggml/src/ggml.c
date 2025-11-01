@@ -1018,10 +1018,11 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_ADAMW",
     "OPT_STEP_SGD",
 
+    "SPARSE_TOPK_RADIX",
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 90, "GGML_OP_COUNT != 90");
+static_assert(GGML_OP_COUNT == 91, "GGML_OP_COUNT != 91");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1122,10 +1123,11 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "adamw(x)",
     "sgd(x)",
 
+    "sparse_topk_radix(x)",
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 90, "GGML_OP_COUNT != 90");
+static_assert(GGML_OP_COUNT == 91, "GGML_OP_COUNT != 91");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -7226,4 +7228,22 @@ bool ggml_threadpool_params_match(const struct ggml_threadpool_params * p0, cons
     if (p0->poll           != p1->poll       )    return false;
     if (p0->strict_cpu     != p1->strict_cpu )    return false;
     return memcmp(p0->cpumask, p1->cpumask, GGML_MAX_N_THREADS) == 0;
+}
+
+
+// ggml_sparse_topk_radix
+
+GGML_API struct ggml_tensor * ggml_sparse_topk_radix(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * scores,
+        int                   k) {
+    GGML_ASSERT(scores->type == GGML_TYPE_F32);
+    GGML_ASSERT(scores->ne[2] == 1 && scores->ne[3] == 1);
+    GGML_ASSERT(k > 0 && k <= scores->ne[0]);
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, k, scores->ne[1]);
+    ggml_set_op_params_i32(result, 0, k);
+    result->op     = GGML_OP_SPARSE_TOPK_RADIX;
+    result->src[0] = scores;
+    return result;
 }

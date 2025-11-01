@@ -427,7 +427,7 @@ using std::function;
           }
           // Clamp infinities then compute top-k indices via custom CPU radix selection (no full sort)
           ggml_tensor * scores_clamped = ggml_clamp(ctx, scores_for_topk, -1e30f, 1e30f);
-          ggml_tensor * topk_tc = sparse_attn_topk::topk_radix_indices(ctx, scores_clamped, k);
+          ggml_tensor * topk_tc = ggml_sparse_topk_radix(ctx, scores_clamped, k);
           if (dbg && t0 == 0) {
               cb(topk_tc, "idxkv_topk_radix", -1);
           }
