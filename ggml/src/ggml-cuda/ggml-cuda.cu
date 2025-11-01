@@ -3387,20 +3387,20 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 case GGML_UNARY_OP_EXP:
                 case GGML_UNARY_OP_ELU:
                     return ggml_is_contiguous(op->src[0]);
-                case GGML_OP_SPARSE_TOPK_RADIX:
-                    {
-                        const struct ggml_tensor * a = op->src[0];
-                        if (a == nullptr) return false;
-                        if (a->type != GGML_TYPE_F32) return false;
-                        if (op->type != GGML_TYPE_I32) return false;
-                        if (a->ne[2] != 1 || a->ne[3] != 1) return false;
-                        if (op->ne[2] != 1 || op->ne[3] != 1) return false;
-                            return ggml_is_contiguous(a);
-                    } break;
                 default:
                     return false;
             }
             break;
+        case GGML_OP_SPARSE_TOPK_RADIX:
+            {
+                const struct ggml_tensor * a = op->src[0];
+                if (a == NULL) return false;
+                if (a->type != GGML_TYPE_F32) return false;
+                if (op->type != GGML_TYPE_I32) return false;
+                if (a->ne[2] != 1 || a->ne[3] != 1) return false;
+                if (op->ne[2] != 1 || op->ne[3] != 1) return false;
+                return ggml_is_contiguous(a);
+            } break;
         case GGML_OP_GLU:
             switch (ggml_get_glu_op(op)) {
                 case GGML_GLU_OP_REGLU:
