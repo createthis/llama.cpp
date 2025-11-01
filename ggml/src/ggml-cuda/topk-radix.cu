@@ -223,7 +223,14 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
 
     // Equal-bin selection kernel; uses shared memory for eq candidates (worst-case N indices)
     const int sel_threads = 256;
-    bool use_streaming = ((size_t)N * sizeof(int) > 48*1024);
+    bool use_streaming = true; // streaming default for robustness
+    if (const char *env = getenv("LLAMA_SPARSE_TOPK_STREAMING")) {
+        int v = atoi(env);
+        if (v == 0) {
+            // prefer eq_buf when it fits, otherwise stream
+            use_streaming = ((size_t)N * sizeof(int) > 48*1024);
+        }
+    }
     const size_t sel_shmem = use_streaming ? 0 : (size_t) N * sizeof(int);
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, gt_counts_d, idx_d, use_streaming ? 1 : 0);
 
@@ -288,7 +295,14 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
     cudaMemcpyAsync(gt_counts_d, gt_counts_h, sizeof(uint32_t) * 256 * (size_t)T, cudaMemcpyHostToDevice, stream);
 
     const int sel_threads = 256;
-    bool use_streaming = ((size_t)N * sizeof(int) > 48*1024);
+    bool use_streaming = true; // streaming default for robustness
+    if (const char *env = getenv("LLAMA_SPARSE_TOPK_STREAMING")) {
+        int v = atoi(env);
+        if (v == 0) {
+            // prefer eq_buf when it fits, otherwise stream
+            use_streaming = ((size_t)N * sizeof(int) > 48*1024);
+        }
+    }
     const size_t sel_shmem = use_streaming ? 0 : (size_t) N * sizeof(int);
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, gt_counts_d, idx_d, use_streaming ? 1 : 0);
 
