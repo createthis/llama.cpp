@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include "../../include/ggml-cuda-radix.h"
 #ifndef SEL_DEBUG
-#define SEL_DEBUG 1
+#define SEL_DEBUG 0
 #endif
 #ifndef SEL_DEBUG_COL
 #define SEL_DEBUG_COL 0
