@@ -71,6 +71,11 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     if (t >= T) return;
 
     const float * col = scores + (size_t)ld * t;
+    // initialize output indices defensively to 0
+    if (threadIdx.x == 0) {
+        for (int i = 0; i < k; ++i) idx_out[i + k*t] = 0;
+    }
+    __syncthreads();
     // find thr0 from gt_counts
     int thr0 = 0;
     for (int b = 255; b >= 0; --b) {
@@ -103,7 +108,10 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         int bin = (key >> 24) & 0xFF;
         if (bin > thr0) {
             int pos = atomicAdd(&sel_count, 1);
-            if (pos < k) idx_out[pos + k*t] = i;
+            if (pos < k) {
+                int clamped = i < 0 ? 0 : (i >= N ? (N - 1) : i);
+                idx_out[pos + k*t] = clamped;
+            }
         } else if (bin == thr0) {
             int pos = atomicAdd(&eq_count, 1);
             if (pos < N) eq_buf[pos] = i;
@@ -120,6 +128,10 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
             }
         }
     }
+    __syncthreads();
+
+    // cap eq_count to allocated shared buffer capacity N
+    if (threadIdx.x == 0 && eq_count > N) eq_count = N;
     __syncthreads();
 
     int remaining = k - sel_count;
@@ -185,17 +197,22 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
             }
             if (lane == 0) {
                 s_selected = bi;
-                int prev = sel_count;
-                int pos = atomicAdd(&sel_count, 1);
-                if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL) {
-                    printf("[t=%d] select iter: best_idx=%d prev_sel=%d new_sel=%d\n", t, s_selected, prev, sel_count);
+                if (s_selected >= 0) {
+                    int prev = sel_count;
+                    int pos = atomicAdd(&sel_count, 1);
+                    if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL) {
+                        printf("[t=%d] select iter: best_idx=%d prev_sel=%d new_sel=%d\n", t, s_selected, prev, sel_count);
+                    }
+                    if (pos < k) {
+                        int clamped = s_selected < 0 ? 0 : (s_selected >= N ? (N - 1) : s_selected);
+                        idx_out[pos + k*t] = clamped;
+                    }
                 }
-                if (pos < k && s_selected >= 0) idx_out[pos + k*t] = s_selected;
             }
         }
         __syncthreads();
-        // remove candidate s_selected from eq_buf across the whole block
-        if (s_selected >= 0) {
+        // remove candidate from eq_buf only in non-streaming path
+        if (!use_streaming && s_selected >= 0) {
             for (int j = threadIdx.x; j < eq_count; j += blockDim.x) {
                 if (eq_buf[j] == s_selected) { eq_buf[j] = -1; }
             }

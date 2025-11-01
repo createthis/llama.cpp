@@ -425,19 +425,15 @@ using std::function;
                   ggml_build_forward_expand(gf, sft_sumsq);
               }
           }
-          // Ensure contiguous for CUDA op and clamp infinities
-          ggml_tensor * scores_cont   = ggml_cont(ctx, scores_for_topk);
-          ggml_tensor * scores_clamped = ggml_clamp(ctx, scores_cont, -1e30f, 1e30f);
+          // Ensure contiguous for CUDA op only if needed, then clamp infinities
+          ggml_tensor * scores_pre = ggml_is_contiguous(scores_for_topk) ? scores_for_topk : ggml_cont(ctx, scores_for_topk);
+          ggml_tensor * scores_clamped = ggml_clamp(ctx, scores_pre, -1e30f, 1e30f);
           // Compute top-k indices via CUDA radix selection
           ggml_tensor * topk_tc = ggml_sparse_topk_radix(ctx, scores_clamped, k);
-          // Defensive: clamp indices to [0, N_kv-1]
-          ggml_tensor * topk_tc_f32 = ggml_cast(ctx, topk_tc, GGML_TYPE_F32);
-          ggml_tensor * topk_tc_f32_clamped = ggml_clamp(ctx, topk_tc_f32, 0.0f, (float)(N_kv - 1));
-          ggml_tensor * topk_tc_i32 = ggml_cast(ctx, topk_tc_f32_clamped, GGML_TYPE_I32);
           if (dbg && t0 == 0) {
-              cb(topk_tc_i32, "idxkv_topk_radix", -1);
+              cb(topk_tc, "idxkv_topk_radix", -1);
           }
-          result = result ? ggml_concat(ctx, result, topk_tc_i32, 1) : topk_tc_i32;
+          result = result ? ggml_concat(ctx, result, topk_tc, 1) : topk_tc;
       }
 
       cb(result, "idxkv_topk_indices_k_T", -1);
