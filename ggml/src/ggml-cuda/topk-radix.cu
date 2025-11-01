@@ -1,7 +1,14 @@
 #include "topk-radix.cuh"
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include <stdio.h>
 #include "../../include/ggml-cuda-radix.h"
+#ifndef SEL_DEBUG
+#define SEL_DEBUG 1
+#endif
+#ifndef SEL_DEBUG_COL
+#define SEL_DEBUG_COL 0
+#endif
 
 
 // simple bitonic top-k per column (descending)
@@ -100,12 +107,13 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     uint32_t gt = 0; (void)gt;
     for (int b = 255; b >= 0; --b) {
         uint32_t sgt = gt_counts[b + 256*t];
-        // reconstruct eq as gt_counts[b] - gt_counts[b-1] with special case; approximate by counting on-the-fly
-        // simpler: compute sgt and then scan eq by reading column - but that is expensive; instead, rely on two-phase approach:
-        // Here we will compute eq by reading column, but only once.
-        // Decide thr candidate by estimating eq via another pass below.
-        // Pick the first b where sgt < k and break; we'll refine below.
         if (sgt < (uint32_t)k) { thr0 = b; gt = sgt; break; }
+    }
+    if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL && threadIdx.x == 0) {
+        // derive eq from gt_counts without scanning scores
+        uint32_t prev = (thr0 == 255 ? (uint32_t)N : gt_counts[(thr0 - 1) + 256*t]);
+        uint32_t eq   = prev - gt_counts[thr0 + 256*t];
+        printf("[t=%d] thr0=%d sgt=%u eq=%u k=%d\n", t, thr0, gt_counts[thr0 + 256*t], eq, k);
     }
     // Now collect selected (> thr0) and equality list; parallelize by striding threads
     extern __shared__ int shared[];
@@ -114,6 +122,9 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     __shared__ int sel_count;
     if (threadIdx.x == 0) { eq_count = 0; sel_count = 0; }
     __syncthreads();
+    if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL && threadIdx.x == 0) {
+        printf("[t=%d] start collect: eq_count=%d sel_count=%d\n", t, eq_count, sel_count);
+    }
 
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
         uint32_t key = float_to_key_desc(col[i]);
@@ -129,6 +140,9 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     __syncthreads();
 
     int remaining = k - sel_count;
+    if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL && threadIdx.x == 0) {
+        printf("[t=%d] after collect: sel_count=%d eq_count=%d remaining=%d\n", t, sel_count, eq_count, remaining);
+    }
     if (remaining <= 0) return;
 
     // If eq_count is large, do a simple partial selection by values among eq candidates
@@ -170,17 +184,24 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
                 if (v2 > bv || (v2 == bv && i2 < bi)) { bv = v2; bi = i2; }
             }
             if (lane == 0) {
+                int prev = sel_count;
                 // write selection and mark this candidate to -inf so it won't be selected again
                 int pos = atomicAdd(&sel_count, 1);
-                if (pos < k) idx_out[pos + k*t] = bi;
-                // mark by setting its value in eq_buf to sentinel index that thread comparisons will skip
-                // simplest is to set eq candidate value to -inf by writing to global col? cannot. So we mark by setting index to -1.
-                // We need to remove candidate bi from eq_buf: do a pass to set matches to -1
-                for (int j = lane; j < eq_count; j += 32) { if (eq_buf[j] == bi) { eq_buf[j] = -1; } }
+                if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL) {
+                    printf("[t=%d] select iter: best_idx=%d prev_sel=%d new_sel=%d\n", t, bi, prev, sel_count);
+                }
+                if (pos < k && bi >= 0) idx_out[pos + k*t] = bi;
+                // remove candidate bi from eq_buf
+                if (bi >= 0) {
+                    for (int j = threadIdx.x; j < eq_count; j += blockDim.x) { if (eq_buf[j] == bi) { eq_buf[j] = -1; } }
+                }
             }
         }
         __syncthreads();
         // threads skip -1 entries next iteration implicitly since they yield best_idx=-1 which loses ties
+        if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL && threadIdx.x == 0) {
+            printf("[t=%d] end iter: sel_count=%d\n", t, sel_count);
+        }
     }
 }
 

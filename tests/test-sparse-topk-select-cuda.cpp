@@ -44,6 +44,13 @@ int main() {
         }
     }
 
+    // Print gt_counts for debug (first column only)
+    printf("gt_counts (t=0): ");
+    for (int b = 0; b < 256; ++b) {
+        printf("%u ", gt_counts[b + 256*0]);
+    }
+    printf("\n");
+
     // Run selection only
     std::vector<int> idx_gpu((size_t)K*T, -1);
     ggml_cuda_topk_select_host(scores.data(), N, T, K, gt_counts.data(), idx_gpu.data());
