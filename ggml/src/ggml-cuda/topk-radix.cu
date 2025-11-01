@@ -107,13 +107,15 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     uint32_t gt = 0; (void)gt;
     for (int b = 255; b >= 0; --b) {
         uint32_t sgt = gt_counts[b + 256*t];
-        if (sgt < (uint32_t)k) { thr0 = b; gt = sgt; break; }
+        uint32_t prev = (b == 0 ? (uint32_t)N : gt_counts[(b - 1) + 256*t]);
+        uint32_t eq   = prev - gt_counts[b + 256*t];
+        if (sgt < (uint32_t)k && sgt + eq >= (uint32_t)k) { thr0 = b; gt = sgt; break; }
     }
     if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL && threadIdx.x == 0) {
-        // derive eq from gt_counts without scanning scores
-        uint32_t prev = (thr0 == 255 ? (uint32_t)N : gt_counts[(thr0 - 1) + 256*t]);
+        uint32_t sgt = gt_counts[thr0 + 256*t];
+        uint32_t prev = (thr0 == 0 ? (uint32_t)N : gt_counts[(thr0 - 1) + 256*t]);
         uint32_t eq   = prev - gt_counts[thr0 + 256*t];
-        printf("[t=%d] thr0=%d sgt=%u eq=%u k=%d\n", t, thr0, gt_counts[thr0 + 256*t], eq, k);
+        printf("[t=%d] thr0=%d sgt=%u eq=%u k=%d\n", t, thr0, sgt, eq, k);
     }
     // Now collect selected (> thr0) and equality list; parallelize by striding threads
     extern __shared__ int shared[];
@@ -134,7 +136,7 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
             if (pos < k) idx_out[pos + k*t] = i;
         } else if (bin == thr0) {
             int pos = atomicAdd(&eq_count, 1);
-            eq_buf[pos] = i;
+            if (pos < N) eq_buf[pos] = i;
         }
     }
     __syncthreads();
@@ -156,8 +158,8 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         int best_idx = -1;
         for (int i0 = threadIdx.x; i0 < eq_count; i0 += blockDim.x) {
             int idx = eq_buf[i0];
+            if (idx < 0) continue; // skip removed entries
             float v = col[idx];
-            // compare via value
             if (v > best_val || (v == best_val && idx < best_idx)) {
                 best_val = v; best_idx = idx;
             }
@@ -171,6 +173,7 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         }
         __shared__ float warp_best_val[32];
         __shared__ int   warp_best_idx[32];
+        __shared__ int   s_selected;
         int wid = threadIdx.x >> 5; int lane = threadIdx.x & 31;
         if (lane == 0) { warp_best_val[wid] = best_val; warp_best_idx[wid] = best_idx; }
         __syncthreads();
@@ -184,21 +187,23 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
                 if (v2 > bv || (v2 == bv && i2 < bi)) { bv = v2; bi = i2; }
             }
             if (lane == 0) {
+                s_selected = bi;
                 int prev = sel_count;
-                // write selection and mark this candidate to -inf so it won't be selected again
                 int pos = atomicAdd(&sel_count, 1);
                 if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL) {
-                    printf("[t=%d] select iter: best_idx=%d prev_sel=%d new_sel=%d\n", t, bi, prev, sel_count);
+                    printf("[t=%d] select iter: best_idx=%d prev_sel=%d new_sel=%d\n", t, s_selected, prev, sel_count);
                 }
-                if (pos < k && bi >= 0) idx_out[pos + k*t] = bi;
-                // remove candidate bi from eq_buf
-                if (bi >= 0) {
-                    for (int j = threadIdx.x; j < eq_count; j += blockDim.x) { if (eq_buf[j] == bi) { eq_buf[j] = -1; } }
-                }
+                if (pos < k && s_selected >= 0) idx_out[pos + k*t] = s_selected;
             }
         }
         __syncthreads();
-        // threads skip -1 entries next iteration implicitly since they yield best_idx=-1 which loses ties
+        // remove candidate s_selected from eq_buf across the whole block
+        if (s_selected >= 0) {
+            for (int j = threadIdx.x; j < eq_count; j += blockDim.x) {
+                if (eq_buf[j] == s_selected) { eq_buf[j] = -1; }
+            }
+        }
+        __syncthreads();
         if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL && threadIdx.x == 0) {
             printf("[t=%d] end iter: sel_count=%d\n", t, sel_count);
         }
