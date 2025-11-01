@@ -12,39 +12,7 @@
 
 
 // simple bitonic top-k per column (descending)
-static __global__ __attribute__((unused)) void k_topk_desc_f32_i32(const float * x, int * dst, int ncols, int nrows, int k, int ncols_pad) {
-    int col = threadIdx.x;
-    int row = blockIdx.y;
-    if (row >= nrows) return;
-    if (col >= ncols_pad) return;
-    extern __shared__ int idx[];
-    const float * x_row = x + row * ncols;
-    idx[col] = col;
-    __syncthreads();
-    // bitonic sort indices by x_row[idx]
-    for (int K = 2; K <= ncols_pad; K <<= 1) {
-        for (int J = K >> 1; J > 0; J >>= 1) {
-            int ixj = col ^ J;
-            if (ixj > col) {
-                if ((col & K) == 0) {
-                    // ascending within block, but we want overall descending -> flip comparisons
-                    if (idx[col] >= ncols || (idx[ixj] < ncols && x_row[idx[col]] < x_row[idx[ixj]])) {
-                        int tmp = idx[col]; idx[col] = idx[ixj]; idx[ixj] = tmp;
-                    }
-                } else {
-                    if (idx[ixj] >= ncols || (idx[col] < ncols && x_row[idx[col]] > x_row[idx[ixj]])) {
-                        int tmp = idx[col]; idx[col] = idx[ixj]; idx[ixj] = tmp;
-                    }
-                }
-            }
-            __syncthreads();
-        }
-    }
-    // write top-k
-    if (col < k && col < ncols) {
-        dst[row * k + col] = idx[col];
-    }
-}
+
 
 // float -> key mapping ascending; to get descending selection we pick largest keys
 static __device__ __forceinline__ uint32_t float_to_key_desc(float x) {
@@ -104,12 +72,11 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     const float * col = scores + (size_t)ld * t;
     // find thr0 from gt_counts
     int thr0 = 0;
-    uint32_t gt = 0; (void)gt;
     for (int b = 255; b >= 0; --b) {
         uint32_t sgt = gt_counts[b + 256*t];
         uint32_t prev = (b == 0 ? (uint32_t)N : gt_counts[(b - 1) + 256*t]);
         uint32_t eq   = prev - gt_counts[b + 256*t];
-        if (sgt < (uint32_t)k && sgt + eq >= (uint32_t)k) { thr0 = b; gt = sgt; break; }
+        if (sgt < (uint32_t)k && sgt + eq >= (uint32_t)k) { thr0 = b; break; }
     }
     if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL && threadIdx.x == 0) {
         uint32_t sgt = gt_counts[thr0 + 256*t];
