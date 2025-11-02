@@ -201,7 +201,7 @@ using std::function;
       const std::function<void(ggml_tensor *, const char *, int)> & cb,
       ggml_cgraph * gf,
       ggml_backend_sched_t sched,
-      ggml_backend_t backend_cpu) {
+      ggml_backend_t /*backend_cpu*/) {
       const int64_t D    = q_indexer->ne[0];
       const int64_t H    = q_indexer->ne[1];
       const int64_t T    = q_indexer->ne[2];
@@ -300,32 +300,23 @@ using std::function;
       for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {
           const int64_t Tc = std::min<int64_t>(TILE_T, T - t0);
 
-          // Q_tile all heads: [D, H*Tc]
-          size_t q_off = t0 * H * Q2d_full->nb[1];
-          ggml_tensor * Q_tile_all = ggml_view_2d(ctx, Q2d_full, D, H * Tc, Q2d_full->nb[1], q_off);
+          // Build 3D contiguous view for head-wise tiles: q3d [D, T, H]
+          ggml_tensor * q3d = ggml_reshape_3d(ctx, q_cont, D, T, H);
 
-          // Accumulate per-head contributions into [N_kv, Tc]
-          ggml_tensor * scores_tc = nullptr; // unused placeholder
-          // Compute logits for all heads in one GEMM: [N_kv, H*Tc]
-          ggml_tensor * logits_all = ggml_mul_mat(ctx, k_indexer, Q_tile_all);
-          if (dbg && t0 == 0) {
-              cb(logits_all, "idxkv_logits_all", -1);
-          }
-          // Reshape and apply ReLU: [N_kv, H, Tc]
-          ggml_tensor * logits_resh = ggml_reshape_3d(ctx, logits_all, N_kv, H, Tc);
-          ggml_tensor * logits_act  = ggml_relu(ctx, logits_resh);
-          // Weights slice [H, Tc] and broadcast-mul, then sum over H → [N_kv, Tc]
-          ggml_tensor * w_slice = ggml_view_2d(ctx, weights, H, Tc, weights->nb[1], t0*weights->nb[1]);
-
-          // Per-head weighted sum path to avoid giant broadcast tensors
+          // Accumulate per-head contributions into [N_kv, Tc] without materializing [N_kv, H*Tc]
+          ggml_tensor * scores_tc = nullptr;
           {
               ggml_tensor * scores_acc = nullptr;
               for (int64_t h_idx = 0; h_idx < H; ++h_idx) {
-                  size_t off_h = (size_t)h_idx * logits_act->nb[1];
-                  ggml_tensor * logits_h = ggml_view_2d(ctx, logits_act, N_kv, Tc, logits_act->nb[2], off_h);
+                  size_t q_off_head = (size_t)t0 * q3d->nb[1] + (size_t)h_idx * q3d->nb[2];
+                  ggml_tensor * q_h_tile = ggml_view_2d(ctx, q3d, D, Tc, q3d->nb[1], q_off_head);
 
-                  size_t w_off_h = (size_t)h_idx * w_slice->nb[0];
-                  ggml_tensor * w_row = ggml_view_2d(ctx, w_slice, 1, Tc, w_slice->nb[1], w_off_h);
+                  ggml_tensor * logits_h = ggml_mul_mat(ctx, k_indexer, q_h_tile); // [N_kv, Tc]
+                  logits_h = ggml_relu(ctx, logits_h);
+
+                  // weight row [1, Tc] from weights [H, T]
+                  size_t w_off = (size_t)h_idx * weights->nb[0] + (size_t)t0 * weights->nb[1];
+                  ggml_tensor * w_row = ggml_view_2d(ctx, weights, 1, Tc, weights->nb[1], w_off);
                   ggml_tensor * w_row_b = ggml_repeat(ctx, w_row, logits_h);
                   ggml_tensor * contrib_h = ggml_mul(ctx, logits_h, w_row_b);
                   scores_acc = scores_acc ? ggml_add(ctx, scores_acc, contrib_h) : contrib_h;
@@ -341,13 +332,12 @@ using std::function;
               scores_tc = ggml_mul(ctx, scores_tc, k_scale_bcast);
           }
 
-          // Debug (cb): per-tile scalar sums (no deref)
+          // Debug-only summaries
           if (dbg) {
               ggml_tensor * idxkv_scores_sum = ggml_sum(ctx, scores_tc);
               ggml_tensor * idxkv_scores_ssq = ggml_sum(ctx, ggml_sqr(ctx, scores_tc));
-              ggml_tensor * idxkv_scores_post_abs_sum = nullptr;
               if (t0 == 0) {
-                  idxkv_scores_post_abs_sum = ggml_sum(ctx, ggml_abs(ctx, scores_tc));
+                  ggml_tensor * idxkv_scores_post_abs_sum = ggml_sum(ctx, ggml_abs(ctx, scores_tc));
                   cb(idxkv_scores_post_abs_sum, "idxkv_scores_post_abs_sum", -1);
                   if (gf) {
                       ggml_set_output(idxkv_scores_post_abs_sum);
