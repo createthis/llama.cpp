@@ -16,7 +16,7 @@ int main() {
     printf("CUDA not enabled; skipping select stress test\n");
     return 0;
 #else
-    printf("Select stress CUDA (streaming fallback) ...\n");
+    printf("Select stress CUDA ...\n");
     const int N = 16384;
     const int T = 3;
     const int K = 32;

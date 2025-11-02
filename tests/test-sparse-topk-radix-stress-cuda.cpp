@@ -16,7 +16,7 @@ int main() {
     printf("CUDA not enabled; skipping radix stress test\n");
     return 0;
 #else
-    printf("Radix end-to-end stress CUDA (streaming default) ...\n");
+    printf("Radix end-to-end stress CUDA ...\n");
     const int N = 32768;
     const int T = 2;
     const int K = 64;
