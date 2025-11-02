@@ -2527,8 +2527,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 GGML_ASSERT(dst->type == GGML_TYPE_I32);
                 int N = (int)scores->ne[0];
                 int T = (int)ggml_nrows(scores);
-                int ld = (int)(scores->nb[1] / sizeof(float));
-                ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, ld, k, (int *)dst->data);
+                ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
                 cudaError_t err_topk = cudaGetLastError();
                 if (err_topk != cudaSuccess) {
                     GGML_LOG_ERROR("ggml_cuda_compute_forward: SPARSE_TOPK_RADIX failed");

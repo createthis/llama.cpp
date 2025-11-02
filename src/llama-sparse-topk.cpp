@@ -18,11 +18,11 @@ static inline uint32_t float_to_key_desc(float x) {
     uint32_t u;
     memcpy(&u, &x, sizeof(u));
     // Map float bits to monotonically increasing unsigned keys (ascending order):
-    // Use standard order-preserving transform: negative -> bitwise NOT, non-negative -> XOR sign bit
+    // TileLang-compatible mapping: negative -> bitwise NOT, non-negative -> set sign bit
     if ((int32_t)u < 0) {
         u = ~u;
     } else {
-        u ^= 0x80000000u;
+        u |= 0x80000000u;
     }
     return u;
 }
