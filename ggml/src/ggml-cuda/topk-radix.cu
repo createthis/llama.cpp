@@ -20,7 +20,7 @@ static __device__ __forceinline__ uint32_t float_to_key_desc(float x) {
     if ((int32_t)u < 0) {
         return ~u;
     } else {
-        return u | 0x80000000u;
+        return u ^ 0x80000000u;
     }
 }
 
@@ -93,13 +93,17 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     extern __shared__ int shared[];
     int * eq_buf = shared; // temporary storage of eq indices (bounded)
     __shared__ int eq_count;
+    __shared__ int eq_raw;
     __shared__ int sel_count;
+    __shared__ int s_sel_count;
     if (threadIdx.x == 0) { eq_count = 0; sel_count = 0; }
     __syncthreads();
     if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL && threadIdx.x == 0) {
         printf("[t=%d] start collect: eq_count=%d sel_count=%d\n", t, eq_count, sel_count);
     }
 
+    if (threadIdx.x == 0) eq_raw = 0;
+    __syncthreads();
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
         uint32_t key = float_to_key_desc(col[i]);
         int bin = (key >> 24) & 0xFF;
@@ -110,15 +114,25 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
                 idx_out[pos + k*t] = clamped;
             }
         } else if (bin == thr0) {
-            int pos = atomicAdd(&eq_count, 1);
-            if (pos < eq_capacity) eq_buf[pos] = i;
+            int raw = atomicAdd(&eq_raw, 1);
+            if (raw < eq_capacity) {
+                int pos = atomicAdd(&eq_count, 1);
+                if (pos < eq_capacity) eq_buf[pos] = i;
+            }
         }
     }
-    
     __syncthreads();
 
-    // cap eq_count to allocated shared buffer capacity
-    if (threadIdx.x == 0 && eq_count > eq_capacity) eq_count = eq_capacity;
+    // cap eq_count to allocated shared buffer capacity and adjust remaining based on raw count
+    if (threadIdx.x == 0) {
+        if (eq_count > eq_capacity) eq_count = eq_capacity;
+        int selected_gt = sel_count;
+        int needed = k - selected_gt;
+        if (needed < 0) needed = 0;
+        if (eq_raw < needed) {
+            // not enough equal-bin candidates to fill K: will fall back to skipping remaining
+        }
+    }
     __syncthreads();
 
     int remaining = k - sel_count;
@@ -207,20 +221,9 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
 
     // Equal-bin selection kernel; bound dynamic shared memory to device limit
     const int sel_threads = 256;
-    int dev_id = 0; cudaGetDevice(&dev_id);
-    cudaDeviceProp prop; cudaGetDeviceProperties(&prop, dev_id);
-    int max_dyn = prop.sharedMemPerBlockOptin ? prop.sharedMemPerBlockOptin : prop.sharedMemPerBlock;
-    int budget = max_dyn - 2048; // leave room for static shared
-    if (budget < 0) budget = 0;
-    int eq_cap = N;
-    if ((int) (sizeof(int) * (size_t)N) > budget) {
-        eq_cap = budget / (int)sizeof(int);
-        if (eq_cap < k) eq_cap = k; // at least k to make progress
-    }
+    // Conservative eq buffer capacity to avoid exceeding per-block shared mem
+    const int eq_cap = max(k, min(N, 12000));
     size_t sel_shmem = (size_t) eq_cap * sizeof(int);
-    if ((int) sel_shmem > 0) {
-        CUDA_SET_SHARED_MEMORY_LIMIT(k_select_topk_bins, (int) sel_shmem);
-    }
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap, gt_counts_d, idx_d);
 
     cudaFree(gt_counts_d);
@@ -284,8 +287,9 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
     cudaMemcpyAsync(gt_counts_d, gt_counts_h, sizeof(uint32_t) * 256 * (size_t)T, cudaMemcpyHostToDevice, stream);
 
     const int sel_threads = 256;
-    const size_t sel_shmem = (size_t) N * sizeof(int);
-    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, /*eq_capacity=*/N, gt_counts_d, idx_d);
+    const int eq_cap_host = max(k, min(N, 4096));
+    const size_t sel_shmem = (size_t) eq_cap_host * sizeof(int);
+    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap_host, gt_counts_d, idx_d);
 
     cudaMemcpyAsync(idx_h, idx_d, sizeof(int) * (size_t)k * T, cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
