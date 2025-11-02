@@ -11,9 +11,6 @@
 #endif
 
 
-// simple bitonic top-k per column (descending)
-
-
 // float -> key mapping ascending; to get descending selection we pick largest keys
 static __device__ __forceinline__ uint32_t float_to_key_desc(float x) {
     uint32_t u = __float_as_uint(x);
