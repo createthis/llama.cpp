@@ -141,7 +141,38 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     }
     if (remaining <= 0) return;
 
-    // Fill remaining from thr0 by value. Use eq_buf if present, else streaming scan.
+    // Reduce equal-bin candidates to a small pool per-thread (LOCAL_TOP)
+    const int LOCAL_TOP = 4;
+    int loc_idx[LOCAL_TOP];
+    float loc_val[LOCAL_TOP];
+    for (int l = 0; l < LOCAL_TOP; ++l) { loc_idx[l] = -1; loc_val[l] = -1.0e30f; }
+    for (int i0 = threadIdx.x; i0 < eq_count; i0 += blockDim.x) {
+        int idx = eq_buf[i0];
+        if (idx < 0) continue;
+        float v = col[idx];
+        int min_pos = 0; float min_val = loc_val[0];
+        for (int l = 1; l < LOCAL_TOP; ++l) if (loc_val[l] < min_val) { min_val = loc_val[l]; min_pos = l; }
+        if (v > min_val) { loc_val[min_pos] = v; loc_idx[min_pos] = idx; }
+    }
+    // compact per-thread local top into eq_buf contiguously
+    __shared__ int pool_count;
+    if (threadIdx.x == 0) pool_count = 0;
+    __syncthreads();
+    for (int l = 0; l < LOCAL_TOP; ++l) {
+        int idx = loc_idx[l];
+        if (idx >= 0) {
+            int pos = atomicAdd(&pool_count, 1);
+            if (pos < eq_capacity) eq_buf[pos] = idx;
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        if (pool_count > eq_capacity) pool_count = eq_capacity;
+        eq_count = pool_count;
+    }
+    __syncthreads();
+
+    // Fill remaining from reduced pool
     for (int r = 0; r < remaining; ++r) {
         __syncthreads();
         float best_val = -1.0e30f;
