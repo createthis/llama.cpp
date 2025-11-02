@@ -300,26 +300,46 @@ using std::function;
       for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {
           const int64_t Tc = std::min<int64_t>(TILE_T, T - t0);
 
-          // Build 3D contiguous view for head-wise tiles: q3d [D, T, H]
-          ggml_tensor * q3d = ggml_reshape_3d(ctx, q_cont, D, T, H);
+          // Use contiguized [D, T, H] directly for head-wise tiles
+          ggml_tensor * q3d = q_cont;
 
-          // Accumulate per-head contributions into [N_kv, Tc] without materializing [N_kv, H*Tc]
+          // Accumulate per-head contributions into [N_kv, Tc] using head-chunked GEMMs
           ggml_tensor * scores_tc = nullptr;
           {
               ggml_tensor * scores_acc = nullptr;
-              for (int64_t h_idx = 0; h_idx < H; ++h_idx) {
-                  size_t q_off_head = (size_t)t0 * q3d->nb[1] + (size_t)h_idx * q3d->nb[2];
-                  ggml_tensor * q_h_tile = ggml_view_2d(ctx, q3d, D, Tc, q3d->nb[1], q_off_head);
+              long HEAD_CHUNK = 8;
+              if (const char *env = getenv("LLAMA_SPARSE_TOPK_HEAD_CHUNK")) {
+                  long v = strtol(env, nullptr, 10);
+                  if (v > 0) HEAD_CHUNK = v;
+              }
+              if (HEAD_CHUNK > (long)H) HEAD_CHUNK = (long)H;
+              if (HEAD_CHUNK < 1) HEAD_CHUNK = 1;
 
-                  ggml_tensor * logits_h = ggml_mul_mat(ctx, k_indexer, q_h_tile); // [N_kv, Tc]
-                  logits_h = ggml_relu(ctx, logits_h);
+              ggml_tensor * w_slice = ggml_view_2d(ctx, weights, H, Tc, weights->nb[1], t0*weights->nb[1]);
 
-                  // weight row [1, Tc] from weights [H, T]
-                  size_t w_off = (size_t)h_idx * weights->nb[0] + (size_t)t0 * weights->nb[1];
-                  ggml_tensor * w_row = ggml_view_2d(ctx, weights, 1, Tc, weights->nb[1], w_off);
-                  ggml_tensor * w_row_b = ggml_repeat(ctx, w_row, logits_h);
-                  ggml_tensor * contrib_h = ggml_mul(ctx, logits_h, w_row_b);
-                  scores_acc = scores_acc ? ggml_add(ctx, scores_acc, contrib_h) : contrib_h;
+              for (int64_t h0 = 0; h0 < H; h0 += HEAD_CHUNK) {
+                  int64_t ch = std::min<int64_t>(HEAD_CHUNK, H - h0);
+
+                  size_t q_off_head = (size_t)t0 * q3d->nb[1] + (size_t)h0 * q3d->nb[2];
+                  ggml_tensor * q_chunk_3d = ggml_view_3d(ctx, q3d, D, Tc, ch, q3d->nb[1], q3d->nb[2], q_off_head);
+                  q_chunk_3d = ggml_cont(ctx, q_chunk_3d);
+                  ggml_tensor * q_chunk_2d = ggml_reshape_2d(ctx, q_chunk_3d, D, Tc*ch);
+
+                  ggml_tensor * logits_chunk = ggml_mul_mat(ctx, k_indexer, q_chunk_2d); // [N_kv, Tc*ch]
+                  logits_chunk = ggml_cont(ctx, logits_chunk);
+                  ggml_tensor * logits_chunk_3d = ggml_reshape_3d(ctx, logits_chunk, N_kv, ch, Tc);
+                  logits_chunk_3d = ggml_relu(ctx, logits_chunk_3d);
+
+                  for (int64_t hh = 0; hh < ch; ++hh) {
+                      size_t off_hh = (size_t)hh * logits_chunk_3d->nb[1];
+                      ggml_tensor * logits_hh = ggml_view_2d(ctx, logits_chunk_3d, N_kv, Tc, logits_chunk_3d->nb[2], off_hh);
+
+                      size_t w_off_e = (size_t)(h0 + hh) * w_slice->nb[0];
+                      ggml_tensor * w_row = ggml_view_2d(ctx, w_slice, 1, Tc, w_slice->nb[1], w_off_e);
+                      ggml_tensor * w_row_b = ggml_repeat(ctx, w_row, logits_hh);
+                      ggml_tensor * contrib_hh = ggml_mul(ctx, logits_hh, w_row_b);
+                      scores_acc = scores_acc ? ggml_add(ctx, scores_acc, contrib_hh) : contrib_hh;
+                  }
               }
               scores_tc = scores_acc;
           }
