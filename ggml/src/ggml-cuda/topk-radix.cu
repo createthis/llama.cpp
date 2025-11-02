@@ -138,7 +138,120 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     if (remaining <= 0) return;
 
 
-    // (Staged second/third byte refinement path currently disabled by default)
+    // Staged refinement over equal top-byte bin: refine using second and third bytes on eq_buf to reduce pool
+    int needed = k - sel_count;
+    if (needed > 0 && eq_count > 0) {
+        __shared__ unsigned int h2[256];
+        for (int i = threadIdx.x; i < 256; i += blockDim.x) h2[i] = 0u;
+        __syncthreads();
+        // Build second-byte histogram over eq_buf
+        for (int j = threadIdx.x; j < eq_count; j += blockDim.x) {
+            int idx = eq_buf[j];
+            if (idx < 0) continue;
+            uint32_t key = float_to_key_desc(col[idx]);
+            int b1 = (key >> 16) & 0xFF;
+            atomicAdd(&h2[b1], 1u);
+        }
+        __syncthreads();
+        // Threshold for second byte
+        int thr1 = 0; if (threadIdx.x == 0) {
+            unsigned int sum = 0; unsigned int need = (unsigned int) needed;
+            for (int b = 255; b >= 0; --b) {
+                unsigned int sgt = sum;
+                unsigned int eqb = h2[b];
+                if (sgt < need && sgt + eqb >= need) { thr1 = b; break; }
+                sum += eqb;
+            }
+            h2[0] = (unsigned int) thr1; // stash thr1 into shared
+        }
+        __syncthreads();
+        thr1 = (int) h2[0];
+        // Select strictly greater on second byte and filter eq_buf to b1==thr1
+        for (int j = threadIdx.x; j < eq_count; j += blockDim.x) {
+            int idx = eq_buf[j]; if (idx < 0) continue;
+            uint32_t key = float_to_key_desc(col[idx]);
+            int b1 = (key >> 16) & 0xFF;
+            if (b1 > thr1) {
+                int pos = atomicAdd(&sel_count, 1);
+                if (pos < k) idx_out[pos + k*t] = idx;
+                eq_buf[j] = -1; // remove from eq
+            } else if (b1 < thr1) {
+                eq_buf[j] = -1;
+            }
+        }
+        __syncthreads();
+        // Compact eq_buf to only b1==thr1
+        __shared__ int new_eq_count;
+        if (threadIdx.x == 0) new_eq_count = 0;
+        __syncthreads();
+        for (int j = threadIdx.x; j < eq_count; j += blockDim.x) {
+            int idx = eq_buf[j];
+            if (idx >= 0) {
+                int pos = atomicAdd(&new_eq_count, 1);
+                if (pos < eq_capacity) eq_buf[pos] = idx;
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            eq_count = new_eq_count;
+            if (eq_count > eq_capacity) eq_count = eq_capacity;
+        }
+        __syncthreads();
+        needed = k - sel_count;
+        // Third-byte refinement if still needed
+        if (needed > 0 && eq_count > 0) {
+            __shared__ unsigned int h3[256];
+            for (int i = threadIdx.x; i < 256; i += blockDim.x) h3[i] = 0u;
+            __syncthreads();
+            for (int j = threadIdx.x; j < eq_count; j += blockDim.x) {
+                int idx = eq_buf[j]; if (idx < 0) continue;
+                uint32_t key = float_to_key_desc(col[idx]);
+                int b2 = (key >> 8) & 0xFF;
+                atomicAdd(&h3[b2], 1u);
+            }
+            __syncthreads();
+            int thr2 = 0; if (threadIdx.x == 0) {
+                unsigned int sum = 0; unsigned int need = (unsigned int)(k - sel_count);
+                for (int b = 255; b >= 0; --b) {
+                    unsigned int sgt = sum;
+                    unsigned int eqb = h3[b];
+                    if (sgt < need && sgt + eqb >= need) { thr2 = b; break; }
+                    sum += eqb;
+                }
+                h3[0] = (unsigned int) thr2;
+            }
+            __syncthreads();
+            thr2 = (int) h3[0];
+            for (int j = threadIdx.x; j < eq_count; j += blockDim.x) {
+                int idx = eq_buf[j]; if (idx < 0) continue;
+                uint32_t key = float_to_key_desc(col[idx]);
+                int b2 = (key >> 8) & 0xFF;
+                if (b2 > thr2) {
+                    int pos = atomicAdd(&sel_count, 1);
+                    if (pos < k) idx_out[pos + k*t] = idx;
+                    eq_buf[j] = -1;
+                } else if (b2 < thr2) {
+                    eq_buf[j] = -1;
+                }
+            }
+            __syncthreads();
+            if (threadIdx.x == 0) new_eq_count = 0;
+            __syncthreads();
+            for (int j = threadIdx.x; j < eq_count; j += blockDim.x) {
+                int idx = eq_buf[j];
+                if (idx >= 0) {
+                    int pos = atomicAdd(&new_eq_count, 1);
+                    if (pos < eq_capacity) eq_buf[pos] = idx;
+                }
+            }
+            __syncthreads();
+            if (threadIdx.x == 0) {
+                eq_count = new_eq_count;
+                if (eq_count > eq_capacity) eq_count = eq_capacity;
+            }
+            __syncthreads();
+        }
+    }
 
     // Reduce equal-bin candidates to a small pool per-thread (LOCAL_TOP)
     const int LOCAL_TOP = 4;
@@ -252,7 +365,7 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
     // Equal-bin selection kernel; bound dynamic shared memory to device limit
     const int sel_threads = 256;
     // Conservative eq buffer capacity to avoid exceeding per-block shared mem
-    const int eq_cap = max(k, min(N, 12000));
+    const int eq_cap = max(k, min(N, 4096));
     size_t sel_shmem = (size_t) eq_cap * sizeof(int);
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap, gt_counts_d, idx_d);
 
