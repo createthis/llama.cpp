@@ -331,6 +331,7 @@ using std::function;
                   logits_chunk_3d = ggml_relu(ctx, logits_chunk_3d);
 
                   ggml_tensor * w_chunk = ggml_view_2d(ctx, w_slice, ch, Tc, w_slice->nb[1], (size_t)h0 * w_slice->nb[0]);
+                  w_chunk = ggml_cont(ctx, w_chunk);
                   ggml_tensor * w_chunk_3d = ggml_reshape_3d(ctx, w_chunk, 1, ch, Tc);
                   ggml_tensor * w_b = ggml_repeat(ctx, w_chunk_3d, logits_chunk_3d);
                   ggml_tensor * contrib = ggml_mul(ctx, logits_chunk_3d, w_b); // [N_kv, ch, Tc]
