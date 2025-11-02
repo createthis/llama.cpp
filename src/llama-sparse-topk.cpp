@@ -330,16 +330,19 @@ using std::function;
                   ggml_tensor * logits_chunk_3d = ggml_reshape_3d(ctx, logits_chunk, N_kv, ch, Tc);
                   logits_chunk_3d = ggml_relu(ctx, logits_chunk_3d);
 
-                  for (int64_t hh = 0; hh < ch; ++hh) {
-                      size_t off_hh = (size_t)hh * logits_chunk_3d->nb[1];
-                      ggml_tensor * logits_hh = ggml_view_2d(ctx, logits_chunk_3d, N_kv, Tc, logits_chunk_3d->nb[2], off_hh);
+                  ggml_tensor * w_chunk = ggml_view_2d(ctx, w_slice, ch, Tc, w_slice->nb[1], (size_t)h0 * w_slice->nb[0]);
+                  ggml_tensor * w_chunk_3d = ggml_reshape_3d(ctx, w_chunk, 1, ch, Tc);
+                  ggml_tensor * w_b = ggml_repeat(ctx, w_chunk_3d, logits_chunk_3d);
+                  ggml_tensor * contrib = ggml_mul(ctx, logits_chunk_3d, w_b); // [N_kv, ch, Tc]
 
-                      size_t w_off_e = (size_t)(h0 + hh) * w_slice->nb[0];
-                      ggml_tensor * w_row = ggml_view_2d(ctx, w_slice, 1, Tc, w_slice->nb[1], w_off_e);
-                      ggml_tensor * w_row_b = ggml_repeat(ctx, w_row, logits_hh);
-                      ggml_tensor * contrib_hh = ggml_mul(ctx, logits_hh, w_row_b);
-                      scores_acc = scores_acc ? ggml_add(ctx, scores_acc, contrib_hh) : contrib_hh;
-                  }
+                  ggml_tensor * contrib_perm = ggml_permute(ctx, contrib, 1, 0, 2, 3); // [ch, N_kv, Tc]
+                  contrib_perm = ggml_cont(ctx, contrib_perm);
+                  ggml_tensor * contrib_2d = ggml_reshape_2d(ctx, contrib_perm, ch, N_kv*Tc);
+                  ggml_tensor * sum2d = ggml_sum_rows(ctx, contrib_2d); // [1, N_kv*Tc]
+                  ggml_tensor * sum2d_cont = ggml_cont(ctx, sum2d);
+                  ggml_tensor * sum2d_resh = ggml_reshape_2d(ctx, sum2d_cont, N_kv, Tc); // [N_kv, Tc]
+
+                  scores_acc = scores_acc ? ggml_add(ctx, scores_acc, sum2d_resh) : sum2d_resh;
               }
               scores_tc = scores_acc;
           }

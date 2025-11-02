@@ -252,7 +252,7 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
     // Equal-bin selection kernel; bound dynamic shared memory to device limit
     const int sel_threads = 256;
     // Conservative eq buffer capacity to avoid exceeding per-block shared mem
-    const int eq_cap = max(k, min(N, 4096));
+    const int eq_cap = max(k, min(N, 12000));
     size_t sel_shmem = (size_t) eq_cap * sizeof(int);
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap, gt_counts_d, idx_d);
 
