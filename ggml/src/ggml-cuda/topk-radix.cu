@@ -63,7 +63,7 @@ static __global__ void k_histogram_topbyte(const float * __restrict__ scores,
 
 // select indices > threshold bin and collect equals for tail passes; simplified single-pass fallback uses argsort for small N
 static __global__ void k_select_topk_bins(const float * __restrict__ scores,
-                                          int N, int T, int ld, int k,
+                                          int N, int T, int ld, int k, int eq_capacity,
                                           const uint32_t * __restrict__ gt_counts, // [256, T]
                                           int * __restrict__ idx_out) {
     int t = blockIdx.x;
@@ -91,7 +91,7 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     }
     // Now collect selected (> thr0) and equality list; parallelize by striding threads
     extern __shared__ int shared[];
-    int * eq_buf = shared; // temporary storage of eq indices, length N in worst case; we limit by blockDim.x cooperative compaction
+    int * eq_buf = shared; // temporary storage of eq indices (bounded)
     __shared__ int eq_count;
     __shared__ int sel_count;
     if (threadIdx.x == 0) { eq_count = 0; sel_count = 0; }
@@ -111,14 +111,14 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
             }
         } else if (bin == thr0) {
             int pos = atomicAdd(&eq_count, 1);
-            if (pos < N) eq_buf[pos] = i;
+            if (pos < eq_capacity) eq_buf[pos] = i;
         }
     }
     
     __syncthreads();
 
-    // cap eq_count to allocated shared buffer capacity N
-    if (threadIdx.x == 0 && eq_count > N) eq_count = N;
+    // cap eq_count to allocated shared buffer capacity
+    if (threadIdx.x == 0 && eq_count > eq_capacity) eq_count = eq_capacity;
     __syncthreads();
 
     int remaining = k - sel_count;
@@ -205,10 +205,23 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
     const size_t hist_shmem = 256 * sizeof(uint32_t);
     k_histogram_topbyte<<<T, hist_threads, hist_shmem, stream>>>(scores_d, N, T, /*ld=*/N, thr_bins_d, gt_counts_d);
 
-    // Equal-bin selection kernel; uses shared memory for eq candidates (worst-case N indices)
+    // Equal-bin selection kernel; bound dynamic shared memory to device limit
     const int sel_threads = 256;
-    const size_t sel_shmem = (size_t) N * sizeof(int);
-    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, gt_counts_d, idx_d);
+    int dev_id = 0; cudaGetDevice(&dev_id);
+    cudaDeviceProp prop; cudaGetDeviceProperties(&prop, dev_id);
+    int max_dyn = prop.sharedMemPerBlockOptin ? prop.sharedMemPerBlockOptin : prop.sharedMemPerBlock;
+    int budget = max_dyn - 2048; // leave room for static shared
+    if (budget < 0) budget = 0;
+    int eq_cap = N;
+    if ((int) (sizeof(int) * (size_t)N) > budget) {
+        eq_cap = budget / (int)sizeof(int);
+        if (eq_cap < k) eq_cap = k; // at least k to make progress
+    }
+    size_t sel_shmem = (size_t) eq_cap * sizeof(int);
+    if ((int) sel_shmem > 0) {
+        CUDA_SET_SHARED_MEMORY_LIMIT(k_select_topk_bins, (int) sel_shmem);
+    }
+    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap, gt_counts_d, idx_d);
 
     cudaFree(gt_counts_d);
     cudaFree(thr_bins_d);
@@ -272,7 +285,7 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
 
     const int sel_threads = 256;
     const size_t sel_shmem = (size_t) N * sizeof(int);
-    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, gt_counts_d, idx_d);
+    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, /*eq_capacity=*/N, gt_counts_d, idx_d);
 
     cudaMemcpyAsync(idx_h, idx_d, sizeof(int) * (size_t)k * T, cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
