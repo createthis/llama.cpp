@@ -95,7 +95,6 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     __shared__ int eq_count;
     __shared__ int eq_raw;
     __shared__ int sel_count;
-    __shared__ int s_sel_count;
     if (threadIdx.x == 0) { eq_count = 0; sel_count = 0; }
     __syncthreads();
     if (SEL_DEBUG && blockIdx.x == SEL_DEBUG_COL && threadIdx.x == 0) {
