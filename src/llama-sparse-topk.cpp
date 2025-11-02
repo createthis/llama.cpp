@@ -242,6 +242,15 @@ using std::function;
       ggml_tensor * Q2d_full = ggml_reshape_2d(ctx, q_cont, D, T*H);
       cb(Q2d_full, "idxkv_Q2d_full", -1);
 
+      // Optional FP16 path for indexer GEMMs
+      ggml_tensor * k_indexer_f16 = k_indexer;
+      const char *env_fp16 = getenv("LLAMA_SPARSE_TOPK_FP16");
+      const bool use_fp16 = (env_fp16 && atoi(env_fp16) != 0);
+      if (use_fp16 && k_indexer->type != GGML_TYPE_F16) {
+          k_indexer_f16 = ggml_cast(ctx, k_indexer, GGML_TYPE_F16);
+          k_indexer_f16 = ggml_cont(ctx, k_indexer_f16);
+      }
+
 
       // Diagnostics: sample K indexer head/tail once per call
       if (dbg) {
@@ -276,10 +285,10 @@ using std::function;
       }
 
       const int64_t k = std::min<int64_t>(top_k, N_kv);
-      int64_t TILE_T = 128; // larger default tile improves GEMM utilization; overridable via env
+      int64_t TILE_T = use_fp16 ? 512 : 256; // heuristic default; overridable via env
       if (const char *env = getenv("LLAMA_SPARSE_TOPK_TILE_T")) {
           long v = strtol(env, nullptr, 10);
-          if (v > 0 && v <= 4096) TILE_T = v;
+          if (v > 0 && v <= 8192) TILE_T = v;
       }
       if (dbg) {
           printf("[TOPK-INDEXER] N_kv=%lld T=%lld k=%lld TILE_T=%lld H=%lld D=%lld\n",
@@ -325,20 +334,36 @@ using std::function;
                   q_chunk_3d = ggml_cont(ctx, q_chunk_3d);
                   ggml_tensor * q_chunk_2d = ggml_reshape_2d(ctx, q_chunk_3d, D, Tc*ch);
 
-                  ggml_tensor * logits_chunk = ggml_mul_mat(ctx, k_indexer, q_chunk_2d); // [N_kv, Tc*ch]
+                  // Cast inputs to F16 if enabled
+                  ggml_tensor * a_k = k_indexer_f16;
+                  ggml_tensor * b_q = q_chunk_2d;
+                  if (use_fp16 && q_chunk_2d->type != GGML_TYPE_F16) {
+                      b_q = ggml_cast(ctx, q_chunk_2d, GGML_TYPE_F16);
+                      b_q = ggml_cont(ctx, b_q);
+                  }
+
+                  ggml_tensor * logits_chunk = ggml_mul_mat(ctx, a_k, b_q); // [N_kv, Tc*ch]
                   logits_chunk = ggml_cont(ctx, logits_chunk);
-                  ggml_tensor * logits_chunk_3d = ggml_reshape_3d(ctx, logits_chunk, N_kv, ch, Tc);
+                  ggml_tensor * logits_chunk_3d = ggml_reshape_3d(ctx, logits_chunk, N_kv, ch, Tc); // [N_kv, ch, Tc]
                   logits_chunk_3d = ggml_relu(ctx, logits_chunk_3d);
 
-                  for (int64_t hh = 0; hh < ch; ++hh) {
-                      size_t off_hh = (size_t)hh * logits_chunk_3d->nb[1];
-                      ggml_tensor * logits_hh = ggml_view_2d(ctx, logits_chunk_3d, N_kv, Tc, logits_chunk_3d->nb[2], off_hh);
-                      size_t w_off_e = (size_t)(h0 + hh) * w_slice->nb[0];
-                      ggml_tensor * w_row = ggml_view_2d(ctx, w_slice, 1, Tc, w_slice->nb[1], w_off_e);
-                      ggml_tensor * w_row_b = ggml_repeat(ctx, w_row, logits_hh);
-                      ggml_tensor * contrib_hh = ggml_mul(ctx, logits_hh, w_row_b);
-                      scores_acc = scores_acc ? ggml_add(ctx, scores_acc, contrib_hh) : contrib_hh;
-                  }
+                  // Fused weighted reduction across heads in this chunk
+                  size_t w_off_chunk = (size_t)h0 * w_slice->nb[0];
+                  ggml_tensor * w_sub_2d = ggml_view_2d(ctx, w_slice, ch, Tc, w_slice->nb[1], w_off_chunk); // [ch, Tc]
+                  w_sub_2d = ggml_cont(ctx, w_sub_2d);
+                  ggml_tensor * w_sub_3d = ggml_reshape_3d(ctx, w_sub_2d, ch, 1, Tc); // [ch,1,Tc]
+
+                  ggml_tensor * log_p = ggml_permute(ctx, logits_chunk_3d, 1, 0, 2, 3); // [ch, N_kv, Tc]
+                  log_p = ggml_cont(ctx, log_p);
+                  ggml_tensor * w_bc  = ggml_repeat(ctx, w_sub_3d, log_p);             // [ch, N_kv, Tc]
+                  w_bc = ggml_cont(ctx, w_bc);
+                  ggml_tensor * prod  = ggml_mul(ctx, log_p, w_bc);                     // [ch, N_kv, Tc]
+                  ggml_tensor * sum_ch= ggml_sum_rows(ctx, prod);                       // [1, N_kv, Tc]
+                  ggml_tensor * sum_p = ggml_permute(ctx, sum_ch, 1, 2, 0, 3);          // [N_kv, Tc, 1]
+                  sum_p = ggml_cont(ctx, sum_p);
+                  ggml_tensor * scores_chunk = ggml_reshape_2d(ctx, sum_p, N_kv, Tc);   // [N_kv, Tc]
+
+                  scores_acc = scores_acc ? ggml_add(ctx, scores_acc, scores_chunk) : scores_chunk;
               }
               scores_tc = scores_acc;
           }
