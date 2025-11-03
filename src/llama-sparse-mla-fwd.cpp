@@ -89,6 +89,9 @@ using std::function;
 
       ggml_tensor * K4d = ggml_reshape_4d(ctx, k_cache, Dk*Hkv, N_kv, 1, 1);
       ggml_tensor * V4d = ggml_reshape_4d(ctx, V_gather_src, Dv*Hkv_v, N_kv_v, 1, 1);
+      // Precompute a transposed 2D view of V to avoid per-token transpose
+      ggml_tensor * V2d = ggml_reshape_2d(ctx, V_gather_src, Dv*Hkv_v, N_kv_v);
+      ggml_tensor * V2d_T = ggml_cont(ctx, ggml_transpose(ctx, V2d)); // [N_kv, Dv*Hkv_v]
 
       ggml_tensor * q_all_2d = ggml_reshape_2d(ctx, q_cur, Dq, Hq*T);
 
