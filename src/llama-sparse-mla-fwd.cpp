@@ -83,6 +83,9 @@ using std::function;
       // Optional FP16 path for sparse MLA GEMMs
       const char *env_mla_fp16 = getenv("LLAMA_SPARSE_MLA_FP16");
       const bool use_mla_fp16 = (env_mla_fp16 && atoi(env_mla_fp16) != 0);
+      // Optional FP16 for PV multiply; defaults to LLAMA_SPARSE_MLA_FP16 when not set
+      const char *env_mla_pv_fp16 = getenv("LLAMA_SPARSE_MLA_PV_FP16");
+      const bool use_mla_pv_fp16 = env_mla_pv_fp16 ? (atoi(env_mla_pv_fp16) != 0) : use_mla_fp16;
       ggml_tensor * output_acc = nullptr;
       for (int64_t t = 0; t < T; ++t) {
           GGML_ASSERT(topk_indices->ne[0] == top_k);
