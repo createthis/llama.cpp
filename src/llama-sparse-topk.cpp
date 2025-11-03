@@ -309,6 +309,9 @@ using std::function;
       for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {
           const int64_t Tc = std::min<int64_t>(TILE_T, T - t0);
 
+
+            const int64_t kv_end = std::min<int64_t>(N_kv, std::max<int64_t>(k, t0 + Tc));
+
           // Use contiguized [D, T, H] directly for head-wise tiles
           ggml_tensor * q3d = q_cont;
 
@@ -342,9 +345,10 @@ using std::function;
                       b_q = ggml_cont(ctx, b_q);
                   }
 
-                  ggml_tensor * logits_chunk = ggml_mul_mat(ctx, a_k, b_q); // [N_kv, Tc*ch]
+                  ggml_tensor * k_slice = ggml_view_2d(ctx, a_k, D, kv_end, k_indexer->nb[1], 0);
+                    ggml_tensor * logits_chunk = ggml_mul_mat(ctx, k_slice, b_q); // [kv_end, Tc*ch]
                   logits_chunk = ggml_cont(ctx, logits_chunk);
-                  ggml_tensor * logits_chunk_3d = ggml_reshape_3d(ctx, logits_chunk, N_kv, ch, Tc); // [N_kv, ch, Tc]
+                  ggml_tensor * logits_chunk_3d = ggml_reshape_3d(ctx, logits_chunk, kv_end, ch, Tc); // [kv_end, ch, Tc]
                   logits_chunk_3d = ggml_relu(ctx, logits_chunk_3d);
 
                   // Fused weighted reduction across heads in this chunk
@@ -359,9 +363,9 @@ using std::function;
                   w_bc = ggml_cont(ctx, w_bc);
                   ggml_tensor * prod  = ggml_mul(ctx, log_p, w_bc);                     // [ch, N_kv, Tc]
                   ggml_tensor * sum_ch= ggml_sum_rows(ctx, prod);                       // [1, N_kv, Tc]
-                  ggml_tensor * sum_p = ggml_permute(ctx, sum_ch, 1, 2, 0, 3);          // [N_kv, Tc, 1]
+                  ggml_tensor * sum_p = ggml_permute(ctx, sum_ch, 1, 2, 0, 3);          // [kv_end, Tc, 1]
                   sum_p = ggml_cont(ctx, sum_p);
-                  ggml_tensor * scores_chunk = ggml_reshape_2d(ctx, sum_p, N_kv, Tc);   // [N_kv, Tc]
+                  ggml_tensor * scores_chunk = ggml_reshape_2d(ctx, sum_p, kv_end, Tc);   // [kv_end, Tc]
 
                   scores_acc = scores_acc ? ggml_add(ctx, scores_acc, scores_chunk) : scores_chunk;
               }
@@ -370,11 +374,12 @@ using std::function;
 
 
 
-          // Safe K-scale proxy application after head reduction (always apply)
-          {
-              ggml_tensor * k_scale_bcast = ggml_repeat(ctx, k_scale_2d, scores_tc); // [N_kv, Tc]
-              scores_tc = ggml_mul(ctx, scores_tc, k_scale_bcast);
-          }
+                      // Safe K-scale proxy application after head reduction (always apply)
+            {
+                ggml_tensor * k_scale_head = ggml_view_2d(ctx, k_scale_2d, kv_end, 1, k_scale_2d->nb[1], 0);
+                ggml_tensor * k_scale_bcast = ggml_repeat(ctx, k_scale_head, scores_tc); // [kv_end, Tc]
+                scores_tc = ggml_mul(ctx, scores_tc, k_scale_bcast);
+            }
 
           // Debug-only summaries
           if (dbg) {
@@ -396,7 +401,7 @@ using std::function;
 
           // mask tile if available
           if (mask_full) {
-              ggml_tensor * mask_tc = ggml_view_2d(ctx, mask_full, N_kv, Tc, mask_full->nb[1], t0 * mask_full->nb[1]);
+              ggml_tensor * mask_tc = ggml_view_2d(ctx, mask_full, kv_end, Tc, mask_full->nb[1], t0 * mask_full->nb[1]);
               mask_tc = ggml_cont(ctx, mask_tc);
               if (mask_tc->type != scores_tc->type) {
                   mask_tc = ggml_cast(ctx, mask_tc, scores_tc->type);
@@ -463,7 +468,8 @@ using std::function;
           ggml_tensor * scores_pre = ggml_is_contiguous(scores_for_topk) ? scores_for_topk : ggml_cont(ctx, scores_for_topk);
           ggml_tensor * scores_clamped = ggml_clamp(ctx, scores_pre, -1e30f, 1e30f);
           // Compute top-k indices via CUDA radix selection
-          ggml_tensor * topk_tc = ggml_sparse_topk_radix(ctx, scores_clamped, k);
+          const int64_t k_tile = std::min<int64_t>(k, scores_clamped->ne[0]);
+            ggml_tensor * topk_tc = ggml_sparse_topk_radix(ctx, scores_clamped, (int)k_tile);
           if (dbg && t0 == 0) {
               cb(topk_tc, "idxkv_topk_radix", -1);
           }
