@@ -245,7 +245,7 @@ using std::function;
       // Optional FP16 path for indexer GEMMs
       ggml_tensor * k_indexer_f16 = k_indexer;
       const char *env_fp16 = getenv("LLAMA_SPARSE_TOPK_FP16");
-      const bool use_fp16 = (env_fp16 && atoi(env_fp16) != 0);
+      const bool use_fp16 = (env_fp16 == nullptr || atoi(env_fp16) != 0);
       if (use_fp16 && k_indexer->type != GGML_TYPE_F16) {
           k_indexer_f16 = ggml_cast(ctx, k_indexer, GGML_TYPE_F16);
           k_indexer_f16 = ggml_cont(ctx, k_indexer_f16);
@@ -310,7 +310,9 @@ using std::function;
           const int64_t Tc = std::min<int64_t>(TILE_T, T - t0);
 
 
-            const int64_t kv_end = std::min<int64_t>(N_kv, std::max<int64_t>(k, t0 + Tc));
+            const char *env_full_kv = getenv("LLAMA_SPARSE_TOPK_FULL_KV");
+            const bool use_full_kv = (env_full_kv && atoi(env_full_kv) != 0);
+            const int64_t kv_end = use_full_kv ? N_kv : std::min<int64_t>(N_kv, std::max<int64_t>(k, t0 + Tc));
 
           // Use contiguized [D, T, H] directly for head-wise tiles
           ggml_tensor * q3d = q_cont;

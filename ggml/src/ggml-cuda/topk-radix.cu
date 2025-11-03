@@ -308,7 +308,7 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
     int cap_env = 0;
     const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
     if (env_cap) { cap_env = atoi(env_cap); if (cap_env < 0) cap_env = 0; }
-    int cap_default = 8192;
+    int cap_default = 2048;
     const int eq_cap = max(k, min(N, cap_env ? cap_env : cap_default));
     size_t sel_shmem = (size_t) eq_cap * sizeof(int);
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap, gt_counts_d, idx_d);
@@ -376,7 +376,7 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
     const int sel_threads = 256;
     int cap_env = 0; const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
     if (env_cap) { cap_env = atoi(env_cap); if (cap_env < 0) cap_env = 0; }
-    int cap_default = 8192;
+    int cap_default = 2048;
     const int eq_cap_host = max(k, min(N, cap_env ? cap_env : cap_default));
     const size_t sel_shmem = (size_t) eq_cap_host * sizeof(int);
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap_host, gt_counts_d, idx_d);

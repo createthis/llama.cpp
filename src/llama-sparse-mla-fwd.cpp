@@ -82,7 +82,7 @@ using std::function;
       ggml_tensor * q_all_2d = ggml_reshape_2d(ctx, q_cur_cont, Dq, Hq*T);
       // Optional FP16 path for sparse MLA GEMMs
       const char *env_mla_fp16 = getenv("LLAMA_SPARSE_MLA_FP16");
-      const bool use_mla_fp16 = (env_mla_fp16 && atoi(env_mla_fp16) != 0);
+      const bool use_mla_fp16 = (env_mla_fp16 == nullptr || atoi(env_mla_fp16) != 0);
       // Optional FP16 for PV multiply; defaults to LLAMA_SPARSE_MLA_FP16 when not set
       const char *env_mla_pv_fp16 = getenv("LLAMA_SPARSE_MLA_PV_FP16");
       const bool use_mla_pv_fp16 = env_mla_pv_fp16 ? (atoi(env_mla_pv_fp16) != 0) : use_mla_fp16;
