@@ -74,6 +74,7 @@
 #include <stdlib.h>
 #include <string>
 #include <vector>
+#include "../../include/ggml-cuda-indexer.h"
 
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
@@ -2541,6 +2542,32 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     GGML_LOG_ERROR("ggml_cuda_compute_forward: SPARSE_TOPK_RADIX failed");
                     CUDA_CHECK(err_topk);
                 }
+            }
+            break;
+        case GGML_OP_INDEXER_FUSED:
+            {
+                // inputs: Q[D, Tc*H], K[D, kv], W[H, Tc], k_scale[kv]
+                ggml_tensor * q2d = dst->src[0];
+                ggml_tensor * k2d = dst->src[1];
+                ggml_tensor * w2d = dst->src[2];
+                ggml_tensor * ks  = dst->src[3];
+                int D   = (int)q2d->ne[0];
+                int TcH = (int)q2d->ne[1];
+                int kv  = (int)k2d->ne[1];
+                int Tc  = (int)w2d->ne[1];
+                int H   = (int)w2d->ne[0];
+                GGML_ASSERT(TcH == Tc*H);
+                // Promote half/bf16 to float for now (Phase 1)
+                ggml_cuda_pool_alloc<float> qf(ctx.pool(ggml_cuda_get_device()), (size_t)D*TcH);
+                ggml_cuda_pool_alloc<float> kf(ctx.pool(ggml_cuda_get_device()), (size_t)D*kv);
+                const to_fp32_cuda_t to_q = ggml_get_to_fp32_cuda(q2d->type);
+                const to_fp32_cuda_t to_k = ggml_get_to_fp32_cuda(k2d->type);
+                to_q((const void *)q2d->data, (float *)qf.get(), (size_t)D*TcH, ctx.stream());
+                to_k((const void *)k2d->data, (float *)kf.get(), (size_t)D*kv,  ctx.stream());
+                // Launch naive device kernel (implemented in indexer-fused.cu) directly writing to dst
+                ggml_cuda_indexer_logits_fused_device(ctx, (const float *)qf.get(), (const float *)kf.get(), (const float *)w2d->data, (const float *)ks->data, D, H, Tc, kv, (float *)dst->data);
+                CUDA_CHECK(cudaGetLastError());
+                (void)D; (void)H; (void)Tc; (void)kv; (void)TcH; // silence warnings if asserts disabled
             }
             break;
         default:

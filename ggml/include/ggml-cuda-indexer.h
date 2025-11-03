@@ -1,7 +1,12 @@
 #pragma once
+#include "ggml-cuda.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// Forward-declare the CUDA context type; definition is in common.cuh
+struct ggml_backend_cuda_context;
+
 // Fused lightning-indexer logits kernel (scaffold): host wrapper copies inputs to device and back
 // Inputs are row-major contiguous buffers:
 //  - Q: [D, Tc*H] as row-major (leading dim D)
@@ -16,6 +21,16 @@ void ggml_cuda_indexer_logits_fused_host(const float * Q,
                                          const float * k_scale,
                                          int D, int H, int Tc, int kv_end,
                                          float * out);
+
+// Device-resident entry: takes device pointers and current CUDA context
+void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context & ctx,
+                                           const float * dQ,
+                                           const float * dK,
+                                           const float * dW,
+                                           const float * dKS,
+                                           int D, int H, int Tc, int kv_end,
+                                           float * dOut);
+
 #ifdef __cplusplus
 }
 #endif

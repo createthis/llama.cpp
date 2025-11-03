@@ -556,6 +556,7 @@ extern "C" {
         GGML_OP_OPT_STEP_SGD,
 
         GGML_OP_SPARSE_TOPK_RADIX,
+        GGML_OP_INDEXER_FUSED,
         GGML_OP_GLU,
 
         GGML_OP_COUNT,
@@ -738,6 +739,14 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * scores,
             int                   k);
+
+    // fused lightning-indexer logits: inputs Q[D, Tc*H], K[D, kv_end], W[H, Tc], k_scale[kv_end] => out [kv_end, Tc]
+    GGML_API struct ggml_tensor * ggml_indexer_logits_fused(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q2d,
+            struct ggml_tensor  * k2d,
+            struct ggml_tensor  * w2d,
+            struct ggml_tensor  * k_scale);
 
     GGML_API bool ggml_is_contiguous_1(const struct ggml_tensor * tensor); // contiguous for dims >= 1
     GGML_API bool ggml_is_contiguous_2(const struct ggml_tensor * tensor); // contiguous for dims >= 2
