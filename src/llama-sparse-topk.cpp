@@ -437,7 +437,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
         ggml_tensor * q3d = q_cont;
 
         ggml_tensor * scores_tc = nullptr;
-          {
+        {
             const char *env_fused = getenv("LLAMA_SPARSE_INDEXER_FUSED");
             bool use_fused = (env_fused && atoi(env_fused) != 0);
             if (use_fused) {
@@ -473,13 +473,25 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
             } else {
                 scores_tc = idx_compute_scores_tile(ctx, q3d, k_indexer_f16, weights, k_scale_2d, D, H, Tc, kv_end, t0, use_fp16);
             }
-          }
+        }
 
         // Safe K-scale proxy application after head reduction (always apply)
         {
+            if (dbg && t0 == 0) {
+                ggml_tensor * pre_head = ggml_view_2d(ctx, scores_tc, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), scores_tc->nb[1], 0);
+                cb(pre_head, "idxkv_scores_pre_kScale_head", -1);
+                printf("[idxkv] t0=%lld kv_end=%lld\n",
+                        (long long)t0, (long long)kv_end);
+                fflush(stdout);
+            }
+
             ggml_tensor * k_scale_head = ggml_view_2d(ctx, k_scale_2d, kv_end, 1, k_scale_2d->nb[1], 0);
             ggml_tensor * k_scale_bcast = ggml_repeat(ctx, k_scale_head, scores_tc); // [kv_end, Tc]
             scores_tc = ggml_mul(ctx, scores_tc, k_scale_bcast);
+            if (dbg && t0 == 0) {
+                ggml_tensor * post_head = ggml_view_2d(ctx, scores_tc, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), scores_tc->nb[1], 0);
+                cb(post_head, "idxkv_scores_post_kScale_head", -1);
+            }
         }
 
         // Debug-only summaries
@@ -519,9 +531,19 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                        mask_tc->ne[0], mask_tc->ne[1], mask_tc->nb[0], mask_tc->nb[1], (int) mask_tc->type);
                 fflush(stdout);
             }
+
+            if (dbg && t0 == 0) {
+                ggml_tensor * mask_head = ggml_view_2d(ctx, mask_tc, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), mask_tc->nb[1], 0);
+                cb(mask_head, "idxkv_mask_tc_head", -1);
+            }
             scores_tc = ggml_add(ctx, scores_tc, mask_tc);
             // Clamp after mask to avoid inf in diagnostics and stabilize top-k
             scores_tc = ggml_clamp(ctx, scores_tc, -1e30f, 1e30f);
+
+            if (dbg && t0 == 0) {
+                ggml_tensor * post_mask_head = ggml_view_2d(ctx, scores_tc, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), scores_tc->nb[1], 0);
+                cb(post_mask_head, "idxkv_scores_post_mask_head", -1);
+            }
 
             if (t0 == 0) {
                 ggml_tensor * idxkv_scores_post_mask_abs_sum = ggml_sum(ctx, ggml_abs(ctx, scores_tc));

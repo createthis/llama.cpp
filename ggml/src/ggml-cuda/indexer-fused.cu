@@ -36,10 +36,36 @@ __global__ void k_indexer_logits_fused(const float * __restrict__ Q, // [D, Tc*H
         for (int d = 0; d < D; ++d) dot += qv[d] * kvp[d];
         if (dot < 0.0f) dot = 0.0f; // ReLU
         float w = W[h + (size_t)H * tc];
+
+#ifdef SEL_DEBUG
+        if (blockIdx.x == 0 && blockIdx.y == 0 && tc < 2 && kv_idx < 2 && threadIdx.x == 0 && threadIdx.y == 0) {
+            // full-precision raw over D
+            float raw2 = 0.0f;
+            for (int dd = 0; dd < D; ++dd) raw2 += qv[dd] * kvp[dd];
+            float rel2 = raw2 < 0.0f ? 0.0f : raw2;
+            printf("[fused] step tc=%d kv=%d h=%d raw=%.6e rel=%.6e w=%.6e acc_pre=%.6e\n",
+                   tc, kv_idx, h, raw2, rel2, w, acc_logits);
+        }
+#endif
         acc_logits += dot * w;
+#ifdef SEL_DEBUG
+        if (blockIdx.x == 0 && blockIdx.y == 0 && tc < 2 && kv_idx < 2 && threadIdx.x == 0 && threadIdx.y == 0) {
+            printf("[fused] step tc=%d kv=%d h=%d acc_post=%.6e\n",
+                   tc, kv_idx, h, acc_logits);
+        }
+#endif
+
     }
     float ks = k_scale[kv_idx];
+
+#ifdef SEL_DEBUG
+    if (blockIdx.x == 0 && blockIdx.y == 0 && tc < 2 && kv_idx < 2 && threadIdx.x == 0 && threadIdx.y == 0) {
+        printf("[fused] final tc=%d kv=%d acc=%.6e ks=%.6e out=%.6e\n",
+               tc, kv_idx, acc_logits, ks, acc_logits*ks);
+    }
+#endif
     out[kv_idx + (size_t)kv * tc] = acc_logits * ks;
+
 
 #ifdef SEL_DEBUG
     if (blockIdx.x == 0 && blockIdx.y == 0 && tc < 2 && kv_idx < 2 && threadIdx.x == 0 && threadIdx.y == 0) {
@@ -49,17 +75,17 @@ __global__ void k_indexer_logits_fused(const float * __restrict__ Q, // [D, Tc*H
             const float * qv0 = Q + (size_t)D * col;
             const float * kvp0 = K + (size_t)D * kv_idx;
             printf("[fused] tc=%d kv=%d h=%d col=%d W=%.6e k_scale=%.6e\n", 
-			    tc, kv_idx, hh, col, W[hh + (size_t)H * tc], k_scale[kv_idx]);
+                tc, kv_idx, hh, col, W[hh + (size_t)H * tc], k_scale[kv_idx]);
             for (int dd = 0; dd < (D < 8 ? D : 8); ++dd) {
                 printf("  q[%d]=%.6e k[%d]=%.6e\n", 
-				dd, qv0[dd], dd, kvp0[dd]);
+                dd, qv0[dd], dd, kvp0[dd]);
             }
         }
-        if (!isfinite(acc_logits)) printf("[fused] acc_logits non-finite at tc=%d kv=%d", 
-			tc, kv_idx);
+        if (!isfinite(acc_logits)) printf("[fused] acc_logits non-finite at tc=%d kv=%d\n",
+            tc, kv_idx);
         float vtest = acc_logits * k_scale[kv_idx];
-        if (!isfinite(vtest)) printf("[fused] scaled out non-finite at tc=%d kv=%d", 
-			tc, kv_idx);
+        if (!isfinite(vtest)) printf("[fused] scaled out non-finite at tc=%d kv=%d\n",
+            tc, kv_idx);
     }
 #endif
 
