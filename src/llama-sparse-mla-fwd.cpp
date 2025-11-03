@@ -92,6 +92,10 @@ using std::function;
 
       ggml_tensor * q_all_2d = ggml_reshape_2d(ctx, q_cur, Dq, Hq*T);
 
+      // Optional FP16 path for sparse MLA GEMMs
+      const char *env_mla_fp16 = getenv("LLAMA_SPARSE_MLA_FP16");
+      const bool use_mla_fp16 = (env_mla_fp16 && atoi(env_mla_fp16) != 0);
+
       ggml_tensor * output_acc = nullptr;
       for (int64_t t = 0; t < T; ++t) {
           GGML_ASSERT(topk_indices->ne[0] == top_k);
@@ -119,6 +123,10 @@ using std::function;
 
           // Ensure RHS is contiguous for CUDA matmul
           q_t_2d = ggml_cont(ctx, q_t_2d);
+          if (use_mla_fp16) {
+              if (k_sel_2d->type != GGML_TYPE_F16) { k_sel_2d = ggml_cast(ctx, k_sel_2d, GGML_TYPE_F16); k_sel_2d = ggml_cont(ctx, k_sel_2d); }
+              if (q_t_2d->type != GGML_TYPE_F16) { q_t_2d  = ggml_cast(ctx, q_t_2d,  GGML_TYPE_F16); q_t_2d  = ggml_cont(ctx, q_t_2d); }
+          }
           ggml_tensor * scores_t = ggml_mul_mat(ctx, k_sel_2d, q_t_2d); // [Hkv*top_k, Hq]
           // debug marker: scores computed pre-scale
           if (dbg) printf("[SPARSE-DBG-MLA] t=%lld scores pre-scale\n", (long long) t);
