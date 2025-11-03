@@ -6,7 +6,6 @@
 #include "llama-impl.h"
 #include <cstring>
 
-
 #include <cmath>
 #include <cinttypes>
 #include <cstdio>
@@ -185,11 +184,18 @@ static void radix_topk_custom(ggml_tensor * dst, int ith, int nth, void * userda
 
 } // anonymous namespace
 
-
 namespace llama {
 
-using std::function;
+static inline int find_last_unmasked(const float * col, int N, size_t nb0) {
+    // col is [N] as a column with row stride nb0; return last index+1 where value > -1e29
+    for (int i = N-1; i >= 0; --i) {
+        float v = *(const float *)((const char*)col + (size_t)i*nb0);
+        if (v > -1.0e29f) return i+1;
+    }
+    return 0;
+}
 
+using std::function;
 
   ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
       ggml_context * ctx,
@@ -235,7 +241,6 @@ using std::function;
       // KV indexer currently expected as 2D [D, N_kv] or 3D with singleton stream
       GGML_ASSERT(k_indexer->ne[2] <= 1);
 
-
       // Q as [D, H*T]
       ggml_tensor * q_perm   = ggml_permute(ctx, q_indexer, 0, 2, 1, 3);   // [D, T, H]
       ggml_tensor * q_cont   = ggml_cont(ctx, q_perm);
@@ -250,7 +255,6 @@ using std::function;
           k_indexer_f16 = ggml_cast(ctx, k_indexer, GGML_TYPE_F16);
           k_indexer_f16 = ggml_cont(ctx, k_indexer_f16);
       }
-
 
       // Diagnostics: sample K indexer head/tail once per call
       if (dbg) {
@@ -270,6 +274,9 @@ using std::function;
       }
 
       ggml_tensor * mask_full = nullptr;
+      ggml_tensor * win_starts = nullptr;
+      ggml_tensor * win_ends   = nullptr;
+      bool have_windows = false;
       if (kq_mask) {
           cb(kq_mask, "idxkv_kq_mask", -1);
           ggml_tensor * tmp_mask = kq_mask;
@@ -308,11 +315,18 @@ using std::function;
       ggml_tensor * result = nullptr; // [k, T]
       for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {
           const int64_t Tc = std::min<int64_t>(TILE_T, T - t0);
-
-
-            const char *env_full_kv = getenv("LLAMA_SPARSE_TOPK_FULL_KV");
-            const bool use_full_kv = (env_full_kv && atoi(env_full_kv) != 0);
-            const int64_t kv_end = use_full_kv ? N_kv : std::min<int64_t>(N_kv, std::max<int64_t>(k, t0 + Tc));
+            // If we have per-token windows, compute aggregate kv_end for this tile
+            int64_t kv_end = N_kv;
+            if (have_windows && win_ends) {
+                int32_t * e = (int32_t*)win_ends->data;
+                int64_t max_e = 0;
+                for (int64_t t = 0; t < Tc; ++t) max_e = std::max<int64_t>(max_e, (int64_t)e[t0 + t]);
+                kv_end = std::min<int64_t>(N_kv, std::max<int64_t>(k, max_e));
+            } else {
+                const char *env_full_kv = getenv("LLAMA_SPARSE_TOPK_FULL_KV");
+                const bool use_full_kv = (env_full_kv && atoi(env_full_kv) != 0);
+                kv_end = use_full_kv ? N_kv : std::min<int64_t>(N_kv, std::max<int64_t>(k, t0 + Tc));
+            }
 
           // Use contiguized [D, T, H] directly for head-wise tiles
           ggml_tensor * q3d = q_cont;
@@ -373,8 +387,6 @@ using std::function;
               }
               scores_tc = scores_acc;
           }
-
-
 
                       // Safe K-scale proxy application after head reduction (always apply)
             {
@@ -501,8 +513,6 @@ using std::function;
       return result;
   }
 
-
-
 ggml_tensor * llama::sparse_attn_topk::topk_radix_indices(
     ggml_context * ctx,
     ggml_tensor * scores, // [N, T]
@@ -523,4 +533,28 @@ ggml_tensor * llama::sparse_attn_topk::topk_radix_indices(
         /*userdata*/ nullptr);
 }
 
+ggml_tensor * llama::sparse_attn_topk::derive_kv_windows(ggml_context * ctx, ggml_tensor * kq_mask, int64_t T, int64_t N_kv, ggml_tensor ** out_starts, ggml_tensor ** out_ends) {
+    *out_starts = nullptr; *out_ends = nullptr;
+    if (!kq_mask) return nullptr;
+    // Expect kq_mask: [N_kv, PAD(T)] row-contiguous on rows
+    if (kq_mask->ne[0] != N_kv || kq_mask->ne[1] < T) return nullptr;
+    // Compute starts=0 and ends per token as last unmasked+1
+    ggml_tensor * starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+    ggml_tensor * ends   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+    // We compute ends by scanning mask columns (host-side view)
+    // To avoid heavy host sync, we only support CPU-backed mask here
+    if (kq_mask->buffer && !ggml_backend_buffer_is_host(kq_mask->buffer)) {
+        return nullptr;
+    }
+    // Fill starts with zeros
+    for (int64_t t = 0; t < T; ++t) { ((int32_t*)starts->data)[t] = 0; }
+    // ends per column
+    for (int64_t t = 0; t < T; ++t) {
+        const float * col = (const float *)((const char*)kq_mask->data + (size_t)t*kq_mask->nb[1]);
+        int e = find_last_unmasked(col, (int)N_kv, kq_mask->nb[0]);
+        ((int32_t*)ends->data)[t] = e;
+    }
+    *out_starts = starts; *out_ends = ends;
+    return starts;
+}
 } // namespace llama

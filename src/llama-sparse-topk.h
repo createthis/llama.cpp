@@ -29,6 +29,8 @@ struct sparse_attn_topk {
         ggml_context * ctx,
         ggml_tensor * scores, // [N, T]
         int64_t k);
+    // Windows helper: derive per-token [start,end) from mask or used_kv
+    static ggml_tensor * derive_kv_windows(ggml_context * ctx, ggml_tensor * kq_mask, int64_t T, int64_t N_kv, ggml_tensor ** out_starts, ggml_tensor ** out_ends);
 };
 
 } // namespace llama
