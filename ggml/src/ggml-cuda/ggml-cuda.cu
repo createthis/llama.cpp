@@ -2523,11 +2523,19 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             {
                 ggml_tensor * scores = dst->src[0];
                 int k = (int)ggml_get_op_params_i32(dst, 0);
-                GGML_ASSERT(scores->type == GGML_TYPE_F32);
                 GGML_ASSERT(dst->type == GGML_TYPE_I32);
                 int N = (int)scores->ne[0];
                 int T = (int)ggml_nrows(scores);
-                ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+                if (scores->type == GGML_TYPE_F16) {
+                    // Promote half->float for current kernel
+                    const to_fp32_cuda_t to_fp32 = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
+                    ggml_cuda_pool_alloc<float> tmp(ctx.pool(ggml_cuda_get_device()), (size_t)N*T);
+                    to_fp32((const void *)scores->data, (float *)tmp.get(), (size_t)N*T, ctx.stream());
+                    ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                } else {
+                    GGML_ASSERT(scores->type == GGML_TYPE_F32);
+                    ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+                }
                 cudaError_t err_topk = cudaGetLastError();
                 if (err_topk != cudaSuccess) {
                     GGML_LOG_ERROR("ggml_cuda_compute_forward: SPARSE_TOPK_RADIX failed");

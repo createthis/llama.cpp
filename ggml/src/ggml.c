@@ -7237,7 +7237,7 @@ GGML_API struct ggml_tensor * ggml_sparse_topk_radix(
         struct ggml_context * ctx,
         struct ggml_tensor  * scores,
         int                   k) {
-    GGML_ASSERT(scores->type == GGML_TYPE_F32);
+    GGML_ASSERT(scores->type == GGML_TYPE_F32 || scores->type == GGML_TYPE_F16);
     GGML_ASSERT(scores->ne[2] == 1 && scores->ne[3] == 1);
     GGML_ASSERT(k > 0 && k <= scores->ne[0]);
 

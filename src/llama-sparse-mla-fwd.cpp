@@ -87,98 +87,63 @@ using std::function;
       const char *env_mla_pv_fp16 = getenv("LLAMA_SPARSE_MLA_PV_FP16");
       const bool use_mla_pv_fp16 = env_mla_pv_fp16 ? (atoi(env_mla_pv_fp16) != 0) : use_mla_fp16;
       ggml_tensor * output_acc = nullptr;
-      for (int64_t t = 0; t < T; ++t) {
-          GGML_ASSERT(topk_indices->ne[0] == top_k);
-          ggml_tensor * idx_t_2d = ggml_view_2d(ctx, idx_cont, top_k, 1, idx_cont->nb[1], t * idx_cont->nb[1]);
-          idx_t_2d = ggml_cont(ctx, idx_t_2d);
-          ggml_tensor * idx_t_4d = ggml_reshape_4d(ctx, idx_t_2d, top_k, 1, 1, 1);
-          ggml_tensor * k_sel_4d = ggml_get_rows(ctx, K4d, idx_t_4d);
-          ggml_tensor * k_sel_2d = ggml_reshape_2d(ctx, k_sel_4d, Dk, Hkv*top_k);
-          k_sel_2d = ggml_cont(ctx, k_sel_2d);
-          ggml_tensor * v_sel_4d = ggml_get_rows(ctx, V4d, idx_t_4d);
-          ggml_tensor * v_sel_2d = ggml_reshape_2d(ctx, v_sel_4d, Dv, Hkv_v*top_k);
-          v_sel_2d = ggml_cont(ctx, ggml_transpose(ctx, v_sel_2d));
-          // Note: cannot read tensor->data during graph build; only log shapes here to avoid invalid dereference
-          if (dbg && t < 2) {
-              printf("[SPARSE-DBG-INDICES] t=%lld: top_k=%lld N_kv=%lld\n",
-                     (long long) t, (long long) top_k, (long long) N_kv);
-          }
-          size_t q_off = t * Hq * q_all_2d->nb[1];
-          ggml_tensor * q_t_2d = ggml_view_2d(ctx, q_all_2d, Dq, Hq, q_all_2d->nb[1], q_off);
-          // Ensure RHS is contiguous for CUDA matmul
-          q_t_2d = ggml_cont(ctx, q_t_2d);
-          if (use_mla_fp16) {
-              if (k_sel_2d->type != GGML_TYPE_F16) { k_sel_2d = ggml_cast(ctx, k_sel_2d, GGML_TYPE_F16); k_sel_2d = ggml_cont(ctx, k_sel_2d); }
-              if (q_t_2d->type != GGML_TYPE_F16) { q_t_2d  = ggml_cast(ctx, q_t_2d,  GGML_TYPE_F16); q_t_2d  = ggml_cont(ctx, q_t_2d); }
-          }
-          ggml_tensor * scores_t = ggml_mul_mat(ctx, k_sel_2d, q_t_2d); // [Hkv*top_k, Hq]
-          // debug marker: scores computed pre-scale
-          if (dbg) printf("[SPARSE-DBG-MLA] t=%lld scores pre-scale\n", (long long) t);
-          scores_t = ggml_scale(ctx, scores_t, kq_scale);
-          // add mask/alibi bias if provided: gather kq_mask rows by indices and add to scores
-          if (dbg && (t == 0 || t == T - 1)) {
-              cb(scores_t, "mla_scores_pre_mask", -1);
-          }
-          if (kq_mask && kq_mask->ne[0] == N_kv && kq_mask->ne[1] >= T) {
-              // kq_mask is [N_kv, PAD(T)]; take column t -> [N_kv,1]
-              ggml_tensor * mask_col = ggml_view_2d(ctx, kq_mask, kq_mask->ne[0], 1, kq_mask->nb[1], t * kq_mask->nb[1]);
-              // convert to [1, N_kv] so get_rows yields [1, top_k, 1, 1]
-              ggml_tensor * mask_vec = ggml_transpose(ctx, mask_col); // [1, N_kv]
-              if (mask_vec->type != scores_t->type) {
-                  mask_vec = ggml_cast(ctx, mask_vec, scores_t->type);
-              }
-              // CUDA get_rows requires row-contiguous source
-              mask_vec = ggml_cont(ctx, mask_vec);
-              ggml_tensor * mask_rows_4d = ggml_get_rows(ctx, mask_vec, idx_t_4d); // [1, top_k, 1, 1]
-              // reshape to [top_k, 1]
-              ggml_tensor * mask_rows_2d = ggml_reshape_2d(ctx, mask_rows_4d, top_k, 1); // [top_k,1]
-              // build a view of scores' column shape [Hkv*top_k, 1]
-              ggml_tensor * scores_col_view = ggml_view_2d(ctx,
-                  scores_t,
-                  /*ne0*/ Hkv*top_k, /*ne1*/ 1,
-                  /*nb1*/ scores_t->nb[1],
-                  /*offset*/ 0);
-              // repeat mask across heads only -> [Hkv*top_k, 1]
-              if (t == 0 || t == T - 1) {
-                  cb(scores_t, "mla_scores_post_mask", -1);
-              }
-              ggml_tensor * mask_bias = ggml_repeat(ctx, mask_rows_2d, scores_col_view); // [Hkv*top_k, 1]
-              // add with column broadcast: [Hkv*top_k, Hq] + [Hkv*top_k, 1]
-              scores_t = ggml_add(ctx, scores_t, mask_bias);
-          } else if (kq_mask) {
-              printf("[SPARSE-MLA] Skipping kq_mask: dims mismatched (mask=[%lld,%lld], K N_kv=%lld, T=%lld)\n",
-                     (long long) kq_mask->ne[0], (long long) kq_mask->ne[1], (long long) N_kv, (long long) T);
-              fflush(stdout);
-          }
-          // diagnostic: sample masked scores at first/last token
-          if (t == 0 || t == T - 1) {
-            cb(scores_t, "mla_scores_post_mask_bias", -1);
-          }
-          // apply tanh softcap if enabled
-          if (attn_softcap > 0.0f) {
-              scores_t = ggml_scale(ctx, scores_t, 1.0f / attn_softcap);
-              scores_t = ggml_tanh(ctx, scores_t);
-              scores_t = ggml_scale(ctx, scores_t, attn_softcap);
-          }
-          // debug marker: scores post-mask/softcap
-          if (dbg) printf("[SPARSE-DBG-MLA] t=%lld scores post-mask/softcap\n", (long long) t);
-          // Clamp infinities to large finite values to avoid NaNs in softmax when all entries are masked
-          scores_t = ggml_clamp(ctx, scores_t, -1e30f, 1e30f);
-          ggml_tensor * weights_t = ggml_soft_max(ctx, scores_t);
-          // Be conservative: ensure operands of second matmul are contiguous
-          weights_t = ggml_cont(ctx, weights_t);
-          v_sel_2d  = ggml_cont(ctx, v_sel_2d);
-          if (dbg && (t == 0 || t == T - 1)) {
-              cb(weights_t, "mla_weights_sample", -1);
-          }
-          ggml_tensor * out2d_t = ggml_mul_mat(ctx, weights_t, v_sel_2d); // [Hq, Dv]
-          ggml_tensor * out2d_t_T = ggml_cont(ctx, ggml_transpose(ctx, out2d_t)); // [Dv, Hq]
-          ggml_tensor * out3d_t = ggml_reshape_3d(ctx, out2d_t_T, Dv, Hq, 1);
-          // Sanity guard: Dv should be kv_lora_rank for MLA path; for MHA path Dv should be n_embd_head_v
-          // We don't have kv_lora_rank here; the caller asserts later. No-op here.
-          if (!output_acc) output_acc = out3d_t; else output_acc = ggml_concat(ctx, output_acc, out3d_t, 2);
-      }
-      cb(output_acc, "kvaware_sparse_attn_out", -1);
+for (int64_t t = 0; t < T; ++t) {
+    GGML_ASSERT(topk_indices->ne[0] == top_k);
+    ggml_tensor * idx_t_2d = ggml_view_2d(ctx, idx_cont, top_k, 1, idx_cont->nb[1], t * idx_cont->nb[1]);
+    idx_t_2d = ggml_cont(ctx, idx_t_2d);
+    ggml_tensor * idx_t_4d = ggml_reshape_4d(ctx, idx_t_2d, top_k, 1, 1, 1);
+
+    ggml_tensor * k_sel_4d = ggml_get_rows(ctx, K4d, idx_t_4d); // [Dk*Hkv, top_k]
+    ggml_tensor * v_sel_4d = ggml_get_rows(ctx, V4d, idx_t_4d); // [Dv*Hkv_v, top_k]
+
+    ggml_tensor * k_sel_2d = ggml_reshape_2d(ctx, k_sel_4d, Dk, Hkv*top_k);
+    ggml_tensor * v_sel_2d0 = ggml_reshape_2d(ctx, v_sel_4d, Dv, Hkv_v*top_k);
+    // CUDA matmul requires row-contiguous inputs
+    k_sel_2d = ggml_cont(ctx, k_sel_2d);
+    // ensure v rows [Hkv_v*top_k, Dv]
+    ggml_tensor * v_sel_2d = ggml_cont(ctx, ggml_transpose(ctx, v_sel_2d0));
+
+    size_t q_off = (size_t) t * Hq * q_all_2d->nb[1];
+    ggml_tensor * q_t_2d = ggml_view_2d(ctx, q_all_2d, Dq, Hq, q_all_2d->nb[1], q_off);
+    q_t_2d = ggml_cont(ctx, q_t_2d);
+
+    if (use_mla_fp16) {
+        if (k_sel_2d->type != GGML_TYPE_F16) { k_sel_2d = ggml_cast(ctx, k_sel_2d, GGML_TYPE_F16); k_sel_2d = ggml_cont(ctx, k_sel_2d); }
+        if (q_t_2d->type != GGML_TYPE_F16) { q_t_2d = ggml_cast(ctx, q_t_2d, GGML_TYPE_F16); q_t_2d = ggml_cont(ctx, q_t_2d); }
+    }
+
+    ggml_tensor * scores_t = ggml_mul_mat(ctx, k_sel_2d, q_t_2d); // [Hkv*top_k, Hq]
+    scores_t = ggml_scale(ctx, scores_t, kq_scale);
+
+    if (kq_mask && kq_mask->ne[0] == N_kv && kq_mask->ne[1] >= T) {
+        ggml_tensor * mask_col = ggml_view_2d(ctx, kq_mask, kq_mask->ne[0], 1, kq_mask->nb[1], t * kq_mask->nb[1]);
+        ggml_tensor * mask_vec = ggml_transpose(ctx, mask_col); // [1, N_kv]
+        if (mask_vec->type != scores_t->type) mask_vec = ggml_cast(ctx, mask_vec, scores_t->type);
+        mask_vec = ggml_cont(ctx, mask_vec);
+        ggml_tensor * mask_rows_4d = ggml_get_rows(ctx, mask_vec, idx_t_4d); // [1, top_k, 1, 1]
+        ggml_tensor * mask_rows_2d = ggml_reshape_2d(ctx, mask_rows_4d, top_k, 1);
+        ggml_tensor * scores_col_view = ggml_view_2d(ctx, scores_t, Hkv*top_k, 1, scores_t->nb[1], 0);
+        ggml_tensor * mask_bias = ggml_repeat(ctx, mask_rows_2d, scores_col_view);
+        scores_t = ggml_add(ctx, scores_t, mask_bias);
+    }
+
+    if (attn_softcap > 0.0f) {
+        scores_t = ggml_scale(ctx, scores_t, 1.0f / attn_softcap);
+        scores_t = ggml_tanh(ctx, scores_t);
+        scores_t = ggml_scale(ctx, scores_t, attn_softcap);
+    }
+    scores_t = ggml_clamp(ctx, scores_t, -1e30f, 1e30f);
+
+    ggml_tensor * weights_t = ggml_soft_max(ctx, scores_t);
+    weights_t = ggml_cont(ctx, weights_t);
+    v_sel_2d  = ggml_cont(ctx, v_sel_2d);
+
+    ggml_tensor * out2d_t = ggml_mul_mat(ctx, weights_t, v_sel_2d); // [Hq, Dv]
+    ggml_tensor * out2d_t_T = ggml_cont(ctx, ggml_transpose(ctx, out2d_t)); // [Dv, Hq]
+    ggml_tensor * out3d_t = ggml_reshape_3d(ctx, out2d_t_T, Dv, Hq, 1);
+    output_acc = output_acc ? ggml_concat(ctx, output_acc, out3d_t, 2) : out3d_t;
+}
+cb(output_acc, "kvaware_sparse_attn_out", -1);
       return output_acc;
   }
 } // namespace llama
