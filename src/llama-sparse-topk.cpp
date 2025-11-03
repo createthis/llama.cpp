@@ -4,6 +4,9 @@
 #include <cstdint>
 
 #include "llama-impl.h"
+#ifdef GGML_USE_CUDA
+#include "ggml-cuda-indexer.h"
+#endif
 #include <cstring>
 
 #include <cmath>
@@ -197,6 +200,46 @@ static inline int find_last_unmasked(const float * col, int N, size_t nb0) {
 
 using std::function;
 
+struct fused_indexer_userdata { };
+
+static void fused_indexer_custom(ggml_tensor * dst, int ith, int nth, void * userdata) {
+    (void)userdata; (void)ith; (void)nth;
+#ifdef GGML_USE_CUDA
+    ggml_tensor * q2d = dst->src[0];
+    ggml_tensor * k2d = dst->src[1];
+    ggml_tensor * w2d = dst->src[2];
+    ggml_tensor * ks  = dst->src[3];
+    int D = (int)q2d->ne[0];
+    int TcH = (int)q2d->ne[1];
+    int Tc = (int)w2d->ne[1];
+    int H  = TcH / (Tc);
+    int kv = (int)k2d->ne[1];
+    std::vector<float> hQ((size_t)D*Tc*H), hK((size_t)D*kv), hW((size_t)H*Tc), hKS((size_t)kv), hO((size_t)kv*Tc);
+    ggml_backend_tensor_get(q2d, hQ.data(), 0, ggml_nbytes(q2d));
+    ggml_backend_tensor_get(k2d, hK.data(), 0, ggml_nbytes(k2d));
+    ggml_backend_tensor_get(w2d, hW.data(), 0, ggml_nbytes(w2d));
+    ggml_backend_tensor_get(ks,  hKS.data(),0, ggml_nbytes(ks));
+    ggml_cuda_indexer_logits_fused_host(hQ.data(), hK.data(), hW.data(), hKS.data(), D, H, Tc, kv, hO.data());
+    ggml_backend_tensor_set(dst, hO.data(), 0, ggml_nbytes(dst));
+#else
+    // CPU fallback: no-op (should not be called without CUDA)
+#endif
+}
+
+static ggml_tensor * build_indexer_fused_logits(
+    ggml_context * ctx,
+    ggml_tensor * q2d, // [D, Tc*H]
+    ggml_tensor * k2d, // [D, kv]
+    ggml_tensor * w2d, // [H, Tc]
+    ggml_tensor * k_scale // [kv]
+) {
+    int64_t kv = k2d->ne[1];
+    int64_t Tc = w2d->ne[1];
+    ggml_tensor * args[4] = { q2d, k2d, w2d, k_scale };
+    return ggml_custom_4d(ctx, GGML_TYPE_F32, kv, Tc, 1, 1, args, 4, fused_indexer_custom, 1, nullptr);
+}
+
+
 static ggml_tensor * idx_compute_scores_tile(
     ggml_context * ctx,
     ggml_tensor * q3d,
@@ -208,7 +251,7 @@ static ggml_tensor * idx_compute_scores_tile(
     int64_t t0,
     bool use_fp16) {
     ggml_tensor * scores_acc = nullptr;
-    long HEAD_CHUNK = 8;
+    long HEAD_CHUNK = H;
     if (const char *env = getenv("LLAMA_SPARSE_TOPK_HEAD_CHUNK")) {
         long v = strtol(env, nullptr, 10);
         if (v > 0) HEAD_CHUNK = v;
@@ -393,7 +436,28 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
         // Use contiguized [D, T, H] directly for head-wise tiles
         ggml_tensor * q3d = q_cont;
 
-        ggml_tensor * scores_tc = idx_compute_scores_tile(ctx, q3d, k_indexer_f16, weights, k_scale_2d, D, H, Tc, kv_end, t0, use_fp16);
+        ggml_tensor * scores_tc = nullptr;
+          {
+            const char *env_fused = getenv("LLAMA_SPARSE_INDEXER_FUSED");
+            bool use_fused = (env_fused && atoi(env_fused) != 0);
+            if (use_fused) {
+                // prepare q2d tile [D, Tc*H]
+                size_t q_off = (size_t)t0 * q3d->nb[1];
+                ggml_tensor * q_tile3d = ggml_view_3d(ctx, q3d, D, Tc, H, q3d->nb[1], q3d->nb[2], q_off);
+                q_tile3d = ggml_cont(ctx, q_tile3d);
+                ggml_tensor * q_tile2d = ggml_reshape_2d(ctx, q_tile3d, D, Tc*H);
+                // k slice [D, kv_end]
+                ggml_tensor * k_slice = ggml_view_2d(ctx, k_indexer_f16, D, kv_end, k_indexer_f16->nb[1], 0);
+                // w slice [H, Tc]
+                ggml_tensor * w_slice = ggml_view_2d(ctx, weights, H, Tc, weights->nb[1], t0*weights->nb[1]);
+                // k_scale head [kv_end]
+                ggml_tensor * ks_head = ggml_view_2d(ctx, k_scale_2d, kv_end, 1, k_scale_2d->nb[1], 0);
+                ks_head = ggml_reshape_1d(ctx, ks_head, kv_end);
+                scores_tc = build_indexer_fused_logits(ctx, q_tile2d, k_slice, w_slice, ks_head);
+            } else {
+                scores_tc = idx_compute_scores_tile(ctx, q3d, k_indexer_f16, weights, k_scale_2d, D, H, Tc, kv_end, t0, use_fp16);
+            }
+          }
 
         // Safe K-scale proxy application after head reduction (always apply)
         {
