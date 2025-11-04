@@ -139,7 +139,49 @@ __global__ void k_indexer_logits_tiled_f32(
             // Cooperative (or cp.async) load Kbuf: [cur, BLOCK_N] and Qbuf: [cur, BLOCK_Q*hc]
 #if __CUDA_ARCH__ >= 800 && defined(LLAMA_ENABLE_CP_ASYNC)
             if (PIPE_STAGES_ARG >= 2) {
-                // Disabled pending proper 16B-aligned layout. Use cooperative loads for now.
+                // K: cooperative load
+                for (int idx = tid; idx < cur * BLOCK_N; idx += stride) {
+                    int di = idx / BLOCK_N;
+                    int j  = idx % BLOCK_N;
+                    int gk = k0 + j;
+                    float v = 0.0f;
+                    if (gk < kv) v = K[(size_t)(d0 + di) + (size_t)D * gk];
+                    Kbuf[di * BLOCK_N + j] = v;
+                }
+                // Q: cp.async 16B using transposed layout [BLOCK_Q*hc, D_TILE]
+                int groups = (cur / 4);
+                for (int idx = tid; idx < groups * BLOCK_Q * hc; idx += stride) {
+                    int di4 = (idx % groups) * 4;
+                    int rem = idx / groups;
+                    int q   = rem % BLOCK_Q;
+                    int hi  = rem / BLOCK_Q;
+                    int gt  = t0 + q;
+                    const float * gptr = (gt < Tc) ? &Q[(size_t)(d0 + di4) + (size_t)D * (gt*H + (h0 + hi))] : nullptr;
+                    float * sptr = &Qbuf[(hi * BLOCK_Q + q) * D_TILE + di4];
+                    if (gptr) {
+                        cp_async_16b(sptr, gptr);
+                    } else {
+                        // zero-fill when out of range
+                        reinterpret_cast<float4*>(sptr)[0] = make_float4(0.f,0.f,0.f,0.f);
+                    }
+                }
+                cp_async_commit();
+                cp_async_wait();
+                __syncthreads();
+                // Handle Q tail when cur % 4 != 0 via cooperative scalar loads into transposed storage
+                int tail = cur & 3;
+                if (tail) {
+                    for (int idx = tid; idx < tail * BLOCK_Q * hc; idx += stride) {
+                        int di = idx % tail;
+                        int rem = idx / tail;
+                        int q   = rem % BLOCK_Q;
+                        int hi  = rem / BLOCK_Q;
+                        int gt  = t0 + q;
+                        float v = 0.0f;
+                        if (gt < Tc) v = Q[(size_t)(d0 + (cur - tail) + di) + (size_t)D * (gt*H + (h0 + hi))];
+                        Qbuf[(hi * BLOCK_Q + q) * D_TILE + (cur - tail) + di] = v;
+                    }
+                }
             } else
 #endif
             {
@@ -166,11 +208,16 @@ __global__ void k_indexer_logits_tiled_f32(
 
             // Compute partial dot across cur for this (kv_idx, token), accumulating per head
             float * Kcomp = Kbuf;
-            float * Qcomp = Qbuf;
             for (int di = 0; di < cur; ++di) {
                 float kval = Kcomp[di * BLOCK_N + k_local];
                 for (int hi = 0; hi < hc; ++hi) {
-                    float qval = Qcomp[di * (BLOCK_Q * hc) + hi * BLOCK_Q + t_local];
+#if __CUDA_ARCH__ >= 800 && defined(LLAMA_ENABLE_CP_ASYNC)
+                    // When cp.async-enabled, Qbuf is transposed [BLOCK_Q*hc, D_TILE]
+                    float qval = Qbuf[(hi * BLOCK_Q + t_local) * D_TILE + di];
+#else
+                    // Cooperative layout: Qbuf [cur, BLOCK_Q*hc]
+                    float qval = Qbuf[di * (BLOCK_Q * hc) + hi * BLOCK_Q + t_local];
+#endif
                     dot_vec[hi] += kval * qval;
                 }
             }
@@ -258,6 +305,21 @@ __global__ void k_indexer_logits_wmma16_f32(
     const int tokens_per_tile = max(1, 16 / H);
     const int t0 = blockIdx.x * tokens_per_tile;
     const int k0 = blockIdx.y * 16;
+
+/* WMMA path with head sub-chunks of 16: supports H multiple of 16
+__global__ void k_indexer_logits_wmma_h16_f32(
+    const float * __restrict__ Q, // [D, Tc*H]
+    const float * __restrict__ K, // [D, kv]
+    const float * __restrict__ W, // [H, Tc]
+    const float * __restrict__ k_scale, // [kv]
+    int D, int H, int Tc, int kv,
+    float * __restrict__ Out) {
+#if __CUDA_ARCH__ >= 700
+    // intentionally disabled prototype block
+#endif
+*/
+
+
     if (t0 >= Tc || k0 >= kv) return;
 
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
