@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include "../../include/ggml-cuda-indexer.h"
 #ifndef SEL_DEBUG
-#define SEL_DEBUG 2
 #endif
 
 // Simple baseline fused kernel: compute K^T * Q -> ReLU, then per-head weighted sum, multiply k_scale.

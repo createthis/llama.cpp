@@ -3440,6 +3440,21 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     return false;
             }
             break;
+        case GGML_OP_INDEXER_FUSED:
+            {
+                const struct ggml_tensor * q = op->src[0];
+                const struct ggml_tensor * k = op->src[1];
+                const struct ggml_tensor * w = op->src[2];
+                const struct ggml_tensor * ks = op->src[3];
+                if (!q || !k || !w || !ks) return false;
+                if (!ggml_is_contiguous(q) || !ggml_is_contiguous(k) || !ggml_is_contiguous(w) || !ggml_is_contiguous(ks)) return false;
+                if (!(q->type == GGML_TYPE_F32 || q->type == GGML_TYPE_F16 || q->type == GGML_TYPE_BF16)) return false;
+                if (!(k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16 || k->type == GGML_TYPE_BF16)) return false;
+                if (w->type != GGML_TYPE_F32) return false;
+                if (ks->type != GGML_TYPE_F32) return false;
+                if (q->ne[0] != k->ne[0]) return false;
+                return true;
+            } break;
         case GGML_OP_SPARSE_TOPK_RADIX:
             {
                 const struct ggml_tensor * a = op->src[0];
