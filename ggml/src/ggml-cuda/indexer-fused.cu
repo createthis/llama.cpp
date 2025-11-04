@@ -19,6 +19,8 @@ static inline int getenv_int_(const char * name, int def) {
     int v = atoi(s);
     return v > 0 ? v : def;
 }
+static inline bool sparse_debug_on(){ const char *d=getenv("LLAMA_SPARSE_DEBUG"); return d && *d && atoi(d)!=0; }
+
 
 // Tiled, shared-memory fused kernel (float inputs, float accum)
 // Q: [D, Tc*H], K: [D, kv], W: [H, Tc], k_scale: [kv]; Out: [kv, Tc]
@@ -390,7 +392,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_host(const float * Q,
 
     dim3 block(32, 4);
     dim3 grid((Tc + block.x - 1)/block.x, (kv_end + block.y - 1)/block.y);
-    printf("[INDEXER_DISPATCH] launch=naive grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
+    if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=naive grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
         k_indexer_logits_fused<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dO);
 
     cudaMemcpyAsync(out, dO, osz*sizeof(float), cudaMemcpyDeviceToHost, stream);
@@ -416,24 +418,24 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     bool use_wmma = false;
     if (const char *s = getenv("LLAMA_INDEXER_USE_WMMA"); s && atoi(s) != 0) use_wmma = true;
 
-    printf("[INDEXER_DISPATCH] use_naive=%d use_wmma=%d D=%d H=%d Tc=%d kv=%d BLOCK_Q=%d BLOCK_N=%d D_TILE=%d\n", (int)use_naive, (int)use_wmma, D, H, Tc, kv_end, BLOCK_Q, BLOCK_N, D_TILE);
+    if (sparse_debug_on()) printf("[INDEXER_DISPATCH] use_naive=%d use_wmma=%d D=%d H=%d Tc=%d kv=%d BLOCK_Q=%d BLOCK_N=%d D_TILE=%d\n", (int)use_naive, (int)use_wmma, D, H, Tc, kv_end, BLOCK_Q, BLOCK_N, D_TILE);
     if (use_naive) {
         dim3 block(32, 4);
         dim3 grid((Tc + block.x - 1)/block.x, (kv_end + block.y - 1)/block.y);
-        printf("[INDEXER_DISPATCH] launch=naive grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
+        if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=naive grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
         k_indexer_logits_fused<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
     } else if (use_wmma && D % 16 == 0 && (size_t)Tc * kv_end > 4096 && H <= 16 && (16 % H) == 0) {
         // launch WMMA16 path (skip for tiny problems)
         dim3 block(32,1,1);
         const int tokens_per_tile = max(1, 16 / H);
         dim3 grid((Tc + tokens_per_tile - 1) / tokens_per_tile, (kv_end + 15) / 16, 1);
-        printf("[INDEXER_DISPATCH] launch=wmma grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
+        if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
         k_indexer_logits_wmma16_f32<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
     } else {
         dim3 blockT(BLOCK_Q, BLOCK_N);
         dim3 gridT((Tc + BLOCK_Q - 1)/BLOCK_Q, (kv_end + BLOCK_N - 1)/BLOCK_N);
         size_t shmem = (size_t)D_TILE * BLOCK_N * sizeof(float) + (size_t)D_TILE * (BLOCK_Q * H) * sizeof(float);
-        printf("[INDEXER_DISPATCH] launch=tiled grid=(%d,%d) block=(%d,%d) shmem=%zu\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem);
+        if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=tiled grid=(%d,%d) block=(%d,%d) shmem=%zu\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem);
         k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, dOut);
     }
 }
