@@ -634,9 +634,14 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
         ggml_tensor * scores_clamped = ggml_clamp(ctx, scores_pre, -1e30f, 1e30f);
         // Compute top-k indices via CUDA radix selection
         const int64_t k_tile = std::min<int64_t>(k, scores_clamped->ne[0]);
-          ggml_tensor * topk_tc = ggml_sparse_topk_radix(ctx, scores_clamped, (int)k_tile);
+        ggml_tensor * topk_tc = ggml_sparse_topk_radix(ctx, scores_clamped, (int)k_tile);
         if (dbg && t0 == 0) {
             cb(topk_tc, "idxkv_topk_radix", -1);
+            int64_t kk = std::min<int64_t>(k_tile, (int64_t)16);
+            int64_t tt = std::min<int64_t>(Tc, (int64_t)4);
+            ggml_tensor * topk_head = ggml_view_2d(ctx, topk_tc, kk, tt, topk_tc->nb[1], 0);
+            cb(topk_head, "idxkv_topk_indices_head", -1);
+            if (gf) { ggml_set_output(topk_head); ggml_build_forward_expand(gf, topk_head); }
         }
         result = result ? ggml_concat(ctx, result, topk_tc, 1) : topk_tc;
     }
