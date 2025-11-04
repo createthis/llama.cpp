@@ -31,6 +31,7 @@ __global__ void k_indexer_logits_tiled_f32(
     const float * __restrict__ k_scale,
     int D, int H, int Tc, int kv,
     int D_TILE, int BLOCK_Q, int BLOCK_N, int exact_flag,
+    int HEAD_CHUNK_ARG,
     float * __restrict__ Out) {
     // Dynamic select exact vs optimized based on workload or env
     bool exact = (exact_flag != 0) || ((size_t)Tc * (size_t)kv <= 4096);
@@ -60,7 +61,7 @@ __global__ void k_indexer_logits_tiled_f32(
         Out[kv_idx + (size_t)kv * token] = acc;
         return;
     }
-    // Optimized shared-memory tiled path
+    // Optimized shared-memory tiled path with head-chunked reduction
     int t_local = threadIdx.x; // [0..BLOCK_Q)
     int k_local = threadIdx.y; // [0..BLOCK_N)
     int t0 = blockIdx.x * BLOCK_Q;
@@ -69,19 +70,50 @@ __global__ void k_indexer_logits_tiled_f32(
     int kv_idx = k0 + k_local;
     if (t_local >= BLOCK_Q || k_local >= BLOCK_N) return;
     if (token >= Tc || kv_idx >= kv) return;
+
+    // Head-chunk size
+    int Hc = HEAD_CHUNK_ARG > 0 ? HEAD_CHUNK_ARG : 16;
+    if (Hc < 1) Hc = 1;
+    if (Hc > H) Hc = H;
+
     extern __shared__ float shmem[];
-    float * K_sh = shmem; // [D_TILE, BLOCK_N]
-    float * Q_sh = K_sh + (size_t)D_TILE * BLOCK_N; // [D_TILE, BLOCK_Q]
+    // Layout: K_sh [D_TILE, BLOCK_N] | Q_sh [D_TILE, BLOCK_Q*Hc] | W_sh [Hc, BLOCK_Q]
+    float * K_sh = shmem;
+    float * Q_sh = K_sh + (size_t)D_TILE * BLOCK_N;
+    float * W_sh = Q_sh + (size_t)D_TILE * BLOCK_Q * Hc;
+
+    // Accumulator per (kv,row) x (token,col)
     float acc = 0.0f;
-    for (int h = 0; h < H; ++h) {
-        float dot = 0.0f;
+
+    for (int h0 = 0; h0 < H; h0 += Hc) {
+        int hc = min(Hc, H - h0);
+        // load weights W[h0:h0+hc, token-range]
+        // cooperative load: map 2D [hc, BLOCK_Q]
+        int stride2 = blockDim.x * blockDim.y;
+        int tid2 = threadIdx.y * blockDim.x + threadIdx.x;
+        for (int idx = tid2; idx < hc*BLOCK_Q; idx += stride2) {
+            int hi = idx / BLOCK_Q;
+            int q  = idx % BLOCK_Q;
+            int tok = t0 + q;
+            float wv = 0.0f;
+            if (tok < Tc) wv = W[(h0 + hi) + (size_t)H * tok];
+            W_sh[hi * BLOCK_Q + q] = wv;
+        }
+        __syncthreads();
+
+        // Compute S = K^T * Q over this head-chunk
+        float sum_hc = 0.0f;
+        // Accumulate per-head dot across D, then apply ReLU and weights once
+        const int MAX_HC = 64;
+        float dot_vec[MAX_HC];
+        for (int i = 0; i < hc; ++i) dot_vec[i] = 0.0f;
         for (int d0 = 0; d0 < D; d0 += D_TILE) {
             int cur = min(D_TILE, D - d0);
-            // cooperative load K_sh
-            int totalK = cur * BLOCK_N;
             int stride = blockDim.x * blockDim.y;
             int tid = threadIdx.y * blockDim.x + threadIdx.x;
-            for (int idx = tid; idx < totalK; idx += stride) {
+
+            // Load K_sh: [cur, BLOCK_N]
+            for (int idx = tid; idx < cur * BLOCK_N; idx += stride) {
                 int di = idx / BLOCK_N;
                 int j  = idx % BLOCK_N;
                 int gk = k0 + j;
@@ -89,28 +121,40 @@ __global__ void k_indexer_logits_tiled_f32(
                 if (gk < kv) v = K[(size_t)(d0 + di) + (size_t)D * gk];
                 K_sh[di * BLOCK_N + j] = v;
             }
-            // cooperative load Q_sh for all heads
-            int totalQ = cur * BLOCK_Q;
-            for (int idx = tid; idx < totalQ; idx += stride) {
-                int di = idx / BLOCK_Q;
-                int q  = idx % BLOCK_Q;
-                /* per-head */
-                
+
+            // Load Q_sh for hc heads: [cur, BLOCK_Q*hc]
+            for (int idx = tid; idx < cur * BLOCK_Q * hc; idx += stride) {
+                int di = idx / (BLOCK_Q * hc);
+                int rem = idx % (BLOCK_Q * hc);
+                int q   = rem % BLOCK_Q;
+                int hi  = rem / BLOCK_Q;
                 int gt  = t0 + q;
                 float v = 0.0f;
-                if (gt < Tc) v = Q[(size_t)(d0 + di) + (size_t)D * (gt*H + h)];
-                Q_sh[di * BLOCK_Q + q] = v;
+                if (gt < Tc) v = Q[(size_t)(d0 + di) + (size_t)D * (gt*H + (h0 + hi))];
+                Q_sh[di * (BLOCK_Q * hc) + hi * BLOCK_Q + q] = v;
             }
             __syncthreads();
-            /* qoff removed: using per-head Q_sh */
+
+            // Compute partial dot across cur for this (kv_idx, token), accumulating per head
             for (int di = 0; di < cur; ++di) {
-                dot += K_sh[di * BLOCK_N + k_local] * Q_sh[di * BLOCK_Q + t_local];
+                float kval = K_sh[di * BLOCK_N + k_local];
+                for (int hi = 0; hi < hc; ++hi) {
+                    float qval = Q_sh[di * (BLOCK_Q * hc) + hi * BLOCK_Q + t_local];
+                    dot_vec[hi] += kval * qval;
+                }
             }
             __syncthreads();
         }
-        if (dot < 0.0f) dot = 0.0f;
-        acc += dot * W[h + (size_t)H * token];
+        // Apply ReLU and weights, then sum into this tile accumulator
+        for (int hi = 0; hi < hc; ++hi) {
+            float tmp = dot_vec[hi];
+            if (tmp < 0.0f) tmp = 0.0f;
+            sum_hc += tmp * W_sh[hi * BLOCK_Q + t_local];
+        }
+        acc += sum_hc;
     }
+
+    // Apply k_scale
     acc *= k_scale[kv_idx];
     Out[kv_idx + (size_t)kv * token] = acc;
 }
@@ -490,11 +534,14 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
         k_indexer_logits_wmma16_f32<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
     } else {
+        int HEAD_CHUNK = getenv_int_("LLAMA_INDEXER_HEAD_CHUNK", 16);
         dim3 blockT(BLOCK_Q, BLOCK_N);
         dim3 gridT((Tc + BLOCK_Q - 1)/BLOCK_Q, (kv_end + BLOCK_N - 1)/BLOCK_N);
-        size_t shmem = (size_t)D_TILE * BLOCK_N * sizeof(float) + (size_t)D_TILE * BLOCK_Q * sizeof(float);
-        if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=tiled grid=(%d,%d) block=(%d,%d) shmem=%zu\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem);
-        k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, dOut);
+        size_t shmem = (size_t)D_TILE * BLOCK_N * sizeof(float)
+                     + (size_t)D_TILE * BLOCK_Q * HEAD_CHUNK * sizeof(float)
+                     + (size_t)HEAD_CHUNK * BLOCK_Q * sizeof(float);
+        if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=tiled grid=(%d,%d) block=(%d,%d) shmem=%zu Hc=%d\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem, HEAD_CHUNK);
+        k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, dOut);
     }
 }
 
