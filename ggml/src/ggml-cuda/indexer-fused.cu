@@ -30,8 +30,37 @@ __global__ void k_indexer_logits_tiled_f32(
     const float * __restrict__ W,
     const float * __restrict__ k_scale,
     int D, int H, int Tc, int kv,
-    int D_TILE, int BLOCK_Q, int BLOCK_N,
+    int D_TILE, int BLOCK_Q, int BLOCK_N, int exact_flag,
     float * __restrict__ Out) {
+    // Dynamic select exact vs optimized based on workload or env
+    bool exact = (exact_flag != 0) || ((size_t)Tc * (size_t)kv <= 4096);
+    /* env read on host */
+    size_t work = (size_t)Tc * (size_t)kv;
+    if (exact || work <= 4096) {
+        // Exact global-load path (bit-exact with reference; slower)
+        int t_local = threadIdx.x;
+        int k_local = threadIdx.y;
+        int t0 = blockIdx.x * BLOCK_Q;
+        int k0 = blockIdx.y * BLOCK_N;
+        int token = t0 + t_local;
+        int kv_idx = k0 + k_local;
+        if (t_local >= BLOCK_Q || k_local >= BLOCK_N) return;
+        if (token >= Tc || kv_idx >= kv) return;
+        float acc = 0.0f;
+        for (int h = 0; h < H; ++h) {
+            const float *qv = Q + (size_t)D * (token*H + h);
+            const float *kvp= K + (size_t)D * kv_idx;
+            float dot = 0.0f;
+            #pragma unroll 1
+            for (int d = 0; d < D; ++d) dot += qv[d] * kvp[d];
+            if (dot < 0.0f) dot = 0.0f;
+            acc += dot * W[h + (size_t)H * token];
+        }
+        acc *= k_scale[kv_idx];
+        Out[kv_idx + (size_t)kv * token] = acc;
+        return;
+    }
+    // Optimized shared-memory tiled path
     int t_local = threadIdx.x; // [0..BLOCK_Q)
     int k_local = threadIdx.y; // [0..BLOCK_N)
     int t0 = blockIdx.x * BLOCK_Q;
@@ -40,19 +69,47 @@ __global__ void k_indexer_logits_tiled_f32(
     int kv_idx = k0 + k_local;
     if (t_local >= BLOCK_Q || k_local >= BLOCK_N) return;
     if (token >= Tc || kv_idx >= kv) return;
-
+    extern __shared__ float shmem[];
+    float * K_sh = shmem; // [D_TILE, BLOCK_N]
+    float * Q_sh = K_sh + (size_t)D_TILE * BLOCK_N; // [D_TILE, BLOCK_Q]
     float acc = 0.0f;
     for (int h = 0; h < H; ++h) {
         float dot = 0.0f;
-        const float * qv = Q + (size_t)D * (token*H + h);
-        const float * kvp = K + (size_t)D * kv_idx;
-        #pragma unroll 1
-        for (int d = 0; d < D; ++d) {
-            dot += qv[d] * kvp[d];
+        for (int d0 = 0; d0 < D; d0 += D_TILE) {
+            int cur = min(D_TILE, D - d0);
+            // cooperative load K_sh
+            int totalK = cur * BLOCK_N;
+            int stride = blockDim.x * blockDim.y;
+            int tid = threadIdx.y * blockDim.x + threadIdx.x;
+            for (int idx = tid; idx < totalK; idx += stride) {
+                int di = idx / BLOCK_N;
+                int j  = idx % BLOCK_N;
+                int gk = k0 + j;
+                float v = 0.0f;
+                if (gk < kv) v = K[(size_t)(d0 + di) + (size_t)D * gk];
+                K_sh[di * BLOCK_N + j] = v;
+            }
+            // cooperative load Q_sh for all heads
+            int totalQ = cur * BLOCK_Q;
+            for (int idx = tid; idx < totalQ; idx += stride) {
+                int di = idx / BLOCK_Q;
+                int q  = idx % BLOCK_Q;
+                /* per-head */
+                
+                int gt  = t0 + q;
+                float v = 0.0f;
+                if (gt < Tc) v = Q[(size_t)(d0 + di) + (size_t)D * (gt*H + h)];
+                Q_sh[di * BLOCK_Q + q] = v;
+            }
+            __syncthreads();
+            /* qoff removed: using per-head Q_sh */
+            for (int di = 0; di < cur; ++di) {
+                dot += K_sh[di * BLOCK_N + k_local] * Q_sh[di * BLOCK_Q + t_local];
+            }
+            __syncthreads();
         }
         if (dot < 0.0f) dot = 0.0f;
-        float w = W[h + (size_t)H * token];
-        acc += dot * w;
+        acc += dot * W[h + (size_t)H * token];
     }
     acc *= k_scale[kv_idx];
     Out[kv_idx + (size_t)kv * token] = acc;
@@ -412,6 +469,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     int BLOCK_Q = getenv_int_("LLAMA_INDEXER_BLOCK_Q", 1);
     int BLOCK_N = getenv_int_("LLAMA_INDEXER_BLOCK_N", 64);
     int D_TILE  = getenv_int_("LLAMA_INDEXER_D_TILE", 32);
+    int exact_flag = 0; { const char *e = getenv("LLAMA_INDEXER_EXACT"); if (e && *e && atoi(e)!=0) exact_flag = 1; }
     // Select kernel based on env; default to tiled
     bool use_naive = false;
     if (const char *s = getenv("LLAMA_INDEXER_USE_NAIVE"); s && atoi(s) != 0) use_naive = true;
@@ -434,9 +492,9 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     } else {
         dim3 blockT(BLOCK_Q, BLOCK_N);
         dim3 gridT((Tc + BLOCK_Q - 1)/BLOCK_Q, (kv_end + BLOCK_N - 1)/BLOCK_N);
-        size_t shmem = (size_t)D_TILE * BLOCK_N * sizeof(float) + (size_t)D_TILE * (BLOCK_Q * H) * sizeof(float);
+        size_t shmem = (size_t)D_TILE * BLOCK_N * sizeof(float) + (size_t)D_TILE * BLOCK_Q * sizeof(float);
         if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=tiled grid=(%d,%d) block=(%d,%d) shmem=%zu\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem);
-        k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, dOut);
+        k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, dOut);
     }
 }
 
