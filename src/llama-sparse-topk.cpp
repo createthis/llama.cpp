@@ -447,15 +447,25 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                 q_tile3d = ggml_cont(ctx, q_tile3d);
                 ggml_tensor * q_tile2d = ggml_reshape_2d(ctx, q_tile3d, D, Tc*H);
                 q_tile2d = ggml_cont(ctx, q_tile2d);
-                // k slice [D, kv_end]
-                ggml_tensor * k_slice = ggml_view_2d(ctx, k_indexer_f16, D, kv_end, k_indexer_f16->nb[1], 0);
+                // Determine kv window for this tile
+                int64_t kv_s = 0;
+                int64_t kv_e = kv_end;
+                if (have_windows && win_ends) {
+                    int32_t * e = (int32_t*)win_ends->data;
+                    int64_t max_e = 0;
+                    for (int64_t t = 0; t < Tc; ++t) max_e = std::max<int64_t>(max_e, (int64_t)e[t0 + t]);
+                    kv_e = std::min<int64_t>(N_kv, std::max<int64_t>(k, max_e));
+                }
+                int64_t kv_len = std::max<int64_t>(0, kv_e - kv_s);
+                // k slice [D, kv_len]
+                ggml_tensor * k_slice = ggml_view_2d(ctx, k_indexer_f16, D, kv_len, k_indexer_f16->nb[1], kv_s * k_indexer_f16->nb[1]);
                 k_slice = ggml_cont(ctx, k_slice);
                 // w slice [H, Tc]
                 ggml_tensor * w_slice = ggml_view_2d(ctx, weights, H, Tc, weights->nb[1], t0*weights->nb[1]);
                 w_slice = ggml_cont(ctx, w_slice);
-                // k_scale head [kv_end]
-                ggml_tensor * ks_head = ggml_view_2d(ctx, k_scale_2d, kv_end, 1, k_scale_2d->nb[1], 0);
-                ks_head = ggml_reshape_1d(ctx, ks_head, kv_end);
+                // k_scale head [kv_len]
+                ggml_tensor * ks_head = ggml_view_2d(ctx, k_scale_2d, kv_len, 1, k_scale_2d->nb[1], kv_s * k_scale_2d->nb[1]);
+                ks_head = ggml_reshape_1d(ctx, ks_head, kv_len);
                 ks_head = ggml_cont(ctx, ks_head);
 
                 if (dbg && sched && t0 == 0) {
@@ -642,6 +652,11 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
             ggml_tensor * topk_head = ggml_view_2d(ctx, topk_tc, kk, tt, topk_tc->nb[1], 0);
             cb(topk_head, "idxkv_topk_indices_head", -1);
             if (gf) { ggml_set_output(topk_head); ggml_build_forward_expand(gf, topk_head); }
+        }
+        // If we applied a KV window, adjust indices by the start offset
+        if (have_windows && win_ends) {
+            // current window start kv_s was 0 in this version; if non-zero in future, add kv_s here
+            // For now, no offset is needed since kv_s==0 above. Placeholder for future starts support.
         }
         result = result ? ggml_concat(ctx, result, topk_tc, 1) : topk_tc;
     }
