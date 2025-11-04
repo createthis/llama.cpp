@@ -422,8 +422,8 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         dim3 grid((Tc + block.x - 1)/block.x, (kv_end + block.y - 1)/block.y);
         printf("[INDEXER_DISPATCH] launch=naive grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
         k_indexer_logits_fused<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
-    } else if (use_wmma && D % 16 == 0) {
-        // launch WMMA16 f32 path
+    } else if (use_wmma && D % 16 == 0 && (size_t)Tc * kv_end > 4096) {
+        // launch WMMA16 path (skip for tiny problems)
         dim3 block(32,1,1);
         const int tokens_per_tile = max(1, 16 / H);
         dim3 grid((Tc + tokens_per_tile - 1) / tokens_per_tile, (kv_end + 15) / 16, 1);
