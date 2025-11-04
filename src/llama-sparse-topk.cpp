@@ -368,6 +368,15 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
     bool have_windows = false;
 #ifdef GGML_USE_CUDA
         if (kq_mask && kq_mask->buffer && !ggml_backend_buffer_is_host(kq_mask->buffer)) {
+            std::vector<int32_t> starts_h((size_t)T, 0);
+            ggml_cuda_mask_window_starts_device_to_host_simple((const float *)kq_mask->data, (int)N_kv, (int)T, starts_h.data());
+            ggml_tensor * starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+            memcpy(starts->data, starts_h.data(), sizeof(int32_t) * (size_t)T);
+            win_starts = starts; have_windows = true;
+        }
+#endif
+#ifdef GGML_USE_CUDA
+        if (kq_mask && kq_mask->buffer && !ggml_backend_buffer_is_host(kq_mask->buffer)) {
             std::vector<int32_t> ends_h((size_t)T, 0);
             ggml_cuda_mask_window_ends_device_to_host_simple((const float *)kq_mask->data, (int)N_kv, (int)T, ends_h.data());
             ggml_tensor * ends = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);

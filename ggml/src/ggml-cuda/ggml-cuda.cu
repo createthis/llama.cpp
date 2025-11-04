@@ -4073,3 +4073,25 @@ extern "C" void ggml_cuda_mask_window_ends_device_to_host_simple(const float * d
     if (err != cudaSuccess) { ggml_cuda_error("cudaMemcpy D2H dEnds", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); }
     cudaFree(dEnds);
 }
+
+__global__ void k_mask_window_starts(const float * __restrict__ mask, int N, int T, int * __restrict__ starts) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= T) return;
+    const float * col = mask + (size_t)N * (size_t)t;
+    int s = 0;
+    for (int i = 0; i < N; ++i) { float v = col[i]; if (v > -1.0e29f) { s = i; break; } }
+    starts[t] = s;
+}
+
+extern "C" void ggml_cuda_mask_window_starts_device_to_host_simple(const float * dMask, int N_kv, int T, int * hStarts) {
+    int * dStarts = nullptr; size_t bytes = sizeof(int) * (size_t)T;
+    cudaError_t err = cudaMalloc((void**)&dStarts, bytes);
+    if (err != cudaSuccess) { ggml_cuda_error("cudaMalloc dStarts", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); }
+    int block = 128; int grid = (T + block - 1) / block;
+    k_mask_window_starts<<<grid, block>>>(dMask, N_kv, T, dStarts);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) { ggml_cuda_error("k_mask_window_starts launch", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); }
+    err = cudaMemcpy(hStarts, dStarts, bytes, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { ggml_cuda_error("cudaMemcpy D2H dStarts", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); }
+    cudaFree(dStarts);
+}

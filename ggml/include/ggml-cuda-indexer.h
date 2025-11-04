@@ -34,8 +34,9 @@ void ggml_cuda_indexer_logits_fused_device(struct ggml_backend_cuda_context & ct
 void ggml_cuda_mask_window_ends_device_to_host(struct ggml_backend_cuda_context & ctx,
                                                const float * dMask, int N_kv, int T, int * hEnds);
 
-// Simple convenience wrapper using current device and default stream
+// Simple convenience wrappers using current device and default stream
 void ggml_cuda_mask_window_ends_device_to_host_simple(const float * dMask, int N_kv, int T, int * hEnds);
+void ggml_cuda_mask_window_starts_device_to_host_simple(const float * dMask, int N_kv, int T, int * hStarts);
 
 #ifdef __cplusplus
 }
