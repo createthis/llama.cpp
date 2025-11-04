@@ -7,6 +7,8 @@
 #ifdef GGML_USE_CUDA
 #include "ggml-cuda-indexer.h"
 #endif
+
+
 #include <cstring>
 
 #include <cmath>
@@ -204,26 +206,7 @@ struct fused_indexer_userdata { };
 
 static void fused_indexer_custom(ggml_tensor * dst, int ith, int nth, void * userdata) {
     (void)userdata; (void)ith; (void)nth;
-#ifdef GGML_USE_CUDA
-    ggml_tensor * q2d = dst->src[0];
-    ggml_tensor * k2d = dst->src[1];
-    ggml_tensor * w2d = dst->src[2];
-    ggml_tensor * ks  = dst->src[3];
-    int D = (int)q2d->ne[0];
-    int TcH = (int)q2d->ne[1];
-    int Tc = (int)w2d->ne[1];
-    int H  = TcH / (Tc);
-    int kv = (int)k2d->ne[1];
-    std::vector<float> hQ((size_t)D*Tc*H), hK((size_t)D*kv), hW((size_t)H*Tc), hKS((size_t)kv), hO((size_t)kv*Tc);
-    ggml_backend_tensor_get(q2d, hQ.data(), 0, ggml_nbytes(q2d));
-    ggml_backend_tensor_get(k2d, hK.data(), 0, ggml_nbytes(k2d));
-    ggml_backend_tensor_get(w2d, hW.data(), 0, ggml_nbytes(w2d));
-    ggml_backend_tensor_get(ks,  hKS.data(),0, ggml_nbytes(ks));
-    ggml_cuda_indexer_logits_fused_host(hQ.data(), hK.data(), hW.data(), hKS.data(), D, H, Tc, kv, hO.data());
-    ggml_backend_tensor_set(dst, hO.data(), 0, ggml_nbytes(dst));
-#else
-    // CPU fallback: no-op (should not be called without CUDA)
-#endif
+
 }
 
 static ggml_tensor * build_indexer_fused_logits(
@@ -327,6 +310,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
         printf("SPARSE TOPK KV-AWARE (INDEXER): weights [H,T]=[%" PRId64 ",%" PRId64 "]\n",
                weights ? weights->ne[0] : -1, weights ? weights->ne[1] : -1);
         if (kq_mask) {
+
             printf("SPARSE TOPK KV-AWARE (INDEXER): kq_mask dims=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "] type=%d\n",
                    kq_mask->ne[0], kq_mask->ne[1], kq_mask->ne[2], kq_mask->ne[3], (int)kq_mask->type);
         }
@@ -382,6 +366,19 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
     (void)win_starts;
     ggml_tensor * win_ends   = nullptr;
     bool have_windows = false;
+#ifdef GGML_USE_CUDA
+        if (kq_mask && kq_mask->buffer && !ggml_backend_buffer_is_host(kq_mask->buffer)) {
+            std::vector<int32_t> ends_h((size_t)T, 0);
+            ggml_cuda_mask_window_ends_device_to_host_simple((const float *)kq_mask->data, (int)N_kv, (int)T, ends_h.data());
+            ggml_tensor * ends = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+            memcpy(ends->data, ends_h.data(), sizeof(int32_t) * (size_t)T);
+            win_ends = ends; have_windows = true;
+        }
+#endif
+
+#ifdef GGML_USE_CUDA
+
+#endif
     if (kq_mask) {
         cb(kq_mask, "idxkv_kq_mask", -1);
         ggml_tensor * tmp_mask = kq_mask;

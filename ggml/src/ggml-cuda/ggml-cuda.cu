@@ -4043,3 +4043,33 @@ extern "C" void ggml_cuda_mask_window_ends_device(ggml_backend_cuda_context & ct
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) { ggml_cuda_error("k_mask_window_ends launch", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); }
 }
+
+extern "C" void ggml_cuda_mask_window_ends_device_to_host(ggml_backend_cuda_context & ctx,
+    const float * dMask, int N_kv, int T, int * hEnds) {
+    int * dEnds = nullptr;
+    size_t bytes = sizeof(int) * (size_t)T;
+    cudaError_t err = cudaMalloc((void**)&dEnds, bytes);
+    if (err != cudaSuccess) { ggml_cuda_error("cudaMalloc dEnds", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); }
+    int block = 128; int grid = (T + block - 1) / block;
+    k_mask_window_ends<<<grid, block, 0, ctx.stream()>>>(dMask, N_kv, T, dEnds);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) { ggml_cuda_error("k_mask_window_ends launch", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); }
+    err = cudaMemcpy(hEnds, dEnds, bytes, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { ggml_cuda_error("cudaMemcpy D2H dEnds", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); }
+    cudaFree(dEnds);
+}
+
+extern "C" void ggml_cuda_mask_window_ends_device_to_host_simple(const float * dMask, int N_kv, int T, int * hEnds) {
+    // Use current device and default stream
+    int * dEnds = nullptr;
+    size_t bytes = sizeof(int) * (size_t)T;
+    cudaError_t err = cudaMalloc((void**)&dEnds, bytes);
+    if (err != cudaSuccess) { ggml_cuda_error("cudaMalloc dEnds", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); }
+    int block = 128; int grid = (T + block - 1) / block;
+    k_mask_window_ends<<<grid, block>>>(dMask, N_kv, T, dEnds);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) { ggml_cuda_error("k_mask_window_ends launch", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); }
+    err = cudaMemcpy(hEnds, dEnds, bytes, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { ggml_cuda_error("cudaMemcpy D2H dEnds", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); }
+    cudaFree(dEnds);
+}

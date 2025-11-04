@@ -4,24 +4,16 @@
 extern "C" {
 #endif
 
+// Forward-declare the CUDA context type; definition is in common.cuh
+struct ggml_backend_cuda_context;
+
 // Derive per-token KV window ends from device-resident mask [N_kv, T]
 // mask values <= -1e29 are treated as masked; ends[t] = last i where mask[i,t] > -1e29, or 0 if none
 void ggml_cuda_mask_window_ends_device(struct ggml_backend_cuda_context & ctx,
                                        const float * dMask, int N_kv, int T,
                                        int * dEnds);
 
-
-// Forward-declare the CUDA context type; definition is in common.cuh
-struct ggml_backend_cuda_context;
-
 // Fused lightning-indexer logits kernel (scaffold): host wrapper copies inputs to device and back
-// Inputs are row-major contiguous buffers:
-//  - Q: [D, Tc*H] as row-major (leading dim D)
-//  - K: [D, kv_end] row-major
-//  - W: [H, Tc] row-major
-//  - k_scale: [kv_end]
-// Output:
-//  - out: [kv_end, Tc] row-major
 void ggml_cuda_indexer_logits_fused_host(const float * Q,
                                          const float * K,
                                          const float * W,
@@ -30,13 +22,20 @@ void ggml_cuda_indexer_logits_fused_host(const float * Q,
                                          float * out);
 
 // Device-resident entry: takes device pointers and current CUDA context
-void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context & ctx,
+void ggml_cuda_indexer_logits_fused_device(struct ggml_backend_cuda_context & ctx,
                                            const float * dQ,
                                            const float * dK,
                                            const float * dW,
                                            const float * dKS,
                                            int D, int H, int Tc, int kv_end,
                                            float * dOut);
+
+// Derive per-token KV window ends from device-resident mask and copy to host buffer
+void ggml_cuda_mask_window_ends_device_to_host(struct ggml_backend_cuda_context & ctx,
+                                               const float * dMask, int N_kv, int T, int * hEnds);
+
+// Simple convenience wrapper using current device and default stream
+void ggml_cuda_mask_window_ends_device_to_host_simple(const float * dMask, int N_kv, int T, int * hEnds);
 
 #ifdef __cplusplus
 }
