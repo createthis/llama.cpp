@@ -2571,9 +2571,25 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 ggml_cuda_pool_alloc<float> kf(ctx.pool(ggml_cuda_get_device()), (size_t)D*kv);
                 const to_fp32_cuda_t to_q = ggml_get_to_fp32_cuda(q2d_c->type);
                 const to_fp32_cuda_t to_k = ggml_get_to_fp32_cuda(k2d_c->type);
-                to_q((const void *)q2d_c->data, (float *)qf.get(), (size_t)D*TcH, ctx.stream());
-                to_k((const void *)k2d_c->data, (float *)kf.get(), (size_t)D*kv,  ctx.stream());
+                if (to_q) {
+                    to_q((const void *)q2d_c->data, (float *)qf.get(), (size_t)D*TcH, ctx.stream());
+                } else {
+                    // F32 fast path: device-to-device copy
+                    CUDA_CHECK(cudaMemcpyAsync((void *)qf.get(), (const void *)q2d_c->data,
+                                               sizeof(float)*(size_t)D*TcH, cudaMemcpyDeviceToDevice, ctx.stream()));
+                }
+                if (to_k) {
+                    to_k((const void *)k2d_c->data, (float *)kf.get(), (size_t)D*kv,  ctx.stream());
+                } else {
+                    CUDA_CHECK(cudaMemcpyAsync((void *)kf.get(), (const void *)k2d_c->data,
+                                               sizeof(float)*(size_t)D*kv, cudaMemcpyDeviceToDevice, ctx.stream()));
+                }
                 // Launch naive device kernel (implemented in indexer-fused.cu) directly writing to dst
+#ifndef NDEBUG
+                printf("[GGML_OP_INDEXER_FUSED] D=%d H=%d Tc=%d kv=%d TcH=%d\n", D, H, Tc, kv, TcH);
+                printf("[GGML_OP_INDEXER_FUSED] ptrs dQ=%p dK=%p dW=%p dKS=%p dOut=%p\n", (void*)qf.get(), (void*)kf.get(), w2d_c->data, ks_c->data, dst->data);
+                fflush(stdout);
+#endif
                 ggml_cuda_indexer_logits_fused_device(ctx, (const float *)qf.get(), (const float *)kf.get(), (const float *)w2d_c->data, (const float *)ks_c->data, D, H, Tc, kv, (float *)dst->data);
                 CUDA_CHECK(cudaGetLastError());
                 (void)D; (void)H; (void)Tc; (void)kv; (void)TcH; // silence warnings if asserts disabled
