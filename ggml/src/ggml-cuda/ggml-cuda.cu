@@ -2557,15 +2557,24 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 int Tc  = (int)w2d->ne[1];
                 int H   = (int)w2d->ne[0];
                 GGML_ASSERT(TcH == Tc*H);
+                // Inputs must be contiguous; enforce at graph construction time
+                GGML_ASSERT(ggml_is_contiguous(q2d));
+                GGML_ASSERT(ggml_is_contiguous(k2d));
+                GGML_ASSERT(ggml_is_contiguous(w2d));
+                GGML_ASSERT(ggml_is_contiguous(ks));
+                ggml_tensor * q2d_c = q2d;
+                ggml_tensor * k2d_c = k2d;
+                ggml_tensor * w2d_c = w2d;
+                ggml_tensor * ks_c  = ks;
                 // Promote half/bf16 to float for now (Phase 1)
                 ggml_cuda_pool_alloc<float> qf(ctx.pool(ggml_cuda_get_device()), (size_t)D*TcH);
                 ggml_cuda_pool_alloc<float> kf(ctx.pool(ggml_cuda_get_device()), (size_t)D*kv);
-                const to_fp32_cuda_t to_q = ggml_get_to_fp32_cuda(q2d->type);
-                const to_fp32_cuda_t to_k = ggml_get_to_fp32_cuda(k2d->type);
-                to_q((const void *)q2d->data, (float *)qf.get(), (size_t)D*TcH, ctx.stream());
-                to_k((const void *)k2d->data, (float *)kf.get(), (size_t)D*kv,  ctx.stream());
+                const to_fp32_cuda_t to_q = ggml_get_to_fp32_cuda(q2d_c->type);
+                const to_fp32_cuda_t to_k = ggml_get_to_fp32_cuda(k2d_c->type);
+                to_q((const void *)q2d_c->data, (float *)qf.get(), (size_t)D*TcH, ctx.stream());
+                to_k((const void *)k2d_c->data, (float *)kf.get(), (size_t)D*kv,  ctx.stream());
                 // Launch naive device kernel (implemented in indexer-fused.cu) directly writing to dst
-                ggml_cuda_indexer_logits_fused_device(ctx, (const float *)qf.get(), (const float *)kf.get(), (const float *)w2d->data, (const float *)ks->data, D, H, Tc, kv, (float *)dst->data);
+                ggml_cuda_indexer_logits_fused_device(ctx, (const float *)qf.get(), (const float *)kf.get(), (const float *)w2d_c->data, (const float *)ks_c->data, D, H, Tc, kv, (float *)dst->data);
                 CUDA_CHECK(cudaGetLastError());
                 (void)D; (void)H; (void)Tc; (void)kv; (void)TcH; // silence warnings if asserts disabled
             }

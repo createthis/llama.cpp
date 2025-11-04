@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include "../../include/ggml-cuda-indexer.h"
 #ifndef SEL_DEBUG
-#define SEL_DEBUG 1
+#define SEL_DEBUG 2
 #endif
 
 // Simple baseline fused kernel: compute K^T * Q -> ReLU, then per-head weighted sum, multiply k_scale.
@@ -29,7 +29,7 @@ __global__ void k_indexer_logits_fused(const float * __restrict__ Q, // [D, Tc*H
     // For each head, compute dot(K[:,kv_idx], Q[:,tc*H + h])
     float acc_logits = 0.0f;
     for (int h = 0; h < H; ++h) {
-        const float * qv = Q + (size_t)D * (tc*H + h);
+        const float * qv = Q + (size_t)D * (tc + h*Tc);
         const float * kvp = K + (size_t)D * kv_idx;
         float dot = 0.0f;
         // naive dot

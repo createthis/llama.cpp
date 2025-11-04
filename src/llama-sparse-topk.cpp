@@ -446,28 +446,67 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                 ggml_tensor * q_tile3d = ggml_view_3d(ctx, q3d, D, Tc, H, q3d->nb[1], q3d->nb[2], q_off);
                 q_tile3d = ggml_cont(ctx, q_tile3d);
                 ggml_tensor * q_tile2d = ggml_reshape_2d(ctx, q_tile3d, D, Tc*H);
+                q_tile2d = ggml_cont(ctx, q_tile2d);
                 // k slice [D, kv_end]
                 ggml_tensor * k_slice = ggml_view_2d(ctx, k_indexer_f16, D, kv_end, k_indexer_f16->nb[1], 0);
+                k_slice = ggml_cont(ctx, k_slice);
                 // w slice [H, Tc]
                 ggml_tensor * w_slice = ggml_view_2d(ctx, weights, H, Tc, weights->nb[1], t0*weights->nb[1]);
+                w_slice = ggml_cont(ctx, w_slice);
                 // k_scale head [kv_end]
                 ggml_tensor * ks_head = ggml_view_2d(ctx, k_scale_2d, kv_end, 1, k_scale_2d->nb[1], 0);
                 ks_head = ggml_reshape_1d(ctx, ks_head, kv_end);
-                scores_tc = ggml_indexer_logits_fused(ctx, q_tile2d, k_slice, w_slice, ks_head);
+                ks_head = ggml_cont(ctx, ks_head);
+
+                if (dbg && sched && t0 == 0) {
+                    ggml_backend_t bq = ggml_backend_sched_get_tensor_backend(sched, q_tile2d);
+                    ggml_backend_t bk = ggml_backend_sched_get_tensor_backend(sched, k_slice);
+                    ggml_backend_t bw = ggml_backend_sched_get_tensor_backend(sched, w_slice);
+                    ggml_backend_t bs = ggml_backend_sched_get_tensor_backend(sched, ks_head);
+                    printf("[idxkv fused inputs strides] q nb=[%zu,%zu] k nb=[%zu,%zu] w nb=[%zu,%zu] ks nb0=%zu\n",
+                           (size_t)q_tile2d->nb[0], (size_t)q_tile2d->nb[1],
+                           (size_t)k_slice->nb[0], (size_t)k_slice->nb[1],
+                           (size_t)w_slice->nb[0], (size_t)w_slice->nb[1],
+                           (size_t)ks_head->nb[0]);
+                    printf("[idxkv fused inputs] backends: q=%s k=%s w=%s ks=%s\n",
+                           bq ? ggml_backend_name(bq) : "null",
+                           bk ? ggml_backend_name(bk) : "null",
+                           bw ? ggml_backend_name(bw) : "null",
+                           bs ? ggml_backend_name(bs) : "null");
+                    fflush(stdout);
+                }
+
+                const char *env_fused_dev = getenv("LLAMA_SPARSE_INDEXER_FUSED_DEVICE");
+                bool use_fused_device = (env_fused_dev && atoi(env_fused_dev) != 0);
+                if (dbg && t0 == 0) {
+                    printf("[idxkv] fused_device=%d\n", (int)use_fused_device);
+                    fflush(stdout);
+                }
+                scores_tc = use_fused_device ?
+                    ggml_indexer_logits_fused(ctx, q_tile2d, k_slice, w_slice, ks_head) :
+                    build_indexer_fused_logits(ctx, q_tile2d, k_slice, w_slice, ks_head);
 
                 if (dbg && t0 == 0) {
                     ggml_tensor * ref_scores = idx_compute_scores_tile(ctx, q3d, k_indexer_f16, weights, k_scale_2d, D, H, Tc, kv_end, t0, use_fp16);
                     ggml_tensor * ref_head = ggml_view_2d(ctx, ref_scores, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), ref_scores->nb[1], 0);
                     cb(ref_head, "idxkv_scores_ref_head", -1);
+                    if (gf) { ggml_set_output(ref_head); ggml_build_forward_expand(gf, ref_head); }
                     ggml_tensor * fused_head = ggml_view_2d(ctx, scores_tc, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), scores_tc->nb[1], 0);
                     cb(fused_head, "idxkv_scores_fused_head", -1);
+                    if (gf) { ggml_set_output(fused_head); ggml_build_forward_expand(gf, fused_head); }
                     ggml_tensor * diff = ggml_sub(ctx, scores_tc, ref_scores);
                     ggml_tensor * L1 = ggml_sum(ctx, ggml_abs(ctx, diff));
                     cb(L1, "idxkv_scores_diff_L1", -1);
+                    if (gf) { ggml_set_output(L1); ggml_build_forward_expand(gf, L1); }
                     ggml_tensor * q_samp = ggml_view_3d(ctx, q3d, std::min<int64_t>(D, (int64_t)8), std::min<int64_t>(Tc, (int64_t)2), std::min<int64_t>(H, (int64_t)2), q3d->nb[1], q3d->nb[2], 0);
                     cb(q_samp, "idxkv_q3d_sample", -1);
+                    if (gf) { ggml_set_output(q_samp); ggml_build_forward_expand(gf, q_samp); }
                     ggml_tensor * w_samp = ggml_view_2d(ctx, w_slice, std::min<int64_t>(H, (int64_t)4), std::min<int64_t>(Tc, (int64_t)4), w_slice->nb[1], 0);
                     cb(w_samp, "idxkv_w_slice_sample", -1);
+                    if (gf) { ggml_set_output(w_samp); ggml_build_forward_expand(gf, w_samp); }
+                    size_t ks_off = 0; ggml_tensor * ks_samp = ggml_view_1d(ctx, ks_head, std::min<int64_t>(kv_end, (int64_t)8), ks_off);
+                    cb(ks_samp, "idxkv_ks_head_sample", -1);
+                    if (gf) { ggml_set_output(ks_samp); ggml_build_forward_expand(gf, ks_samp); }
                 }
 
             } else {
@@ -475,22 +514,25 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
             }
         }
 
-        // Safe K-scale proxy application after head reduction (always apply)
+        // Safe K-scale proxy application after head reduction: skip if fused kernel already applied it
         {
+            const char *env_fused2 = getenv("LLAMA_SPARSE_INDEXER_FUSED");
+            bool use_fused2 = (env_fused2 && atoi(env_fused2) != 0);
             if (dbg && t0 == 0) {
                 ggml_tensor * pre_head = ggml_view_2d(ctx, scores_tc, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), scores_tc->nb[1], 0);
                 cb(pre_head, "idxkv_scores_pre_kScale_head", -1);
-                printf("[idxkv] t0=%lld kv_end=%lld\n",
-                        (long long)t0, (long long)kv_end);
+                printf("[idxkv] t0=%lld kv_end=%lld fused=%d\n",
+                        (long long)t0, (long long)kv_end, (int)use_fused2);
                 fflush(stdout);
             }
-
-            ggml_tensor * k_scale_head = ggml_view_2d(ctx, k_scale_2d, kv_end, 1, k_scale_2d->nb[1], 0);
-            ggml_tensor * k_scale_bcast = ggml_repeat(ctx, k_scale_head, scores_tc); // [kv_end, Tc]
-            scores_tc = ggml_mul(ctx, scores_tc, k_scale_bcast);
-            if (dbg && t0 == 0) {
-                ggml_tensor * post_head = ggml_view_2d(ctx, scores_tc, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), scores_tc->nb[1], 0);
-                cb(post_head, "idxkv_scores_post_kScale_head", -1);
+            if (!use_fused2) {
+                ggml_tensor * k_scale_head = ggml_view_2d(ctx, k_scale_2d, kv_end, 1, k_scale_2d->nb[1], 0);
+                ggml_tensor * k_scale_bcast = ggml_repeat(ctx, k_scale_head, scores_tc); // [kv_end, Tc]
+                scores_tc = ggml_mul(ctx, scores_tc, k_scale_bcast);
+                if (dbg && t0 == 0) {
+                    ggml_tensor * post_head = ggml_view_2d(ctx, scores_tc, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), scores_tc->nb[1], 0);
+                    cb(post_head, "idxkv_scores_post_kScale_head", -1);
+                }
             }
         }
 
