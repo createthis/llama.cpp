@@ -198,6 +198,92 @@ __global__ void k_indexer_logits_wmma16_f32(
 #endif
 }
 
+
+// WMMA 16x16x16 BF16 (float input cast to bf16), one warp per block
+__global__ void k_indexer_logits_wmma16_bf16(
+    const float * __restrict__ Q, // [D, Tc*H]
+    const float * __restrict__ K, // [D, kv]
+    const float * __restrict__ W, // [H, Tc]
+    const float * __restrict__ k_scale, // [kv]
+    int D, int H, int Tc, int kv,
+    float * __restrict__ Out) {
+#if __CUDA_ARCH__ >= 800
+    const int tokens_per_tile = max(1, 16 / H);
+    const int t0 = blockIdx.x * tokens_per_tile;
+    const int k0 = blockIdx.y * 16;
+    if (t0 >= Tc || k0 >= kv) return;
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
+    wmma::fill_fragment(c_frag, 0.0f);
+
+    __shared__ __nv_bfloat16 A_sh[16*16]; // row-major
+    __shared__ __nv_bfloat16 B_sh[16*16]; // col-major
+
+    // Iterate K dimension in 16-slices
+    for (int d0 = 0; d0 < D; d0 += 16) {
+        int lane = threadIdx.x & 31;
+        // Load A_sh
+        for (int idx = lane; idx < 16*16; idx += 32) {
+            int mi = idx / 16;
+            int di = idx % 16;
+            int kv_idx = k0 + mi;
+            __nv_bfloat16 v = __float2bfloat16(0.0f);
+            if (kv_idx < kv && d0 + di < D) {
+                float f = K[(size_t)(d0 + di) + (size_t)D * kv_idx];
+                v = __float2bfloat16(f);
+            }
+            A_sh[mi * 16 + di] = v;
+        }
+        // Load B_sh (col-major)
+        for (int idx = lane; idx < 16*16; idx += 32) {
+            int di = idx / 16; // k index
+            int cj = idx % 16; // column index 0..15 => (tok_local,h)
+            int tok_local = cj / H;
+            int h = cj % H;
+            int tok = t0 + tok_local;
+            __nv_bfloat16 v = __float2bfloat16(0.0f);
+            if (tok < Tc && d0 + di < D) {
+                float f = Q[(size_t)(d0 + di) + (size_t)D * (tok*H + h)];
+                v = __float2bfloat16(f);
+            }
+            B_sh[cj * 16 + di] = v;
+        }
+        __syncthreads();
+
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> a_frag;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> b_frag;
+        wmma::load_matrix_sync(a_frag, A_sh, 16);
+        wmma::load_matrix_sync(b_frag, B_sh, 16);
+        wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+        __syncthreads();
+    }
+
+    __shared__ float C_sh[16*16];
+    wmma::store_matrix_sync(C_sh, c_frag, 16, wmma::mem_row_major);
+    __syncthreads();
+
+    int lane = threadIdx.x & 31;
+    for (int idx = lane; idx < 16 * tokens_per_tile; idx += 32) {
+        int mi = idx / tokens_per_tile;
+        int tl = idx % tokens_per_tile;
+        int kv_idx = k0 + mi;
+        int tok = t0 + tl;
+        if (kv_idx < kv && tok < Tc) {
+            float s = 0.0f;
+            int col_base = tl * H;
+            for (int h = 0; h < H; ++h) {
+                float v = C_sh[mi * 16 + (col_base + h)];
+                if (v < 0.0f) v = 0.0f;
+                float w = W[h + (size_t)H * tok];
+                s += v * w;
+            }
+            s *= k_scale[kv_idx];
+            Out[kv_idx + (size_t)kv * tok] = s;
+        }
+    }
+#endif
+}
+
 __global__ void k_indexer_logits_fused(const float * __restrict__ Q, // [D, Tc*H]
                                        const float * __restrict__ K, // [D, kv]
                                        const float * __restrict__ W, // [H, Tc]
