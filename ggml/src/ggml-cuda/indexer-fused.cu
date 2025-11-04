@@ -32,6 +32,7 @@ __global__ void k_indexer_logits_tiled_f32(
     int D, int H, int Tc, int kv,
     int D_TILE, int BLOCK_Q, int BLOCK_N, int exact_flag,
     int HEAD_CHUNK_ARG,
+    int PIPE_STAGES_ARG,
     float * __restrict__ Out) {
     // Dynamic select exact vs optimized based on workload or env
     bool exact = (exact_flag != 0) || ((size_t)Tc * (size_t)kv <= 4096);
@@ -77,10 +78,16 @@ __global__ void k_indexer_logits_tiled_f32(
     if (Hc > H) Hc = H;
 
     extern __shared__ float shmem[];
-    // Layout: K_sh [D_TILE, BLOCK_N] | Q_sh [D_TILE, BLOCK_Q*Hc] | W_sh [Hc, BLOCK_Q]
-    float * K_sh = shmem;
-    float * Q_sh = K_sh + (size_t)D_TILE * BLOCK_N;
-    float * W_sh = Q_sh + (size_t)D_TILE * BLOCK_Q * Hc;
+    // Double-buffered layout if PIPE_STAGES_ARG >= 2:
+    // [K0][Q0][K1][Q1][W] else [K0][Q0][W]
+    int STAGES = (PIPE_STAGES_ARG >= 2 ? 2 : 1);
+    int sizeK = D_TILE * BLOCK_N;
+    int sizeQ = D_TILE * BLOCK_Q * Hc;
+    float * K0 = shmem;
+    float * Q0 = K0 + sizeK;
+    float * K1 = (STAGES == 2) ? (Q0 + sizeQ) : K0;
+    float * Q1 = (STAGES == 2) ? (K1 + sizeK) : Q0;
+    float * W_sh = (STAGES == 2) ? (Q1 + sizeQ) : (Q0 + sizeQ);
 
     // Accumulator per (kv,row) x (token,col)
     float acc = 0.0f;
@@ -107,22 +114,26 @@ __global__ void k_indexer_logits_tiled_f32(
         const int MAX_HC = 64;
         float dot_vec[MAX_HC];
         for (int i = 0; i < hc; ++i) dot_vec[i] = 0.0f;
-        for (int d0 = 0; d0 < D; d0 += D_TILE) {
+        for (int d0 = 0, stage = 0; d0 < D; d0 += D_TILE, stage ^= 1) {
             int cur = min(D_TILE, D - d0);
             int stride = blockDim.x * blockDim.y;
             int tid = threadIdx.y * blockDim.x + threadIdx.x;
 
-            // Load K_sh: [cur, BLOCK_N]
+            // Select buffers
+            float * Kbuf = (STAGES == 2 && (stage == 1)) ? K1 : K0;
+            float * Qbuf = (STAGES == 2 && (stage == 1)) ? Q1 : Q0;
+
+            // Cooperative load Kbuf: [cur, BLOCK_N]
             for (int idx = tid; idx < cur * BLOCK_N; idx += stride) {
                 int di = idx / BLOCK_N;
                 int j  = idx % BLOCK_N;
                 int gk = k0 + j;
                 float v = 0.0f;
                 if (gk < kv) v = K[(size_t)(d0 + di) + (size_t)D * gk];
-                K_sh[di * BLOCK_N + j] = v;
+                Kbuf[di * BLOCK_N + j] = v;
             }
 
-            // Load Q_sh for hc heads: [cur, BLOCK_Q*hc]
+            // Cooperative load Qbuf for hc heads: [cur, BLOCK_Q*hc]
             for (int idx = tid; idx < cur * BLOCK_Q * hc; idx += stride) {
                 int di = idx / (BLOCK_Q * hc);
                 int rem = idx % (BLOCK_Q * hc);
@@ -131,15 +142,17 @@ __global__ void k_indexer_logits_tiled_f32(
                 int gt  = t0 + q;
                 float v = 0.0f;
                 if (gt < Tc) v = Q[(size_t)(d0 + di) + (size_t)D * (gt*H + (h0 + hi))];
-                Q_sh[di * (BLOCK_Q * hc) + hi * BLOCK_Q + q] = v;
+                Qbuf[di * (BLOCK_Q * hc) + hi * BLOCK_Q + q] = v;
             }
             __syncthreads();
 
             // Compute partial dot across cur for this (kv_idx, token), accumulating per head
+            float * Kcomp = Kbuf;
+            float * Qcomp = Qbuf;
             for (int di = 0; di < cur; ++di) {
-                float kval = K_sh[di * BLOCK_N + k_local];
+                float kval = Kcomp[di * BLOCK_N + k_local];
                 for (int hi = 0; hi < hc; ++hi) {
-                    float qval = Q_sh[di * (BLOCK_Q * hc) + hi * BLOCK_Q + t_local];
+                    float qval = Qcomp[di * (BLOCK_Q * hc) + hi * BLOCK_Q + t_local];
                     dot_vec[hi] += kval * qval;
                 }
             }
@@ -535,13 +548,29 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         k_indexer_logits_wmma16_f32<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
     } else {
         int HEAD_CHUNK = getenv_int_("LLAMA_INDEXER_HEAD_CHUNK", 16);
+        if (HEAD_CHUNK > 64) HEAD_CHUNK = 64;
+        int PIPE_STAGES = getenv_int_("LLAMA_INDEXER_PIPE_STAGES", 2);
+        if (PIPE_STAGES < 1) PIPE_STAGES = 1;
+        if (PIPE_STAGES > 2) PIPE_STAGES = 2;
+        // Sanity clamp block dims to device maximum threads per block
+        int maxThreadsPerBlock = 1024;
+        int threadsPerBlock = BLOCK_Q * BLOCK_N;
+        if (threadsPerBlock > maxThreadsPerBlock) {
+            int new_BLOCK_N = maxThreadsPerBlock / max(1, BLOCK_Q);
+            if (new_BLOCK_N < 1) new_BLOCK_N = 1;
+            if (sparse_debug_on()) printf("[INDEXER_DISPATCH] clamp BLOCK_N %d->%d due to threadsPerBlock=%d>=%d\n", BLOCK_N, new_BLOCK_N, threadsPerBlock, maxThreadsPerBlock);
+            BLOCK_N = new_BLOCK_N;
+        }
         dim3 blockT(BLOCK_Q, BLOCK_N);
         dim3 gridT((Tc + BLOCK_Q - 1)/BLOCK_Q, (kv_end + BLOCK_N - 1)/BLOCK_N);
         size_t shmem = (size_t)D_TILE * BLOCK_N * sizeof(float)
                      + (size_t)D_TILE * BLOCK_Q * HEAD_CHUNK * sizeof(float)
+                     + (PIPE_STAGES >= 2 ? ((size_t)D_TILE * BLOCK_N * sizeof(float) + (size_t)D_TILE * BLOCK_Q * HEAD_CHUNK * sizeof(float)) : 0)
                      + (size_t)HEAD_CHUNK * BLOCK_Q * sizeof(float);
-        if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=tiled grid=(%d,%d) block=(%d,%d) shmem=%zu Hc=%d\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem, HEAD_CHUNK);
-        k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, dOut);
+        // Raise per-kernel dynamic shared memory limit to our requirement (best-effort)
+        CUDA_SET_SHARED_MEMORY_LIMIT(k_indexer_logits_tiled_f32, (int)shmem);
+        if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=tiled grid=(%d,%d) block=(%d,%d) shmem=%zu Hc=%d stages=%d\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem, HEAD_CHUNK, PIPE_STAGES);
+        k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
     }
 }
 
