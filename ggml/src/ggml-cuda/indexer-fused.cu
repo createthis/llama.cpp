@@ -9,6 +9,86 @@
 // Simple baseline fused kernel: compute K^T * Q -> ReLU, then per-head weighted sum, multiply k_scale.
 // This is a placeholder for a fully-optimized version. It assumes row-major contiguous inputs.
 
+// helpers to read env
+static inline int getenv_int_(const char * name, int def) {
+    const char * s = getenv(name);
+    if (!s || !*s) return def;
+    int v = atoi(s);
+    return v > 0 ? v : def;
+}
+
+// Tiled, shared-memory fused kernel (float inputs, float accum)
+// Q: [D, Tc*H], K: [D, kv], W: [H, Tc], k_scale: [kv]; Out: [kv, Tc]
+__global__ void k_indexer_logits_tiled_f32(
+    const float * __restrict__ Q,
+    const float * __restrict__ K,
+    const float * __restrict__ W,
+    const float * __restrict__ k_scale,
+    int D, int H, int Tc, int kv,
+    int D_TILE, int BLOCK_Q, int BLOCK_N,
+    float * __restrict__ Out) {
+
+    int t_local = threadIdx.x; // [0..BLOCK_Q)
+    int k_local = threadIdx.y; // [0..BLOCK_N)
+    int t0 = blockIdx.x * BLOCK_Q;
+    int k0 = blockIdx.y * BLOCK_N;
+    int token = t0 + t_local;
+    int kv_idx = k0 + k_local;
+    if (t_local >= BLOCK_Q || k_local >= BLOCK_N) return;
+    if (token >= Tc || kv_idx >= kv) return;
+
+    extern __shared__ float shmem[];
+    float * K_sh = shmem; // [D_TILE, BLOCK_N]
+    float * Q_sh = K_sh + (size_t)D_TILE * BLOCK_N; // [D_TILE, BLOCK_Q*H]
+
+    float acc = 0.0f;
+
+    // iterate heads; accumulate head contributions into acc
+    for (int h = 0; h < H; ++h) {
+        float dot = 0.0f;
+        for (int d0 = 0; d0 < D; d0 += D_TILE) {
+            int cur = min(D_TILE, D - d0);
+            // cooperative load K_sh[d, j]
+            int totalK = cur * BLOCK_N;
+            int stride = blockDim.x * blockDim.y;
+            int tid = threadIdx.y * blockDim.x + threadIdx.x;
+            for (int idx = tid; idx < totalK; idx += stride) {
+                int di = idx / BLOCK_N;
+                int j  = idx % BLOCK_N;
+                int gk = k0 + j;
+                float v = 0.0f;
+                if (gk < kv) v = K[(size_t)(d0 + di) + (size_t)D * gk];
+                K_sh[di * BLOCK_N + j] = v;
+            }
+            // cooperative load Q_sh[d, q*H + h'] for all q in tile and all heads
+            int totalQ = cur * (BLOCK_Q * H);
+            for (int idx = tid; idx < totalQ; idx += stride) {
+                int di = idx / (BLOCK_Q * H);
+                int rem = idx % (BLOCK_Q * H);
+                int q   = rem / H;
+                int hh  = rem % H;
+                int gt  = t0 + q;
+                float v = 0.0f;
+                if (gt < Tc) v = Q[(size_t)(d0 + di) + (size_t)D * (gt*H + hh)];
+                Q_sh[di * (BLOCK_Q * H) + rem] = v;
+            }
+            __syncthreads();
+            // accumulate this tile for current (token,h,kv_idx)
+            // dot += sum_{di=0..cur-1} K_sh[di, k_local] * Q_sh[di, t_local*H + h]
+            int qoff = t_local * H + h;
+            for (int di = 0; di < cur; ++di) {
+                dot += K_sh[di * BLOCK_N + k_local] * Q_sh[di * (BLOCK_Q * H) + qoff];
+            }
+            __syncthreads();
+        }
+        if (dot < 0.0f) dot = 0.0f;
+        float w = W[h + (size_t)H * token];
+        acc += dot * w;
+    }
+    acc *= k_scale[kv_idx];
+    Out[kv_idx + (size_t)kv * token] = acc;
+}
+
 __global__ void k_indexer_logits_fused(const float * __restrict__ Q, // [D, Tc*H]
                                        const float * __restrict__ K, // [D, kv]
                                        const float * __restrict__ W, // [H, Tc]
@@ -130,8 +210,23 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                                                        int D, int H, int Tc, int kv_end,
                                                        float * dOut) {
     cudaStream_t stream = ctx.stream();
-    dim3 block(32, 4);
-    dim3 grid((Tc + block.x - 1)/block.x, (kv_end + block.y - 1)/block.y);
-    k_indexer_logits_fused<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+    // env knobs for tile sizes
+    int BLOCK_Q = getenv_int_("LLAMA_INDEXER_BLOCK_Q", 2);
+    int BLOCK_N = getenv_int_("LLAMA_INDEXER_BLOCK_N", 128);
+    int D_TILE  = getenv_int_("LLAMA_INDEXER_D_TILE", 64);
+    // Select kernel based on env; default to tiled
+    bool use_naive = false;
+    if (const char *s = getenv("LLAMA_INDEXER_USE_NAIVE"); s && atoi(s) != 0) use_naive = true;
+
+    if (use_naive) {
+        dim3 block(32, 4);
+        dim3 grid((Tc + block.x - 1)/block.x, (kv_end + block.y - 1)/block.y);
+        k_indexer_logits_fused<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+    } else {
+        dim3 block(BLOCK_Q, BLOCK_N);
+        dim3 grid((Tc + BLOCK_Q - 1)/BLOCK_Q, (kv_end + BLOCK_N - 1)/BLOCK_N);
+        size_t shmem = (size_t)D_TILE * BLOCK_N * sizeof(float) + (size_t)D_TILE * (BLOCK_Q * H) * sizeof(float);
+        k_indexer_logits_tiled_f32<<<grid, block, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, dOut);
+    }
 }
 
