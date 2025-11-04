@@ -211,9 +211,9 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                                                        float * dOut) {
     cudaStream_t stream = ctx.stream();
     // env knobs for tile sizes
-    int BLOCK_Q = getenv_int_("LLAMA_INDEXER_BLOCK_Q", 2);
-    int BLOCK_N = getenv_int_("LLAMA_INDEXER_BLOCK_N", 128);
-    int D_TILE  = getenv_int_("LLAMA_INDEXER_D_TILE", 64);
+    int BLOCK_Q = getenv_int_("LLAMA_INDEXER_BLOCK_Q", 1);
+    int BLOCK_N = getenv_int_("LLAMA_INDEXER_BLOCK_N", 64);
+    int D_TILE  = getenv_int_("LLAMA_INDEXER_D_TILE", 32);
     // Select kernel based on env; default to tiled
     bool use_naive = false;
     if (const char *s = getenv("LLAMA_INDEXER_USE_NAIVE"); s && atoi(s) != 0) use_naive = true;
