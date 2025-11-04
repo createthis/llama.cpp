@@ -4,6 +4,13 @@
 extern "C" {
 #endif
 
+// Derive per-token KV window ends from device-resident mask [N_kv, T]
+// mask values <= -1e29 are treated as masked; ends[t] = last i where mask[i,t] > -1e29, or 0 if none
+void ggml_cuda_mask_window_ends_device(struct ggml_backend_cuda_context & ctx,
+                                       const float * dMask, int N_kv, int T,
+                                       int * dEnds);
+
+
 // Forward-declare the CUDA context type; definition is in common.cuh
 struct ggml_backend_cuda_context;
 

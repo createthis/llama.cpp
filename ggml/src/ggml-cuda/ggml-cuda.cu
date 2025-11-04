@@ -4019,3 +4019,27 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
 }
 
 GGML_BACKEND_DL_IMPL(ggml_backend_cuda_reg)
+
+
+// Device-side mask window ends derivation (appended)
+__global__ void k_mask_window_ends(const float * __restrict__ mask, int N, int T, int * __restrict__ ends) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= T) return;
+    // mask is [N, T] row-major: element(i,t) at mask[i + (size_t)N * t]
+    const float * col = mask + (size_t)N * (size_t)t;
+    int e = 0;
+    for (int i = N-1; i >= 0; --i) {
+        float v = col[i];
+        if (v > -1.0e29f) { e = i+1; break; }
+    }
+    ends[t] = e;
+}
+
+extern "C" void ggml_cuda_mask_window_ends_device(ggml_backend_cuda_context & ctx,
+                                                   const float * dMask, int N_kv, int T,
+                                                   int * dEnds) {
+    int block = 128; int grid = (T + block - 1) / block;
+    k_mask_window_ends<<<grid, block, 0, ctx.stream()>>>(dMask, N_kv, T, dEnds);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) { ggml_cuda_error("k_mask_window_ends launch", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); }
+}
