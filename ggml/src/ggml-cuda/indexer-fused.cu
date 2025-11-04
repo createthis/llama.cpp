@@ -9,6 +9,19 @@ using namespace nvcuda;
 #ifndef SEL_DEBUG
 #endif
 
+#if __CUDA_ARCH__ >= 800 && defined(LLAMA_ENABLE_CP_ASYNC)
+static __device__ inline void cp_async_16b(void * smem_ptr, const void * gmem_ptr) {
+    unsigned smem = static_cast<unsigned>(__cvta_generic_to_shared(smem_ptr));
+    asm volatile ("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(smem), "l"(gmem_ptr));
+}
+static __device__ inline void cp_async_commit() {
+    asm volatile ("cp.async.commit_group;\n" ::);
+}
+static __device__ inline void cp_async_wait() {
+    asm volatile ("cp.async.wait_group 0;\n" ::);
+}
+#endif
+
 // Simple baseline fused kernel: compute K^T * Q -> ReLU, then per-head weighted sum, multiply k_scale.
 // This is a placeholder for a fully-optimized version. It assumes row-major contiguous inputs.
 
@@ -123,28 +136,33 @@ __global__ void k_indexer_logits_tiled_f32(
             float * Kbuf = (STAGES == 2 && (stage == 1)) ? K1 : K0;
             float * Qbuf = (STAGES == 2 && (stage == 1)) ? Q1 : Q0;
 
-            // Cooperative load Kbuf: [cur, BLOCK_N]
-            for (int idx = tid; idx < cur * BLOCK_N; idx += stride) {
-                int di = idx / BLOCK_N;
-                int j  = idx % BLOCK_N;
-                int gk = k0 + j;
-                float v = 0.0f;
-                if (gk < kv) v = K[(size_t)(d0 + di) + (size_t)D * gk];
-                Kbuf[di * BLOCK_N + j] = v;
+            // Cooperative (or cp.async) load Kbuf: [cur, BLOCK_N] and Qbuf: [cur, BLOCK_Q*hc]
+#if __CUDA_ARCH__ >= 800 && defined(LLAMA_ENABLE_CP_ASYNC)
+            if (PIPE_STAGES_ARG >= 2) {
+                // Disabled pending proper 16B-aligned layout. Use cooperative loads for now.
+            } else
+#endif
+            {
+                for (int idx = tid; idx < cur * BLOCK_N; idx += stride) {
+                    int di = idx / BLOCK_N;
+                    int j  = idx % BLOCK_N;
+                    int gk = k0 + j;
+                    float v = 0.0f;
+                    if (gk < kv) v = K[(size_t)(d0 + di) + (size_t)D * gk];
+                    Kbuf[di * BLOCK_N + j] = v;
+                }
+                for (int idx = tid; idx < cur * BLOCK_Q * hc; idx += stride) {
+                    int di = idx / (BLOCK_Q * hc);
+                    int rem = idx % (BLOCK_Q * hc);
+                    int q   = rem % BLOCK_Q;
+                    int hi  = rem / BLOCK_Q;
+                    int gt  = t0 + q;
+                    float v = 0.0f;
+                    if (gt < Tc) v = Q[(size_t)(d0 + di) + (size_t)D * (gt*H + (h0 + hi))];
+                    Qbuf[di * (BLOCK_Q * hc) + hi * BLOCK_Q + q] = v;
+                }
+                __syncthreads();
             }
-
-            // Cooperative load Qbuf for hc heads: [cur, BLOCK_Q*hc]
-            for (int idx = tid; idx < cur * BLOCK_Q * hc; idx += stride) {
-                int di = idx / (BLOCK_Q * hc);
-                int rem = idx % (BLOCK_Q * hc);
-                int q   = rem % BLOCK_Q;
-                int hi  = rem / BLOCK_Q;
-                int gt  = t0 + q;
-                float v = 0.0f;
-                if (gt < Tc) v = Q[(size_t)(d0 + di) + (size_t)D * (gt*H + (h0 + hi))];
-                Qbuf[di * (BLOCK_Q * hc) + hi * BLOCK_Q + q] = v;
-            }
-            __syncthreads();
 
             // Compute partial dot across cur for this (kv_idx, token), accumulating per head
             float * Kcomp = Kbuf;
