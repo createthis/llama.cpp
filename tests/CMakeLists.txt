@@ -248,6 +248,7 @@ if (GGML_CUDA)
     llama_build_and_test(test-sparse-topk-op-cuda.cpp)
     llama_build_and_test(test-indexer-fused-cuda.cpp)
     llama_build_and_test(test-indexer-fused-op-cuda.cpp)
+      llama_build_and_test(test-sparse-mla-decode-mqa-cuda.cpp)
 endif()
 
 llama_build_and_test(test-sparse-mla-decode-cuda.cpp)
