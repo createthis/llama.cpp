@@ -2598,7 +2598,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 // Optional profiling for fused indexer
                 auto * __prof_env2 = getenv("LLAMA_SPARSE_PROF");
                 cudaEvent_t __i0, __i1; bool __do_prof2 = false; float __ms2 = 0.0f;
-                if (__prof_env2 && *__prof_env2) { cudaEventCreate(&__i0); cudaEventCreate(&__i1); __do_prof2 = true; cudaEventRecord(__i0, ctx.stream()); }
+                if (__prof_env2 && *__prof_env2) { cudaEventCreate(&__i0); cudaEventCreate(&__i1); __do_prof2 = true; }
 
                 // Promote half/bf16 to float for now (Phase 1)
                 ggml_cuda_pool_alloc<float> qf(ctx.pool(ggml_cuda_get_device()), (size_t)D*TcH);
@@ -2619,7 +2619,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                                                sizeof(float)*(size_t)D*kv, cudaMemcpyDeviceToDevice, ctx.stream()));
                 }
                 // Launch naive device kernel (implemented in indexer-fused.cu) directly writing to dst
-                if (__do_prof2) { cudaEventRecord(__i1, ctx.stream()); cudaEventSynchronize(__i1); cudaEventElapsedTime(&__ms2, __i0, __i1); cudaEventDestroy(__i0); cudaEventDestroy(__i1); static int __cnt_idx_cuda = 0; static double __sum_idx_cuda = 0.0; __sum_idx_cuda += __ms2; __cnt_idx_cuda++; if (__cnt_idx_cuda % 50 == 0) { fprintf(stderr, "[PROFILE] IDX_TILE CUDA D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n", D, H, Tc, kv, (float)(__sum_idx_cuda/50.0)); __sum_idx_cuda = 0.0; } }
+                if (__do_prof2) { cudaEventRecord(__i0, ctx.stream()); }
 
 #ifndef NDEBUG
                 printf("[GGML_OP_INDEXER_FUSED] D=%d H=%d Tc=%d kv=%d TcH=%d\n", D, H, Tc, kv, TcH);
@@ -2628,6 +2628,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
 #endif
                 ggml_cuda_indexer_logits_fused_device(ctx, (const float *)qf.get(), (const float *)kf.get(), (const float *)w2d_c->data, (const float *)ks_c->data, D, H, Tc, kv, (float *)dst->data);
                 CUDA_CHECK(cudaGetLastError());
+                if (__do_prof2) { cudaEventRecord(__i1, ctx.stream()); cudaEventSynchronize(__i1); cudaEventElapsedTime(&__ms2, __i0, __i1); cudaEventDestroy(__i0); cudaEventDestroy(__i1); static int __cnt_idx_cuda = 0; static double __sum_idx_cuda = 0.0; __sum_idx_cuda += __ms2; __cnt_idx_cuda++; if (__cnt_idx_cuda % 50 == 0) { fprintf(stderr, "[PROFILE] IDX_TILE CUDA D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n", D, H, Tc, kv, (float)(__sum_idx_cuda/50.0)); __sum_idx_cuda = 0.0; } }
                 (void)D; (void)H; (void)Tc; (void)kv; (void)TcH; // silence warnings if asserts disabled
             }
             break;
