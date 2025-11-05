@@ -2645,7 +2645,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 int Nkv = (int)kc->ne[2];
                 int Dv  = (int)vc->ne[0];
                 GGML_ASSERT(Dq == Dk);
-                GGML_ASSERT(Hq == Hkv);
+                // Allow MQA/GQA: Hq may differ from Hkv; kernel maps h-> (h % Hkv)
                 int K = (int)idx->ne[0];
                 float kq_scale = ggml_get_op_params_f32(dst, 0);
                 float softcap  = ggml_get_op_params_f32(dst, 1);
