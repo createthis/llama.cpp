@@ -19,7 +19,7 @@ int main() {
     ggml_init_params p{};
     p.mem_size   = 64ull * 1024 * 1024;
     p.mem_buffer = nullptr;
-    p.no_alloc   = false;
+    p.no_alloc   = true;
 
     ggml_context * ctx = ggml_init(p);
     if (!ctx) { fprintf(stderr, "ctx init failed\n"); return 1; }
@@ -70,8 +70,7 @@ int main() {
     ggml_backend_sched_set_tensor_backend(sched, k_cache, cuda);
     ggml_backend_sched_set_tensor_backend(sched, v_cache, cuda);
     ggml_backend_sched_set_tensor_backend(sched, topk_idx, cuda);
-    // Reserve then allocate
-    ggml_backend_sched_reserve(sched, gf);
+    // Allocate graph (no explicit reserve)
     ggml_backend_sched_alloc_graph(sched, gf);
 
     // Initialize host buffers
