@@ -437,7 +437,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
             kv_end = std::min<int64_t>(N_kv, std::max<int64_t>(k, max_e));
         } else {
             const char *env_full_kv = getenv("LLAMA_SPARSE_TOPK_FULL_KV");
-            const bool use_full_kv = (env_full_kv && atoi(env_full_kv) != 0);
+            const bool use_full_kv = (env_full_kv ? atoi(env_full_kv) != 0 : true);
             kv_end = use_full_kv ? N_kv : std::min<int64_t>(N_kv, std::max<int64_t>(k, t0 + Tc));
         }
 
@@ -451,7 +451,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
 
 
             const char *env_fused = getenv("LLAMA_SPARSE_INDEXER_FUSED");
-            bool use_fused = (env_fused && atoi(env_fused) != 0);
+            bool use_fused = (env_fused ? atoi(env_fused) != 0 : true);
             if (use_fused) {
                 // prepare q2d tile [D, Tc*H]
                 size_t q_off = (size_t)t0 * q3d->nb[1];
@@ -499,7 +499,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                 }
 
                 const char *env_fused_dev = getenv("LLAMA_SPARSE_INDEXER_FUSED_DEVICE");
-                bool use_fused_device = (env_fused_dev && atoi(env_fused_dev) != 0);
+                bool use_fused_device = (env_fused_dev ? atoi(env_fused_dev) != 0 : true);
                 if (dbg && t0 == 0) {
                     printf("[idxkv] fused_device=%d\n", (int)use_fused_device);
                     fflush(stdout);
