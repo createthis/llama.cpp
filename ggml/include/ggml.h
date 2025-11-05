@@ -557,6 +557,7 @@ extern "C" {
 
         GGML_OP_SPARSE_TOPK_RADIX,
         GGML_OP_INDEXER_FUSED,
+        GGML_OP_SPARSE_MLA_DECODE,
         GGML_OP_GLU,
 
         GGML_OP_COUNT,
@@ -727,6 +728,17 @@ extern "C" {
     GGML_API bool ggml_is_scalar    (const struct ggml_tensor * tensor);
     GGML_API bool ggml_is_vector    (const struct ggml_tensor * tensor);
     GGML_API bool ggml_is_matrix    (const struct ggml_tensor * tensor);
+
+    // sparse MLA decode fused (CUDA backend)
+    GGML_API struct ggml_tensor * ggml_sparse_mla_decode_fused(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q2d,
+        struct ggml_tensor  * k_cache,
+        struct ggml_tensor  * v_cache,
+        struct ggml_tensor  * idx_topk,
+        float                 kq_scale,
+        float                 attn_softcap);
+
     GGML_API bool ggml_is_3d        (const struct ggml_tensor * tensor);
     GGML_API int  ggml_n_dims       (const struct ggml_tensor * tensor); // returns 1 for scalars
 

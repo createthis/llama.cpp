@@ -55,6 +55,10 @@
 #include "ggml-cuda/pad_reflect_1d.cuh"
 #include "ggml.h"
 
+extern "C" void ggml_cuda_sparse_mla_decode_device(ggml_backend_cuda_context & ctx,
+    const float * q, const float * k, const float * v, const int32_t * topk,
+    int D, int H, int Dv, int Nkv, int K, float kq_scale, float softcap, float * out);
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -2627,7 +2631,55 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 (void)D; (void)H; (void)Tc; (void)kv; (void)TcH; // silence warnings if asserts disabled
             }
             break;
+
+        case GGML_OP_SPARSE_MLA_DECODE:
+            {
+                ggml_tensor * q2d = dst->src[0];
+                ggml_tensor * kc  = dst->src[1];
+                ggml_tensor * vc  = dst->src[2];
+                ggml_tensor * idx = dst->src[3];
+                int Dq  = (int)q2d->ne[0];
+                int Hq  = (int)q2d->ne[1];
+                int Dk  = (int)kc->ne[0];
+                int Hkv = (int)kc->ne[1];
+                int Nkv = (int)kc->ne[2];
+                int Dv  = (int)vc->ne[0];
+                GGML_ASSERT(Dq == Dk);
+                GGML_ASSERT(Hq == Hkv);
+                int K = (int)idx->ne[0];
+                float kq_scale = ggml_get_op_params_f32(dst, 0);
+                float softcap  = ggml_get_op_params_f32(dst, 1);
+                void ggml_cuda_sparse_mla_decode_device(ggml_backend_cuda_context & ctx,
+                                                               const float * q,
+                                                               const float * k,
+                                                               const float * v,
+                                                               const int32_t * topk,
+                                                               int D, int H, int Dv,
+                                                               int Nkv, int K,
+                                                               float kq_scale, float softcap,
+                                                               float * out);
+                // promote to float
+                ggml_cuda_pool_alloc<float> qtmp(ctx.pool(ggml_cuda_get_device()), (size_t)Dq*Hq);
+                const to_fp32_cuda_t to_q = ggml_get_to_fp32_cuda(q2d->type);
+                if (to_q) { to_q((const void *)q2d->data, (float *)qtmp.get(), (size_t)Dq*Hq, ctx.stream()); }
+                else { CUDA_CHECK(cudaMemcpyAsync((void*)qtmp.get(), q2d->data, sizeof(float)*(size_t)Dq*Hq, cudaMemcpyDeviceToDevice, ctx.stream())); }
+                ggml_cuda_pool_alloc<float> ktmp(ctx.pool(ggml_cuda_get_device()), (size_t)Dk*Hkv*Nkv);
+                const to_fp32_cuda_t to_k = ggml_get_to_fp32_cuda(kc->type);
+                if (to_k) { to_k((const void *)kc->data, (float *)ktmp.get(), (size_t)Dk*Hkv*Nkv, ctx.stream()); }
+                else { CUDA_CHECK(cudaMemcpyAsync((void*)ktmp.get(), kc->data, sizeof(float)*(size_t)Dk*Hkv*Nkv, cudaMemcpyDeviceToDevice, ctx.stream())); }
+                ggml_cuda_pool_alloc<float> vtmp(ctx.pool(ggml_cuda_get_device()), (size_t)Dv*Hkv*Nkv);
+                const to_fp32_cuda_t to_v = ggml_get_to_fp32_cuda(vc->type);
+                if (to_v) { to_v((const void *)vc->data, (float *)vtmp.get(), (size_t)Dv*Hkv*Nkv, ctx.stream()); }
+                else { CUDA_CHECK(cudaMemcpyAsync((void*)vtmp.get(), vc->data, sizeof(float)*(size_t)Dv*Hkv*Nkv, cudaMemcpyDeviceToDevice, ctx.stream())); }
+                ggml_cuda_sparse_mla_decode_device(ctx, (const float*)qtmp.get(), (const float*)ktmp.get(), (const float*)vtmp.get(), (const int32_t*)idx->data,
+                                                   Dq, Hq, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
+                CUDA_CHECK(cudaGetLastError());
+            }
+            break;
+
         default:
+        
+
             return false;
     }
 
@@ -3803,6 +3855,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_OPT_STEP_ADAMW:
         case GGML_OP_OPT_STEP_SGD:
             return true;
+
+        case GGML_OP_SPARSE_MLA_DECODE:
+            return true;
+
         default:
             return false;
     }

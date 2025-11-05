@@ -1023,7 +1023,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 92, "GGML_OP_COUNT != 92");
+static_assert(GGML_OP_COUNT == 93, "GGML_OP_COUNT != 92");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1129,7 +1129,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 92, "GGML_OP_COUNT != 92");
+static_assert(GGML_OP_COUNT == 93, "GGML_OP_COUNT != 92");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -7277,6 +7277,30 @@ GGML_API struct ggml_tensor * ggml_indexer_logits_fused(
     out->src[2]  = w2d;
     out->src[3]  = k_scale;
     (void)D; // silence unused warning in this TU
+    return out;
+}
+
+
+// ggml_sparse_mla_decode_fused
+GGML_API struct ggml_tensor * ggml_sparse_mla_decode_fused(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q2d,        // [Dq, Hq]
+        struct ggml_tensor  * k_cache,    // [Dk, Hkv, N_kv]
+        struct ggml_tensor  * v_cache,    // [Dv, Hkv, N_kv]
+        struct ggml_tensor  * idx_topk,   // [K]
+        float                 kq_scale,
+        float                 attn_softcap) {
+    GGML_ASSERT(q2d->ne[2] == 1 && q2d->ne[3] == 1);
+    GGML_ASSERT(k_cache->ne[2] == v_cache->ne[2]);
+    GGML_ASSERT(k_cache->ne[1] == v_cache->ne[1]);
+    struct ggml_tensor * out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, v_cache->ne[0], q2d->ne[1]); // [Dv, Hq]
+    out->op      = GGML_OP_SPARSE_MLA_DECODE;
+    out->src[0]  = q2d;
+    out->src[1]  = k_cache;
+    out->src[2]  = v_cache;
+    out->src[3]  = idx_topk;
+    ggml_set_op_params_f32(out, 0, kq_scale);
+    ggml_set_op_params_f32(out, 1, attn_softcap);
     return out;
 }
 

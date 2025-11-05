@@ -59,6 +59,24 @@ using std::function;
       const int64_t Dq   = q_cur->ne[0];
       const int64_t Hq   = q_cur->ne[1];
       const int64_t T    = q_cur->ne[2];
+      // Fused decode path: use custom CUDA op when T == 1
+      const char * env_fused_dec = getenv("LLAMA_SPARSE_MLA_FUSED_DECODE");
+      if (T == 1 && (env_fused_dec == nullptr || atoi(env_fused_dec) != 0)) {
+          // Build q_t [Dq, Hq]
+          ggml_tensor * q_cur_cont2 = ggml_cont(ctx, q_cur);
+          ggml_tensor * q_all_2d2 = ggml_reshape_2d(ctx, q_cur_cont2, Dq, Hq*T);
+          ggml_tensor * q_t_2d2 = ggml_view_2d(ctx, q_all_2d2, Dq, Hq, q_all_2d2->nb[1], 0);
+          // Top-k indices for t=0 -> [K]
+          ggml_tensor * idx0_2d = ggml_view_2d(ctx, topk_indices, top_k, 1, topk_indices->nb[1], 0);
+          idx0_2d = ggml_cont(ctx, idx0_2d);
+          ggml_tensor * idx0_1d = ggml_reshape_1d(ctx, idx0_2d, top_k);
+          // Call fused decode: returns [Dv, Hq]
+          ggml_tensor * out2d = ggml_sparse_mla_decode_fused(ctx, q_t_2d2, k_cache, V_gather_src, idx0_1d, kq_scale, attn_softcap);
+          ggml_tensor * out3d = ggml_reshape_3d(ctx, out2d, Dv, Hq, 1);
+          cb(out3d, "kvaware_sparse_attn_out", -1);
+          return out3d;
+      }
+
       if (dbg) {
           cb(k_cache, "kvaware_k_cache", -1);
           cb(v_cache, "kvaware_v_cache", -1);
