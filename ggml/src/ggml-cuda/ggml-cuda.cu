@@ -2527,15 +2527,40 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 GGML_ASSERT(dst->type == GGML_TYPE_I32);
                 int N = (int)scores->ne[0];
                 int T = (int)ggml_nrows(scores);
+                // profiling wrapper for SPARSE_TOPK_RADIX (selection only)
+                // guarded by env LLAMA_SPARSE_PROF to avoid log spam
+                auto * __prof_env = getenv("LLAMA_SPARSE_PROF");
                 if (scores->type == GGML_TYPE_F16) {
                     // Promote half->float for current kernel
                     const to_fp32_cuda_t to_fp32 = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
                     ggml_cuda_pool_alloc<float> tmp(ctx.pool(ggml_cuda_get_device()), (size_t)N*T);
                     to_fp32((const void *)scores->data, (float *)tmp.get(), (size_t)N*T, ctx.stream());
-                    ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                    if (__prof_env && *__prof_env) {
+                        cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
+                        cudaEventRecord(__e0, ctx.stream());
+                        ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                        cudaEventRecord(__e1, ctx.stream()); cudaEventSynchronize(__e1);
+                        float __ms = 0.0f; cudaEventElapsedTime(&__ms, __e0, __e1);
+                        static int __cnt = 0; static double __sum = 0.0; __sum += __ms; __cnt++;
+                        if (__cnt % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0)); __sum = 0.0; }
+                        cudaEventDestroy(__e0); cudaEventDestroy(__e1);
+                    } else {
+                        ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                    }
                 } else {
                     GGML_ASSERT(scores->type == GGML_TYPE_F32);
-                    ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+                    if (__prof_env && *__prof_env) {
+                        cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
+                        cudaEventRecord(__e0, ctx.stream());
+                        ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+                        cudaEventRecord(__e1, ctx.stream()); cudaEventSynchronize(__e1);
+                        float __ms = 0.0f; cudaEventElapsedTime(&__ms, __e0, __e1);
+                        static int __cnt = 0; static double __sum = 0.0; __sum += __ms; __cnt++;
+                        if (__cnt % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0)); __sum = 0.0; }
+                        cudaEventDestroy(__e0); cudaEventDestroy(__e1);
+                    } else {
+                        ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+                    }
                 }
                 cudaError_t err_topk = cudaGetLastError();
                 if (err_topk != cudaSuccess) {
@@ -2566,6 +2591,11 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 ggml_tensor * k2d_c = k2d;
                 ggml_tensor * w2d_c = w2d;
                 ggml_tensor * ks_c  = ks;
+                // Optional profiling for fused indexer
+                auto * __prof_env2 = getenv("LLAMA_SPARSE_PROF");
+                cudaEvent_t __i0, __i1; bool __do_prof2 = false; float __ms2 = 0.0f;
+                if (__prof_env2 && *__prof_env2) { cudaEventCreate(&__i0); cudaEventCreate(&__i1); __do_prof2 = true; cudaEventRecord(__i0, ctx.stream()); }
+
                 // Promote half/bf16 to float for now (Phase 1)
                 ggml_cuda_pool_alloc<float> qf(ctx.pool(ggml_cuda_get_device()), (size_t)D*TcH);
                 ggml_cuda_pool_alloc<float> kf(ctx.pool(ggml_cuda_get_device()), (size_t)D*kv);
@@ -2585,6 +2615,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                                                sizeof(float)*(size_t)D*kv, cudaMemcpyDeviceToDevice, ctx.stream()));
                 }
                 // Launch naive device kernel (implemented in indexer-fused.cu) directly writing to dst
+                if (__do_prof2) { cudaEventRecord(__i1, ctx.stream()); cudaEventSynchronize(__i1); cudaEventElapsedTime(&__ms2, __i0, __i1); cudaEventDestroy(__i0); cudaEventDestroy(__i1); fprintf(stderr, "[PROFILE] IDX_TILE CUDA D=%d H=%d Tc=%d kv=%d ms=%.3f\n", D, H, Tc, kv, __ms2); }
+
 #ifndef NDEBUG
                 printf("[GGML_OP_INDEXER_FUSED] D=%d H=%d Tc=%d kv=%d TcH=%d\n", D, H, Tc, kv, TcH);
                 printf("[GGML_OP_INDEXER_FUSED] ptrs dQ=%p dK=%p dW=%p dKS=%p dOut=%p\n", (void*)qf.get(), (void*)kf.get(), w2d_c->data, ks_c->data, dst->data);

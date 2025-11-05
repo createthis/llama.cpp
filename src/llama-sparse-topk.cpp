@@ -14,6 +14,8 @@
 #include <cmath>
 #include <cinttypes>
 #include <cstdio>
+#include <chrono>
+
 #include <cstdlib>
 #include <climits>
 namespace {
@@ -444,6 +446,10 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
 
         ggml_tensor * scores_tc = nullptr;
         {
+                // Host wall-clock timing for the tile compute path (portable)
+                auto __t0_wall = std::chrono::high_resolution_clock::now();
+
+
             const char *env_fused = getenv("LLAMA_SPARSE_INDEXER_FUSED");
             bool use_fused = (env_fused && atoi(env_fused) != 0);
             if (use_fused) {
@@ -520,9 +526,20 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                     ggml_tensor * w_samp = ggml_view_2d(ctx, w_slice, std::min<int64_t>(H, (int64_t)4), std::min<int64_t>(Tc, (int64_t)4), w_slice->nb[1], 0);
                     cb(w_samp, "idxkv_w_slice_sample", -1);
                     if (gf) { ggml_set_output(w_samp); ggml_build_forward_expand(gf, w_samp); }
+
                     size_t ks_off = 0; ggml_tensor * ks_samp = ggml_view_1d(ctx, ks_head, std::min<int64_t>(kv_end, (int64_t)8), ks_off);
                     cb(ks_samp, "idxkv_ks_head_sample", -1);
+
                     if (gf) { ggml_set_output(ks_samp); ggml_build_forward_expand(gf, ks_samp); }
+                }
+
+                // End wall timer and print (if LLAMA_SPARSE_PROF set)
+                auto __t1_wall = std::chrono::high_resolution_clock::now();
+                const char * __prof = getenv("LLAMA_SPARSE_PROF");
+                if (__prof && *__prof) {
+                    double __ms = 1e3 * std::chrono::duration<double>(__t1_wall - __t0_wall).count();
+                    fprintf(stderr, "[PROFILE] IDX_TILE compute t0=%lld Tc=%lld kv_end=%lld fused=%d wall_ms=%.3f\n",
+                        (long long)t0, (long long)Tc, (long long)kv_end, (int)use_fused, __ms);
                 }
 
             } else {
@@ -638,6 +655,8 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
             cb(sft_sumsq, "idxkv_scores_for_topk_sumsq", -1);
             if (gf) {
                 ggml_set_output(scores_for_topk);
+        // profile top-k selection time per tile
+
                 ggml_set_output(sft_sum);
                 ggml_set_output(sft_sumsq);
                 ggml_build_forward_expand(gf, scores_for_topk);
