@@ -116,16 +116,40 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     __syncthreads();
 
 
-    // Stage B: Second-byte histogram over ALL eq(top byte) candidates
-    __shared__ unsigned int h2[256];
-    for (int i = threadIdx.x; i < 256; i += blockDim.x) h2[i] = 0u;
+    // Build eq0 list (b0 == thr0) into eq_buf; use as candidate set for refinement
+    __shared__ int eq0_count;
+    if (threadIdx.x == 0) eq0_count = 0;
     __syncthreads();
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
         uint32_t key = float_to_key_desc(col[i]);
         int b0 = (key >> 24) & 0xFF;
         if (b0 == thr0) {
+            int p = atomicAdd(&eq0_count, 1);
+            if (p < eq_capacity) eq_buf[p] = i;
+        }
+    }
+    __syncthreads();
+
+    // Stage B: build b1 histogram from eq0 list; fallback to full scan if eq0 overflowed
+    __shared__ unsigned int h2[256];
+    for (int i = threadIdx.x; i < 256; i += blockDim.x) h2[i] = 0u;
+    __syncthreads();
+    bool fallback_b1 = (eq0_count > eq_capacity);
+    if (!fallback_b1) {
+        for (int j = threadIdx.x; j < eq0_count; j += blockDim.x) {
+            int idx = eq_buf[j];
+            uint32_t key = float_to_key_desc(col[idx]);
             int b1 = (key >> 16) & 0xFF;
             atomicAdd(&h2[b1], 1u);
+        }
+    } else {
+        for (int i = threadIdx.x; i < N; i += blockDim.x) {
+            uint32_t key = float_to_key_desc(col[i]);
+            int b0 = (key >> 24) & 0xFF;
+            if (b0 == thr0) {
+                int b1 = (key >> 16) & 0xFF;
+                atomicAdd(&h2[b1], 1u);
+            }
         }
     }
     __syncthreads();
@@ -142,36 +166,78 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     }
     __syncthreads();
     __shared__ int s_thr1; if (threadIdx.x==0) s_thr1 = thr1; __syncthreads(); thr1 = s_thr1;
-    // Add strictly greater than thr1 on second byte
+    // Add strictly greater than thr1 on second byte; use eq0 subset if available
     if (remaining > 0) {
-        for (int i = threadIdx.x; i < N; i += blockDim.x) {
-            uint32_t key = float_to_key_desc(col[i]);
-            int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue;
-            int b1 = (key >> 16) & 0xFF; if (b1 <= thr1) continue;
-            int pos = atomicAdd(&sel_sofar, 1);
-            if (pos < k) idx_out[pos + k*t] = i;
+        if (!fallback_b1) {
+            for (int j = threadIdx.x; j < eq0_count; j += blockDim.x) {
+                int idx = eq_buf[j];
+                uint32_t key = float_to_key_desc(col[idx]);
+                int b1 = (key >> 16) & 0xFF;
+                if (b1 > thr1) {
+                    int pos = atomicAdd(&sel_sofar, 1);
+                    if (pos < k) idx_out[pos + k*t] = idx;
+                }
+            }
+        } else {
+            for (int i = threadIdx.x; i < N; i += blockDim.x) {
+                uint32_t key = float_to_key_desc(col[i]);
+                int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue;
+                int b1 = (key >> 16) & 0xFF; if (b1 <= thr1) continue;
+                int pos = atomicAdd(&sel_sofar, 1);
+                if (pos < k) idx_out[pos + k*t] = i;
+            }
         }
     }
     __syncthreads();
     remaining = k - sel_sofar;
     if (remaining <= 0) return;
 
-    // Stage C: Third-byte histogram over eq second-byte candidates
+    // Stage C: Third-byte histogram and selection over eq2 candidates (b1==thr1)
     __shared__ unsigned int h3[256];
     for (int i = threadIdx.x; i < 256; i += blockDim.x) h3[i] = 0u;
     __syncthreads();
-    for (int i = threadIdx.x; i < N; i += blockDim.x) {
-        uint32_t key = float_to_key_desc(col[i]);
-        int b0 = (key >> 24) & 0xFF;
-        if (b0 == thr0) {
+
+    __shared__ int eq2_count;
+    if (threadIdx.x == 0) eq2_count = 0;
+    __syncthreads();
+
+    bool fallback_b2 = false;
+    if (!fallback_b1) {
+        for (int j = threadIdx.x; j < eq0_count; j += blockDim.x) {
+            int idx = eq_buf[j];
+            uint32_t key = float_to_key_desc(col[idx]);
             int b1 = (key >> 16) & 0xFF;
             if (b1 == thr1) {
-                int b2 = (key >> 8) & 0xFF;
-                atomicAdd(&h3[b2], 1u);
+                int p = atomicAdd(&eq2_count, 1);
+                if (p < eq_capacity) eq_buf[p] = idx; // pack into front
             }
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) fallback_b2 = (eq2_count > eq_capacity);
+    } else {
+        fallback_b2 = true;
+    }
+    __syncthreads();
+
+    if (!fallback_b2) {
+        int lim = min(eq2_count, eq_capacity);
+        for (int j = threadIdx.x; j < lim; j += blockDim.x) {
+            int idx = eq_buf[j];
+            uint32_t key = float_to_key_desc(col[idx]);
+            int b2 = (key >> 8) & 0xFF;
+            atomicAdd(&h3[b2], 1u);
+        }
+    } else {
+        for (int i = threadIdx.x; i < N; i += blockDim.x) {
+            uint32_t key = float_to_key_desc(col[i]);
+            int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue;
+            int b1 = (key >> 16) & 0xFF; if (b1 != thr1) continue;
+            int b2 = (key >> 8) & 0xFF;
+            atomicAdd(&h3[b2], 1u);
         }
     }
     __syncthreads();
+
     int thr2 = 0;
     if (threadIdx.x == 0) {
         unsigned int sum = 0; unsigned int need = remaining;
@@ -185,64 +251,89 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     }
     __syncthreads();
     __shared__ int s_thr2; if (threadIdx.x==0) s_thr2 = thr2; __syncthreads(); thr2 = s_thr2;
-    // Add strictly greater than thr2 on third byte
+
     if (remaining > 0) {
+        if (!fallback_b2) {
+            int lim = min(eq2_count, eq_capacity);
+            for (int j = threadIdx.x; j < lim; j += blockDim.x) {
+                int idx = eq_buf[j];
+                uint32_t key = float_to_key_desc(col[idx]);
+                int b2 = (key >> 8) & 0xFF; if (b2 <= thr2) continue;
+                int pos = atomicAdd(&sel_sofar, 1);
+                if (pos < k) idx_out[pos + k*t] = idx;
+            }
+        } else {
+            for (int i = threadIdx.x; i < N; i += blockDim.x) {
+                uint32_t key = float_to_key_desc(col[i]);
+                int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue;
+                int b1 = (key >> 16) & 0xFF; if (b1 != thr1) continue;
+                int b2 = (key >> 8) & 0xFF; if (b2 <= thr2) continue;
+                int pos = atomicAdd(&sel_sofar, 1);
+                if (pos < k) idx_out[pos + k*t] = i;
+            }
+        }
+    }
+    __syncthreads();
+
+    remaining = k - sel_sofar;
+    if (remaining <= 0) return;
+
+    // Prepare pool of b2 == thr2 candidates
+    if (threadIdx.x == 0) pool_count = 0;
+    __syncthreads();
+
+    if (!fallback_b2) {
+        int lim = min(eq2_count, eq_capacity);
+        for (int j = threadIdx.x; j < lim; j += blockDim.x) {
+            int idx = eq_buf[j];
+            uint32_t key = float_to_key_desc(col[idx]);
+            int b2 = (key >> 8) & 0xFF;
+            if (b2 == thr2) {
+                int p = atomicAdd(&pool_count, 1);
+                if (p < eq_capacity) eq_buf[p] = idx;
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x == 0 && pool_count > eq_capacity) pool_count = eq_capacity;
+        __syncthreads();
+    } else {
+        // Fallback: reduce equal third-byte candidates from full column
+        const int LOCAL_TOP = 4;
+        int loc_idx[LOCAL_TOP]; float loc_val[LOCAL_TOP];
+        for (int l = 0; l < LOCAL_TOP; ++l) { loc_idx[l] = -1; loc_val[l] = -1.0e30f; }
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
             uint32_t key = float_to_key_desc(col[i]);
             int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue;
             int b1 = (key >> 16) & 0xFF; if (b1 != thr1) continue;
-            int b2 = (key >> 8) & 0xFF; if (b2 <= thr2) continue;
-            int pos = atomicAdd(&sel_sofar, 1);
-            if (pos < k) idx_out[pos + k*t] = i;
+            int b2 = (key >> 8) & 0xFF; if (b2 != thr2) continue;
+            float v = col[i];
+            int min_pos = 0; float min_val = loc_val[0];
+            for (int l = 1; l < LOCAL_TOP; ++l) if (loc_val[l] < min_val) { min_val = loc_val[l]; min_pos = l; }
+            if (v > min_val) { loc_val[min_pos] = v; loc_idx[min_pos] = i; }
         }
-    }
-    __syncthreads();
-    remaining = k - sel_sofar;
-    if (remaining <= 0) return;
-
-    // Stage D: Reduce equal third-byte candidates to a small pool per-thread (LOCAL_TOP)
-    const int LOCAL_TOP = 4;
-    int loc_idx[LOCAL_TOP];
-    float loc_val[LOCAL_TOP];
-    for (int l = 0; l < LOCAL_TOP; ++l) { loc_idx[l] = -1; loc_val[l] = -1.0e30f; }
-    for (int i = threadIdx.x; i < N; i += blockDim.x) {
-        uint32_t key = float_to_key_desc(col[i]);
-        int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue;
-        int b1 = (key >> 16) & 0xFF; if (b1 != thr1) continue;
-        int b2 = (key >> 8) & 0xFF; if (b2 != thr2) continue;
-        float v = col[i];
-        int min_pos = 0; float min_val = loc_val[0];
-        for (int l = 1; l < LOCAL_TOP; ++l) if (loc_val[l] < min_val) { min_val = loc_val[l]; min_pos = l; }
-        if (v > min_val) { loc_val[min_pos] = v; loc_idx[min_pos] = i; }
-    }
-    // compact per-thread local top into eq_buf contiguously
-    if (threadIdx.x == 0) pool_count = 0;
-    __syncthreads();
-    for (int l = 0; l < LOCAL_TOP; ++l) {
-        int idx = loc_idx[l];
-        if (idx >= 0) {
-            int pos = atomicAdd(&pool_count, 1);
-            if (pos < eq_capacity) eq_buf[pos] = idx;
-        }
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) { if (pool_count > eq_capacity) pool_count = eq_capacity; }
-    __syncthreads();
-
-    // Fill remaining from reduced pool
-    for (int r = 0; r < remaining; ++r) {
+        if (threadIdx.x == 0) pool_count = 0;
         __syncthreads();
-        float best_val = -1.0e30f;
-        int best_idx = -1;
-        for (int i0 = threadIdx.x; i0 < pool_count; i0 += blockDim.x) {
-            int idx = eq_buf[i0];
-            if (idx < 0) continue; // skip removed entries
-            float v = col[idx];
-            if (v > best_val || (v == best_val && idx < best_idx)) {
-                best_val = v; best_idx = idx;
+        for (int l = 0; l < LOCAL_TOP; ++l) {
+            int idx = loc_idx[l];
+            if (idx >= 0) {
+                int p = atomicAdd(&pool_count, 1);
+                if (p < eq_capacity) eq_buf[p] = idx;
             }
         }
-        // reduce to find block-best
+        __syncthreads();
+        if (threadIdx.x == 0 && pool_count > eq_capacity) pool_count = eq_capacity;
+        __syncthreads();
+    }
+
+    // Fill remaining from pool
+    for (int r = 0; r < remaining; ++r) {
+        __syncthreads();
+        float best_val = -1.0e30f; int best_idx = -1;
+        for (int i0 = threadIdx.x; i0 < pool_count; i0 += blockDim.x) {
+            int idx = eq_buf[i0]; if (idx < 0) continue;
+            float v = col[idx];
+            if (v > best_val || (v == best_val && idx < best_idx)) { best_val = v; best_idx = idx; }
+        }
         for (int offset = 16; offset > 0; offset >>= 1) {
             float v2 = __shfl_down_sync(0xffffffff, best_val, offset);
             int   i2 = __shfl_down_sync(0xffffffff, best_idx, offset);
@@ -266,10 +357,7 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
                 s_selected = bi;
                 if (s_selected >= 0) {
                     int pos = atomicAdd(&sel_sofar, 1);
-                    if (pos < k) {
-                        int clamped = s_selected < 0 ? 0 : (s_selected >= N ? (N - 1) : s_selected);
-                        idx_out[pos + k*t] = clamped;
-                    }
+                    if (pos < k) idx_out[pos + k*t] = s_selected;
                 }
             }
         }
@@ -303,12 +391,12 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
     k_histogram_topbyte<<<T, hist_threads, hist_shmem, stream>>>(scores_d, N, T, /*ld=*/N, thr_bins_d, gt_counts_d);
 
     // Equal-bin selection kernel; bound dynamic shared memory to device limit
-    const int sel_threads = 256;
+    const int sel_threads = 1024;
     // Conservative eq buffer capacity to avoid exceeding per-block shared mem
     int cap_env = 0;
     const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
     if (env_cap) { cap_env = atoi(env_cap); if (cap_env < 0) cap_env = 0; }
-    int cap_default = 2048;
+    int cap_default = 4096;
     const int eq_cap = max(k, min(N, cap_env ? cap_env : cap_default));
     size_t sel_shmem = (size_t) eq_cap * sizeof(int);
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap, gt_counts_d, idx_d);
@@ -373,10 +461,10 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
     cudaMemcpyAsync(scores_d, scores_h, sizeof(float) * (size_t)N * T, cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(gt_counts_d, gt_counts_h, sizeof(uint32_t) * 256 * (size_t)T, cudaMemcpyHostToDevice, stream);
 
-    const int sel_threads = 256;
+    const int sel_threads = 1024;
     int cap_env = 0; const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
     if (env_cap) { cap_env = atoi(env_cap); if (cap_env < 0) cap_env = 0; }
-    int cap_default = 2048;
+    int cap_default = 4096;
     const int eq_cap_host = max(k, min(N, cap_env ? cap_env : cap_default));
     const size_t sel_shmem = (size_t) eq_cap_host * sizeof(int);
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap_host, gt_counts_d, idx_d);
