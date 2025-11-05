@@ -538,8 +538,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                 const char * __prof = getenv("LLAMA_SPARSE_PROF");
                 if (__prof && *__prof) {
                     double __ms = 1e3 * std::chrono::duration<double>(__t1_wall - __t0_wall).count();
-                    fprintf(stderr, "[PROFILE] IDX_TILE compute t0=%lld Tc=%lld kv_end=%lld fused=%d wall_ms=%.3f\n",
-                        (long long)t0, (long long)Tc, (long long)kv_end, (int)use_fused, __ms);
+                    static int __cnt_idx_comp = 0; static double __sum_idx_comp = 0.0; __sum_idx_comp += __ms; __cnt_idx_comp++; if (__cnt_idx_comp % 50 == 0) { fprintf(stderr, "[PROFILE] IDX_TILE compute avg_ms=%.3f over 50 tiles (last t0=%lld Tc=%lld kv_end=%lld fused=%d)\n", (float)(__sum_idx_comp/50.0), (long long)t0, (long long)Tc, (long long)kv_end, (int)use_fused); __sum_idx_comp = 0.0; }
                 }
 
             } else {

@@ -2619,7 +2619,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                                                sizeof(float)*(size_t)D*kv, cudaMemcpyDeviceToDevice, ctx.stream()));
                 }
                 // Launch naive device kernel (implemented in indexer-fused.cu) directly writing to dst
-                if (__do_prof2) { cudaEventRecord(__i1, ctx.stream()); cudaEventSynchronize(__i1); cudaEventElapsedTime(&__ms2, __i0, __i1); cudaEventDestroy(__i0); cudaEventDestroy(__i1); fprintf(stderr, "[PROFILE] IDX_TILE CUDA D=%d H=%d Tc=%d kv=%d ms=%.3f\n", D, H, Tc, kv, __ms2); }
+                if (__do_prof2) { cudaEventRecord(__i1, ctx.stream()); cudaEventSynchronize(__i1); cudaEventElapsedTime(&__ms2, __i0, __i1); cudaEventDestroy(__i0); cudaEventDestroy(__i1); static int __cnt_idx_cuda = 0; static double __sum_idx_cuda = 0.0; __sum_idx_cuda += __ms2; __cnt_idx_cuda++; if (__cnt_idx_cuda % 50 == 0) { fprintf(stderr, "[PROFILE] IDX_TILE CUDA D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n", D, H, Tc, kv, (float)(__sum_idx_cuda/50.0)); __sum_idx_cuda = 0.0; } }
 
 #ifndef NDEBUG
                 printf("[GGML_OP_INDEXER_FUSED] D=%d H=%d Tc=%d kv=%d TcH=%d\n", D, H, Tc, kv, TcH);
