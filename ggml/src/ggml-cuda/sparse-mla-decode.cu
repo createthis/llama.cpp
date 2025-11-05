@@ -7,18 +7,19 @@ __global__ void k_sparse_mla_decode(const float * __restrict__ Q,
                                     const float * __restrict__ K,
                                     const float * __restrict__ V,
                                     const int32_t * __restrict__ topk,
-                                    int D, int H, int Dv, int N, int Ksel,
+                                    int D, int Hq, int Hkv, int Dv, int N, int Ksel,
                                     float kq_scale, float softcap,
                                     float * __restrict__ Out) {
     int h = blockIdx.x;
-    if (h >= H) return;
+    if (h >= Hq) return;
     extern __shared__ float smem[];
     float * scores = smem; // Ksel
     float m = -1e30f;
     for (int i = threadIdx.x; i < Ksel; i += blockDim.x) {
         int idx = topk[i]; if (idx < 0 || idx >= N) { scores[i] = -1e30f; continue; }
         const float * qh = Q + (size_t)D*h;
-        const float * kh = K + (size_t)D*(h + (size_t)H*idx);
+        int hk = (Hkv == 1 ? 0 : (h % Hkv));
+        const float * kh = K + (size_t)D*(hk + (size_t)Hkv*idx);
         float dot = 0.0f;
         for (int d=0; d<D; ++d) dot += qh[d] * kh[d];
         dot *= kq_scale;
@@ -51,7 +52,8 @@ __global__ void k_sparse_mla_decode(const float * __restrict__ Q,
         for (int i = 0; i < Ksel; ++i) {
             int idx = topk[i]; if (idx < 0 || idx >= N) continue;
             float p = scores[i] * inv;
-            const float * vh = V + (size_t)Dv*(h + (size_t)H*idx);
+            int hk2 = (Hkv == 1 ? 0 : (h % Hkv));
+            const float * vh = V + (size_t)Dv*(hk2 + (size_t)Hkv*idx);
             acc += p * vh[dv];
         }
         Out[dv + (size_t)Dv*h] = acc;
@@ -63,12 +65,12 @@ extern "C" void ggml_cuda_sparse_mla_decode_device(ggml_backend_cuda_context & c
                                                     const float * k,
                                                     const float * v,
                                                     const int32_t * topk,
-                                                    int D, int H, int Dv,
+                                                    int D, int Hq, int Hkv, int Dv,
                                                     int N, int Ksel,
                                                     float kq_scale, float softcap,
                                                     float * out) {
-    dim3 grid(H);
+    dim3 grid(Hq);
     dim3 block(128);
     size_t shmem = (size_t)Ksel * sizeof(float);
-    k_sparse_mla_decode<<<grid, block, shmem, ctx.stream()>>>(q,k,v,topk,D,H,Dv,N,Ksel,kq_scale,softcap,out);
+    k_sparse_mla_decode<<<grid, block, shmem, ctx.stream()>>>(q,k,v,topk,D,Hq,Hkv,Dv,N,Ksel,kq_scale,softcap,out);
 }

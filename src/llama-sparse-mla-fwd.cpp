@@ -61,7 +61,7 @@ using std::function;
       const int64_t T    = q_cur->ne[2];
       // Fused decode path: use custom CUDA op when T == 1
       const char * env_fused_dec = getenv("LLAMA_SPARSE_MLA_FUSED_DECODE");
-      if (T == 1 && (env_fused_dec == nullptr || atoi(env_fused_dec) != 0)) {
+      if (T == 1 && (env_fused_dec == nullptr || atoi(env_fused_dec) != 0) && Hq == Hkv) {
           // Build q_t [Dq, Hq]
           ggml_tensor * q_cur_cont2 = ggml_cont(ctx, q_cur);
           ggml_tensor * q_all_2d2 = ggml_reshape_2d(ctx, q_cur_cont2, Dq, Hq*T);

@@ -57,7 +57,7 @@
 
 extern "C" void ggml_cuda_sparse_mla_decode_device(ggml_backend_cuda_context & ctx,
     const float * q, const float * k, const float * v, const int32_t * topk,
-    int D, int H, int Dv, int Nkv, int K, float kq_scale, float softcap, float * out);
+    int D, int Hq, int Hkv, int Dv, int Nkv, int K, float kq_scale, float softcap, float * out);
 
 #include <algorithm>
 #include <array>
@@ -2649,15 +2649,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 int K = (int)idx->ne[0];
                 float kq_scale = ggml_get_op_params_f32(dst, 0);
                 float softcap  = ggml_get_op_params_f32(dst, 1);
-                void ggml_cuda_sparse_mla_decode_device(ggml_backend_cuda_context & ctx,
-                                                               const float * q,
-                                                               const float * k,
-                                                               const float * v,
-                                                               const int32_t * topk,
-                                                               int D, int H, int Dv,
-                                                               int Nkv, int K,
-                                                               float kq_scale, float softcap,
-                                                               float * out);
+
                 // promote to float
                 ggml_cuda_pool_alloc<float> qtmp(ctx.pool(ggml_cuda_get_device()), (size_t)Dq*Hq);
                 const to_fp32_cuda_t to_q = ggml_get_to_fp32_cuda(q2d->type);
@@ -2672,7 +2664,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 if (to_v) { to_v((const void *)vc->data, (float *)vtmp.get(), (size_t)Dv*Hkv*Nkv, ctx.stream()); }
                 else { CUDA_CHECK(cudaMemcpyAsync((void*)vtmp.get(), vc->data, sizeof(float)*(size_t)Dv*Hkv*Nkv, cudaMemcpyDeviceToDevice, ctx.stream())); }
                 ggml_cuda_sparse_mla_decode_device(ctx, (const float*)qtmp.get(), (const float*)ktmp.get(), (const float*)vtmp.get(), (const int32_t*)idx->data,
-                                                   Dq, Hq, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
+                                                   Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
                 CUDA_CHECK(cudaGetLastError());
             }
             break;
