@@ -31,8 +31,6 @@ int main() {
     printf("CUDA not enabled; skipping fused indexer op test\n");
     return 0;
 #else
-    printf("here\n");
-    fflush(stdout);
     const int D=64, H=4, Tc=3, kv=256;
 
     std::mt19937 rng(123);
@@ -47,8 +45,6 @@ int main() {
     ggml_init_params ip{}; ip.mem_size = 64ull*1024*1024; ip.no_alloc = true;
     ggml_context * ctx = ggml_init(ip);
     if (!ctx) { printf("ctx init failed\n"); return 1; }
-    printf("here2\n");
-    fflush(stdout);
 
     ggml_tensor * q2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D, Tc*H);
     ggml_tensor * k2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D, kv);
@@ -59,8 +55,6 @@ int main() {
 
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, out);
-    printf("here3\n");
-    fflush(stdout);
 
     ggml_backend_dev_t cuda_dev = ggml_backend_dev_by_name("CUDA0");
     if (!cuda_dev) {
@@ -84,8 +78,6 @@ int main() {
 
     ggml_backend_sched_reset(sched);
     ggml_backend_sched_alloc_graph(sched, gf);
-    printf("here4\n");
-    fflush(stdout);
 
     // Print backend placement for tensors
     ggml_backend_t bq = ggml_backend_sched_get_tensor_backend(sched, q2d);
@@ -108,8 +100,6 @@ int main() {
     ggml_backend_tensor_set(k2d, K.data(), 0, ggml_nbytes(k2d));
     ggml_backend_tensor_set(w2d, W.data(), 0, ggml_nbytes(w2d));
     ggml_backend_tensor_set(ks,  KS.data(),0, ggml_nbytes(ks));
-    printf("here5\n");
-    fflush(stdout);
 
     printf("starting compute\n");
     ggml_status st = ggml_backend_sched_graph_compute(sched, gf);
@@ -124,18 +114,12 @@ int main() {
         ggml_free(ctx);
         return 1;
     }
-    printf("here5.5\n");
-    fflush(stdout);
 
     std::vector<float> O_gpu((size_t)kv*Tc, 0.0f);
     ggml_backend_tensor_get(out, O_gpu.data(), 0, ggml_nbytes(out));
-    printf("here5.6\n");
-    fflush(stdout);
 
     std::vector<float> O_cpu;
     cpu_indexer_logits(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
-    printf("here6\n");
-    fflush(stdout);
     printf("D=%d H=%d Tc=%d kv=%d\n", D,H,Tc,kv);
     int tt = Tc < 2 ? Tc : 2;
     int kk = kv < 8 ? kv : 8;
@@ -170,8 +154,6 @@ int main() {
     ggml_backend_free(cuda);
     ggml_backend_free(cpu);
     ggml_free(ctx);
-    printf("here7\n");
-    fflush(stdout);
 
     return mism==0?0:1;
 #endif
