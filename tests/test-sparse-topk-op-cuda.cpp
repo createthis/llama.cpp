@@ -93,6 +93,6 @@ static void build_and_run(int N, int T, int K) {
 
 int main() {
     //build_and_run(1024, 3, 32);
-    build_and_run(32768, 2, 64); // exercises streaming fallback
+    build_and_run(163840, 1, 256); // stress target config similar to 163840x1x256
     return 0;
 }
