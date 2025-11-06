@@ -1,4 +1,8 @@
 #include "common.cuh"
+#ifndef LLAMA_ENABLE_CP_ASYNC
+#define LLAMA_ENABLE_CP_ASYNC 1
+#endif
+
 #include <mma.h>
 using namespace nvcuda;
 
@@ -20,10 +24,9 @@ static __device__ inline void cp_async_commit() {
 static __device__ inline void cp_async_wait() {
     asm volatile ("cp.async.wait_group 0;\n" ::);
 }
-#endif
 
-// Simple baseline fused kernel: compute K^T * Q -> ReLU, then per-head weighted sum, multiply k_scale.
-// This is a placeholder for a fully-optimized version. It assumes row-major contiguous inputs.
+
+#endif
 
 // helpers to read env
 static inline int getenv_int_(const char * name, int def) {
@@ -32,6 +35,12 @@ static inline int getenv_int_(const char * name, int def) {
     int v = atoi(s);
     return v > 0 ? v : def;
 }
+
+
+// Simple baseline fused kernel: compute K^T * Q -> ReLU, then per-head weighted sum, multiply k_scale.
+// This is a placeholder for a fully-optimized version. It assumes row-major contiguous inputs.
+
+// forward declare custom warp-row kernel
 static inline bool sparse_debug_on(){ const char *d=getenv("LLAMA_SPARSE_DEBUG"); return d && *d && atoi(d)!=0; }
 
 
@@ -48,10 +57,10 @@ __global__ void k_indexer_logits_tiled_f32(
     int PIPE_STAGES_ARG,
     float * __restrict__ Out) {
     // Dynamic select exact vs optimized based on workload or env
-    bool exact = (exact_flag != 0) || ((size_t)Tc * (size_t)kv <= 4096);
+    bool exact = (exact_flag != 0);
     /* env read on host */
-    size_t work = (size_t)Tc * (size_t)kv;
-    if (exact || work <= 4096) {
+    (void)Tc; (void)kv;
+    if (exact) {
         // Exact global-load path (bit-exact with reference; slower)
         int t_local = threadIdx.x;
         int k_local = threadIdx.y;
@@ -292,6 +301,9 @@ __global__ void k_indexer_logits_wmma_hf(
 #endif
 }
 
+// WMMA 16x16 with head grouping: supports H multiple of 16
+
+
 
 // WMMA 16x16x16 (float input cast to half), one warp per block
 __global__ void k_indexer_logits_wmma16_f32(
@@ -454,6 +466,13 @@ __global__ void k_indexer_logits_wmma16_bf16(
             float s = 0.0f;
             int col_base = tl * H;
             for (int h = 0; h < H; ++h) {
+
+// Warp-cooperative kernel: one warp computes all tokens (Tc) for one kv row.
+// Reuses K across all heads and tokens; accumulates H*Tc partial dots in registers.
+
+
+// Warp-cooperative kernel: one warp computes all tokens (Tc) for one kv row.
+// Reuses K across all heads and tokens; accumulates H*Tc partial dots in registers.
                 float v = C_sh[mi * 16 + (col_base + h)];
                 if (v < 0.0f) v = 0.0f;
                 float w = W[h + (size_t)H * tok];
@@ -464,6 +483,158 @@ __global__ void k_indexer_logits_wmma16_bf16(
         }
     }
 #endif
+}
+
+
+// WMMA 16x16 with head grouping: supports H multiple of 16
+__global__ void k_indexer_logits_wmma16_f32_hgrp(
+    const float * __restrict__ Q, // [D, Tc*H]
+    const float * __restrict__ K, // [D, kv]
+    const float * __restrict__ W, // [H, Tc]
+    const float * __restrict__ k_scale, // [kv]
+    int D, int H, int Tc, int kv,
+    float * __restrict__ Out) {
+#if __CUDA_ARCH__ >= 700
+    const int tokens_per_tile = 1;
+    const int t0 = blockIdx.x * tokens_per_tile;
+    const int k0 = blockIdx.y * 16;
+    if (t0 >= Tc || k0 >= kv) return;
+
+    __shared__ __half A_sh[16*16]; // row-major K tile
+    __shared__ __half B_sh[16*16]; // col-major Q tile (heads chunk)
+    __shared__ float  C_sh[16*16]; // accumulator dump
+    __shared__ float  S_acc[16];   // accumulate per kv row
+
+    if (threadIdx.x < 16) S_acc[threadIdx.x] = 0.0f;
+    __syncthreads();
+
+    for (int h0 = 0; h0 < H; h0 += 16) {
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
+        wmma::fill_fragment(c_frag, 0.0f);
+        for (int d0 = 0; d0 < D; d0 += 16) {
+            int lane = threadIdx.x & 31;
+            // Load A_sh: rows are kv rows, cols are k-slice
+            for (int idx = lane; idx < 16*16; idx += 32) {
+                int mi = idx / 16; // row
+                int di = idx % 16; // col
+                int kv_idx = k0 + mi;
+                float v = 0.0f;
+                if (kv_idx < kv && d0 + di < D) v = K[(size_t)(d0 + di) + (size_t)D * kv_idx];
+                A_sh[mi * 16 + di] = __float2half_rn(v);
+            }
+            // Load B_sh: columns=16 heads in group, rows=16 k-slice; col-major
+            for (int idx = lane; idx < 16*16; idx += 32) {
+                int di = idx / 16; // k index
+                int cj = idx % 16; // head col 0..15
+                int h = h0 + cj;
+                int tok = t0; // one token per tile
+                float v = 0.0f;
+                if (tok < Tc && h < H && d0 + di < D) {
+                    v = Q[(size_t)(d0 + di) + (size_t)D * (tok*H + h)];
+                }
+                B_sh[cj * 16 + di] = __float2half_rn(v);
+            }
+            __syncthreads();
+
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
+            wmma::load_matrix_sync(a_frag, A_sh, 16);
+            wmma::load_matrix_sync(b_frag, B_sh, 16);
+            wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            __syncthreads();
+        }
+        wmma::store_matrix_sync(C_sh, c_frag, 16, wmma::mem_row_major);
+        __syncthreads();
+        // Accumulate this head-group contribution into S_acc per row
+        int lane = threadIdx.x & 31;
+        for (int mi = lane; mi < 16; mi += 32) {
+            float srow = 0.0f;
+            for (int cj = 0; cj < 16; ++cj) {
+                float v = C_sh[mi * 16 + cj];
+                if (v < 0.0f) v = 0.0f;
+                float w = W[(h0 + cj) + (size_t)H * t0];
+                srow += v * w;
+            }
+            atomicAdd(&S_acc[mi], srow);
+        }
+        __syncthreads();
+    }
+    // Write out
+    int lane = threadIdx.x & 31;
+    for (int mi = lane; mi < 16; mi += 32) {
+        int kv_idx = k0 + mi;
+        if (kv_idx < kv && t0 < Tc) {
+            float srow = S_acc[mi] * k_scale[kv_idx];
+            Out[kv_idx + (size_t)kv * t0] = srow;
+        }
+    }
+#endif
+}
+
+
+
+
+__global__ void k_indexer_logits_warp_row(
+    const float * __restrict__ Q, // [D, Tc*H]
+    const float * __restrict__ K, // [D, kv]
+    const float * __restrict__ W, // [H, Tc]
+    const float * __restrict__ k_scale, // [kv]
+    int D, int H, int Tc, int kv,
+    float * __restrict__ out) {   // [kv, Tc]
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5; // warp id in block
+    const int warps_per_block = blockDim.x >> 5;
+    const int kv_idx = blockIdx.x * warps_per_block + warp;
+    if (kv_idx >= kv) return;
+
+    // Limit total accumulators
+    const int HT = 128; // upper bound
+    int ht = H * Tc;
+    // Guard: if too large, fall back doing subset (rare for indexer)
+    if (ht > HT) ht = HT;
+
+    float acc[128];
+    #pragma unroll
+    for (int i = 0; i < 128; ++i) acc[i] = 0.0f;
+
+    // Iterate d with warp-stride
+    for (int d0 = lane; d0 < D; d0 += 32) {
+        float kval = K[(size_t)d0 + (size_t)D * kv_idx];
+        // For each token and head, accumulate kval * qval
+        for (int t = 0; t < Tc; ++t) {
+            size_t t_base = (size_t)t * H;
+            const float * q_base = Q + (size_t)D * t_base;
+            #pragma unroll 1
+            for (int h = 0; h < H; ++h) {
+                float qval = q_base[(size_t)d0 + (size_t)D * h];
+                int idx = (int)(t_base + h);
+                acc[idx] = fmaf(kval, qval, acc[idx]);
+            }
+        }
+    }
+
+    // Warp reduce all accumulators
+    unsigned mask = 0xffffffffu;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        #pragma unroll 1
+        for (int i = 0; i < 128; ++i) {
+            acc[i] += __shfl_down_sync(mask, acc[i], offset);
+        }
+    }
+
+    if (lane == 0) {
+        float ks = k_scale[kv_idx];
+        for (int t = 0; t < Tc; ++t) {
+            float s = 0.0f;
+            for (int h = 0; h < H; ++h) {
+                float v = acc[t*H + h];
+                if (v < 0.0f) v = 0.0f;
+                float w = W[h + (size_t)H * t];
+                s += v * w;
+            }
+            out[kv_idx + (size_t)kv * t] = s * ks;
+        }
+    }
 }
 
 __global__ void k_indexer_logits_fused(const float * __restrict__ Q, // [D, Tc*H]
@@ -518,6 +689,10 @@ __global__ void k_indexer_logits_fused(const float * __restrict__ Q, // [D, Tc*H
     if (blockIdx.x == 0 && blockIdx.y == 0 && tc < 2 && kv_idx < 2 && threadIdx.x == 0 && threadIdx.y == 0) {
         printf("[fused] final tc=%d kv=%d acc=%.6e ks=%.6e out=%.6e\n",
                tc, kv_idx, acc_logits, ks, acc_logits*ks);
+
+// Optimized fused kernel computing all heads' dot-products in a single pass over K
+
+
     }
 #endif
     out[kv_idx + (size_t)kv * tc] = acc_logits * ks;
@@ -547,6 +722,65 @@ __global__ void k_indexer_logits_fused(const float * __restrict__ Q, // [D, Tc*H
 
 }
 
+__global__ void k_indexer_logits_fused_vec4(const float * __restrict__ Q, // [D, Tc*H]
+                                            const float * __restrict__ K, // [D, kv]
+                                            const float * __restrict__ W, // [H, Tc]
+                                            const float * __restrict__ k_scale, // [kv]
+                                            int D, int H, int Tc, int kv,
+                                            float * __restrict__ out) {   // [kv, Tc]
+    int tc = blockIdx.x * blockDim.x + threadIdx.x; // token col [0..Tc)
+    int kv_idx = blockIdx.y * blockDim.y + threadIdx.y; // kv row [0..kv)
+    if (tc >= Tc || kv_idx >= kv) return;
+
+    // Accumulate per-head dot in registers
+    float dotH[64];
+    #pragma unroll
+    for (int i = 0; i < 64; ++i) dotH[i] = 0.0f;
+
+    const float * kptr = K + (size_t)D * kv_idx;
+    // unroll by 4 when possible
+    int d4 = (D / 4) * 4;
+    for (int d = 0; d < d4; d += 4) {
+        float k0 = kptr[d + 0];
+        float k1 = kptr[d + 1];
+        float k2 = kptr[d + 2];
+        float k3 = kptr[d + 3];
+        size_t qbase = (size_t)D * (tc * H);
+        #pragma unroll 1
+        for (int h = 0; h < H; ++h) {
+            const float * qv = Q + qbase + (size_t)D * h;
+            float q0 = qv[d + 0];
+            float q1 = qv[d + 1];
+            float q2 = qv[d + 2];
+            float q3 = qv[d + 3];
+            dotH[h] = fmaf(k0, q0, dotH[h]);
+            dotH[h] = fmaf(k1, q1, dotH[h]);
+            dotH[h] = fmaf(k2, q2, dotH[h]);
+            dotH[h] = fmaf(k3, q3, dotH[h]);
+        }
+    }
+    for (int d = d4; d < D; ++d) {
+        float kvd = kptr[d];
+        size_t qbase = (size_t)D * (tc * H);
+        #pragma unroll 1
+        for (int h = 0; h < H; ++h) {
+            const float * qv = Q + qbase + (size_t)D * h;
+            dotH[h] = fmaf(kvd, qv[d], dotH[h]);
+        }
+    }
+
+    float s = 0.0f;
+    for (int h = 0; h < H; ++h) {
+        float v = dotH[h]; if (v < 0.0f) v = 0.0f;
+        float w = W[h + (size_t)H * tc];
+        s += v * w;
+    }
+    s *= k_scale[kv_idx];
+    out[kv_idx + (size_t)kv * tc] = s;
+}
+
+
+
 extern "C" void ggml_cuda_indexer_logits_fused_host(const float * Q,
                                                      const float * K,
                                                      const float * W,
@@ -570,8 +804,10 @@ extern "C" void ggml_cuda_indexer_logits_fused_host(const float * Q,
     cudaMemcpyAsync(dW, W, wsz*sizeof(float), cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(dKS, k_scale, kv_end*sizeof(float), cudaMemcpyHostToDevice, stream);
 
-    dim3 block(32, 4);
-    dim3 grid((Tc + block.x - 1)/block.x, (kv_end + block.y - 1)/block.y);
+    int bx = min(8, Tc); if (bx < 1) bx = 1;
+    int by = min(32, kv_end); if (by < 1) by = 1;
+    dim3 block(bx, by);
+    dim3 grid((Tc + bx - 1)/bx, (kv_end + by - 1)/by);
     if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=naive grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
         k_indexer_logits_fused<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dO);
 
@@ -588,32 +824,84 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                                                        int D, int H, int Tc, int kv_end,
                                                        float * dOut) {
     cudaStream_t stream = ctx.stream();
-    // env knobs for tile sizes
-    int BLOCK_Q = getenv_int_("LLAMA_INDEXER_BLOCK_Q", 1);
-    int BLOCK_N = getenv_int_("LLAMA_INDEXER_BLOCK_N", 64);
-    int D_TILE  = getenv_int_("LLAMA_INDEXER_D_TILE", 32);
-    int exact_flag = 0; { const char *e = getenv("LLAMA_INDEXER_EXACT"); if (e && *e && atoi(e)!=0) exact_flag = 1; }
+    // env knobs for tile sizes with heuristics when unset
+    const char *env_bq = getenv("LLAMA_INDEXER_BLOCK_Q");
+    int BLOCK_Q = env_bq ? max(1, atoi(env_bq)) : 2; // safe default; larger can explode memory
+    const char *env_bn = getenv("LLAMA_INDEXER_BLOCK_N");
+    int BLOCK_N = env_bn ? max(1, atoi(env_bn)) : (kv_end >= 512 ? 256 : 128);
+    const char *env_dt = getenv("LLAMA_INDEXER_D_TILE");
+    int D_TILE = env_dt ? max(16, atoi(env_dt)) : 32;
+    size_t work_elems = (size_t)Tc * (size_t)kv_end;
+    int exact_flag = (work_elems <= 4096) ? 1 : 0; { const char *e = getenv("LLAMA_INDEXER_EXACT"); if (e && *e && atoi(e)!=0) exact_flag = 1; }
     // Select kernel based on env; default to tiled
     bool use_naive = false;
     if (const char *s = getenv("LLAMA_INDEXER_USE_NAIVE"); s && atoi(s) != 0) use_naive = true;
     bool use_wmma = false;
     if (const char *s = getenv("LLAMA_INDEXER_USE_WMMA"); s && atoi(s) != 0) use_wmma = true;
+    bool use_warp_row = false;
+    if (const char *s = getenv("LLAMA_INDEXER_USE_WARP_ROW"); s && atoi(s) != 0) use_warp_row = true;
+    // Heuristics:
+    int HT_unused = H * Tc; (void)HT_unused;
+    if (!use_naive && !use_wmma && !use_warp_row) {
+        size_t work = (size_t)Tc * (size_t)kv_end;
+        // prefer WMMA when legal
+        if (D % 16 == 0 && H <= 16 && (16 % H) == 0 && work >= 16384) {
+            use_wmma = 1;
+        } else {
+            // fallback to tiled path (default)
+        }
+    }
 
-    if (sparse_debug_on()) printf("[INDEXER_DISPATCH] use_naive=%d use_wmma=%d D=%d H=%d Tc=%d kv=%d BLOCK_Q=%d BLOCK_N=%d D_TILE=%d\n", (int)use_naive, (int)use_wmma, D, H, Tc, kv_end, BLOCK_Q, BLOCK_N, D_TILE);
+    if (sparse_debug_on()) printf("[INDEXER_DISPATCH] use_naive=%d use_wmma=%d use_warp_row=%d D=%d H=%d Tc=%d kv=%d BLOCK_Q=%d BLOCK_N=%d D_TILE=%d\n", (int)use_naive, (int)use_wmma, (int)use_warp_row, D, H, Tc, kv_end, BLOCK_Q, BLOCK_N, D_TILE);
     if (use_naive) {
         dim3 block(32, 4);
         dim3 grid((Tc + block.x - 1)/block.x, (kv_end + block.y - 1)/block.y);
         if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=naive grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
         k_indexer_logits_fused<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+    } else if (use_warp_row) {
+        // Each block has 8 warps -> 256 threads
+        dim3 block(256,1,1);
+        int warps_per_block = block.x / 32;
+        dim3 grid((kv_end + warps_per_block - 1) / warps_per_block, 1, 1);
+        if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=warp_row grid=(%d,%d) block=(%d)\n", grid.x, grid.y, block.x);
+        k_indexer_logits_warp_row<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+        CUDA_CHECK(cudaGetLastError());
     } else if (use_wmma && D % 16 == 0 && (size_t)Tc * kv_end > 4096 && H <= 16 && (16 % H) == 0) {
-        // launch WMMA16 path (skip for tiny problems)
+        // launch WMMA16 path
         dim3 block(32,1,1);
         const int tokens_per_tile = max(1, 16 / H);
         dim3 grid((Tc + tokens_per_tile - 1) / tokens_per_tile, (kv_end + 15) / 16, 1);
         if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
         k_indexer_logits_wmma16_f32<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+        {
+            cudaError_t __err = cudaGetLastError();
+            if (__err != cudaSuccess) {
+                if (sparse_debug_on()) printf("[INDEXER_DISPATCH] WMMA launch failed: %s, falling back to tiled.\n", cudaGetErrorString(__err));
+                int HEAD_CHUNK = getenv_int_("LLAMA_INDEXER_HEAD_CHUNK", 32);
+                if (HEAD_CHUNK > 64) HEAD_CHUNK = 64;
+                int PIPE_STAGES = getenv_int_("LLAMA_INDEXER_PIPE_STAGES", 2);
+                if (PIPE_STAGES < 1) PIPE_STAGES = 1;
+                if (PIPE_STAGES > 2) PIPE_STAGES = 2;
+                int maxThreadsPerBlock = 1024;
+                int threadsPerBlock = BLOCK_Q * BLOCK_N;
+                if (threadsPerBlock > maxThreadsPerBlock) {
+                    int new_BLOCK_N = maxThreadsPerBlock / max(1, BLOCK_Q);
+                    if (new_BLOCK_N < 1) new_BLOCK_N = 1;
+                    BLOCK_N = new_BLOCK_N;
+                }
+                dim3 blockT(BLOCK_Q, BLOCK_N);
+                dim3 gridT((Tc + BLOCK_Q - 1)/BLOCK_Q, (kv_end + BLOCK_N - 1)/BLOCK_N);
+                size_t shmem = (size_t)D_TILE * BLOCK_N * sizeof(float)
+                             + (size_t)D_TILE * BLOCK_Q * HEAD_CHUNK * sizeof(float)
+                             + (PIPE_STAGES >= 2 ? ((size_t)D_TILE * BLOCK_N * sizeof(float) + (size_t)D_TILE * BLOCK_Q * HEAD_CHUNK * sizeof(float)) : 0)
+                             + (size_t)HEAD_CHUNK * BLOCK_Q * sizeof(float);
+                CUDA_SET_SHARED_MEMORY_LIMIT(k_indexer_logits_tiled_f32, (int)shmem);
+                if (sparse_debug_on()) printf("[INDEXER_DISPATCH] fallback tiled grid=(%d,%d) block=(%d,%d) shmem=%zu Hc=%d stages=%d\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem, HEAD_CHUNK, PIPE_STAGES);
+                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+            }
+        }
     } else {
-        int HEAD_CHUNK = getenv_int_("LLAMA_INDEXER_HEAD_CHUNK", 16);
+        int HEAD_CHUNK = getenv_int_("LLAMA_INDEXER_HEAD_CHUNK", 32);
         if (HEAD_CHUNK > 64) HEAD_CHUNK = 64;
         int PIPE_STAGES = getenv_int_("LLAMA_INDEXER_PIPE_STAGES", 2);
         if (PIPE_STAGES < 1) PIPE_STAGES = 1;
