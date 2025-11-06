@@ -306,20 +306,6 @@ __global__ void k_indexer_logits_wmma16_f32(
     const int t0 = blockIdx.x * tokens_per_tile;
     const int k0 = blockIdx.y * 16;
 
-/* WMMA path with head sub-chunks of 16: supports H multiple of 16
-__global__ void k_indexer_logits_wmma_h16_f32(
-    const float * __restrict__ Q, // [D, Tc*H]
-    const float * __restrict__ K, // [D, kv]
-    const float * __restrict__ W, // [H, Tc]
-    const float * __restrict__ k_scale, // [kv]
-    int D, int H, int Tc, int kv,
-    float * __restrict__ Out) {
-#if __CUDA_ARCH__ >= 700
-    // intentionally disabled prototype block
-#endif
-*/
-
-
     if (t0 >= Tc || k0 >= kv) return;
 
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
