@@ -122,6 +122,16 @@ extern "C" void ggml_cuda_sparse_mla_decode_device(ggml_backend_cuda_context & c
                                                     int D, int Hq, int Hkv, int Dv,
                                                     int N, int Ksel,
                                                     float kq_scale, float softcap,
+                                                    float * out);
+
+extern "C" void ggml_cuda_sparse_mla_decode_device(ggml_backend_cuda_context & ctx,
+                                                    const float * q,
+                                                    const float * k,
+                                                    const float * v,
+                                                    const int32_t * topk,
+                                                    int D, int Hq, int Hkv, int Dv,
+                                                    int N, int Ksel,
+                                                    float kq_scale, float softcap,
                                                     float * out) {
     dim3 grid(Hq);
     dim3 block(128);

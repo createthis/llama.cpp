@@ -840,7 +840,6 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     bool use_warp_row = false;
     if (const char *s = getenv("LLAMA_INDEXER_USE_WARP_ROW"); s && atoi(s) != 0) use_warp_row = true;
     // Heuristics:
-    int HT_unused = H * Tc; (void)HT_unused;
     if (!use_naive && !use_warp_row && !use_wmma) {
         size_t work = (size_t)Tc * (size_t)kv_end;
         // prefer WMMA when legal: standard (H<=16) or head-grouped (H%16==0)

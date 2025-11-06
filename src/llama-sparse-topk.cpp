@@ -206,9 +206,8 @@ using std::function;
 
 struct fused_indexer_userdata { };
 
-static void fused_indexer_custom(ggml_tensor * dst, int ith, int nth, void * userdata) {
-    (void)userdata; (void)ith; (void)nth;
-
+static void fused_indexer_custom(ggml_tensor * /*dst*/, int /*ith*/, int /*nth*/, void * /*userdata*/) {
+    // no-op custom CPU fallback; all real work happens in CUDA backend path
 }
 
 static ggml_tensor * build_indexer_fused_logits(
