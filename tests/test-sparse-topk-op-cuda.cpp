@@ -14,31 +14,71 @@ static void build_and_run(int N, int T, int K) {
     for (auto & v : scores_h) v = dist(rng);
 
     ggml_init_params ip{}; ip.mem_size = 64ull*1024*1024; ip.no_alloc = true;
+    printf("before ggml_init\n");
+    fflush(stdout);
     ggml_context* ctx = ggml_init(ip);
+    fflush(stdout);
+    fflush(stderr);
+    printf("after ggml_init\n");
+    fflush(stdout);
 
     ggml_tensor* scores = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, N, T);
 
-    // run on default backend (will pick CUDA if available)
-    ggml_backend_t be = ggml_backend_init_best();
-
+    printf("before ggml_sparse_topk_radix\n");
+    fflush(stdout);
     ggml_tensor* idx = ggml_sparse_topk_radix(ctx, scores, K);
+    printf("after ggml_sparse_topk_radix\n");
+    fflush(stdout);
 
+    printf("before ggml_new_graph\n");
+    fflush(stdout);
     ggml_cgraph* gf = ggml_new_graph(ctx);
+    fflush(stderr);
+    fflush(stdout);
+    printf("after ggml_new_graph\n");
+    fflush(stdout);
     ggml_build_forward_expand(gf, idx);
 
-    // allocate backend memory for tensors in this context (after building the graph)
-    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, be);
-    if (buf == NULL) {
-        printf("Failed to allocate backend buffer for tensors\n");
-        return;
+    ggml_backend_dev_t cuda_dev = ggml_backend_dev_by_name("CUDA0");
+    if (!cuda_dev) {
+        // fallback: pick any CUDA-like device if name lookup fails
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t d = ggml_backend_dev_get(i);
+            if (ggml_backend_dev_type(d) == GGML_BACKEND_DEVICE_TYPE_GPU) { cuda_dev = d; break; }
+        }
     }
+    ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (!cpu_dev) { printf("no CPU device found\n"); ggml_free(ctx); return; }
+
+    ggml_backend_t cuda = cuda_dev ? ggml_backend_dev_init(cuda_dev, nullptr) : nullptr;
+    ggml_backend_t cpu  = ggml_backend_dev_init(cpu_dev, nullptr);
+    if (!cpu || (!cuda && cuda_dev)) { printf("backend init failed\n"); if (cuda) ggml_backend_free(cuda); if (cpu) ggml_backend_free(cpu); ggml_free(ctx); return; }
+
+    ggml_backend_t backs_arr[2] = { cuda, cpu };
+    int n_backs = cuda ? 2 : 1;
+    ggml_backend_sched_t sched = ggml_backend_sched_new(backs_arr, nullptr, n_backs, GGML_DEFAULT_GRAPH_SIZE, false, true);
+    if (!sched) { printf("sched init failed\n"); if (cuda) ggml_backend_free(cuda); ggml_backend_free(cpu); ggml_free(ctx); return; }
+
+    ggml_backend_sched_reset(sched);
+    // Reserve exact buffer sizes to avoid reallocation warnings during alloc_graph
+    ggml_backend_sched_reserve(sched, gf);
+    printf("before ggml_backend_sched_alloc_graph\n");
+    fflush(stdout);
+    ggml_backend_sched_alloc_graph(sched, gf);
+    fflush(stderr);
+    fflush(stdout);
+    printf("after ggml_backend_sched_alloc_graph\n");
+    fflush(stdout);
 
     // copy host scores into device tensor
     ggml_backend_tensor_set(scores, scores_h.data(), 0, ggml_nbytes(scores));
 
-    ggml_status st = ggml_backend_graph_compute(be, gf);
+    printf("starting compute\n");
+    fflush(stdout);
+    ggml_status st = ggml_backend_sched_graph_compute(sched, gf);
     if (st != GGML_STATUS_SUCCESS) {
         printf("backend compute failed: %d\n", (int)st);
+        fflush(stdout);
         return;
     }
 
@@ -66,6 +106,10 @@ static void build_and_run(int N, int T, int K) {
     }
 
     printf("sparse_topk_radix op test (%d,%d,%d): %s\n", N, T, K, ok?"PASS":"FAIL");
+    fflush(stdout);
+    ggml_backend_sched_free(sched);
+    ggml_backend_free(cuda);
+    ggml_backend_free(cpu);
     ggml_free(ctx);
 }
 

@@ -79,6 +79,8 @@ int main() {
     if (!sched) { printf("sched init failed\n"); if (cuda) ggml_backend_free(cuda); ggml_backend_free(cpu); ggml_free(ctx); return 1; }
 
     ggml_backend_sched_reset(sched);
+    // Reserve exact buffer sizes to avoid reallocation warnings during alloc_graph
+    ggml_backend_sched_reserve(sched, gf);
     ggml_backend_sched_alloc_graph(sched, gf);
 
     // Print backend placement for tensors
