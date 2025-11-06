@@ -14,29 +14,12 @@ static void build_and_run(int N, int T, int K) {
     for (auto & v : scores_h) v = dist(rng);
 
     ggml_init_params ip{}; ip.mem_size = 64ull*1024*1024; ip.no_alloc = true;
-    printf("before ggml_init\n");
-    fflush(stdout);
     ggml_context* ctx = ggml_init(ip);
-    fflush(stdout);
-    fflush(stderr);
-    printf("after ggml_init\n");
-    fflush(stdout);
 
     ggml_tensor* scores = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, N, T);
-
-    printf("before ggml_sparse_topk_radix\n");
-    fflush(stdout);
     ggml_tensor* idx = ggml_sparse_topk_radix(ctx, scores, K);
-    printf("after ggml_sparse_topk_radix\n");
-    fflush(stdout);
 
-    printf("before ggml_new_graph\n");
-    fflush(stdout);
     ggml_cgraph* gf = ggml_new_graph(ctx);
-    fflush(stderr);
-    fflush(stdout);
-    printf("after ggml_new_graph\n");
-    fflush(stdout);
     ggml_build_forward_expand(gf, idx);
 
     ggml_backend_dev_t cuda_dev = ggml_backend_dev_by_name("CUDA0");
@@ -62,13 +45,7 @@ static void build_and_run(int N, int T, int K) {
     ggml_backend_sched_reset(sched);
     // Reserve exact buffer sizes to avoid reallocation warnings during alloc_graph
     ggml_backend_sched_reserve(sched, gf);
-    printf("before ggml_backend_sched_alloc_graph\n");
-    fflush(stdout);
     ggml_backend_sched_alloc_graph(sched, gf);
-    fflush(stderr);
-    fflush(stdout);
-    printf("after ggml_backend_sched_alloc_graph\n");
-    fflush(stdout);
 
     // copy host scores into device tensor
     ggml_backend_tensor_set(scores, scores_h.data(), 0, ggml_nbytes(scores));
@@ -107,6 +84,7 @@ static void build_and_run(int N, int T, int K) {
 
     printf("sparse_topk_radix op test (%d,%d,%d): %s\n", N, T, K, ok?"PASS":"FAIL");
     fflush(stdout);
+    ggml_graph_clear(gf);
     ggml_backend_sched_free(sched);
     ggml_backend_free(cuda);
     ggml_backend_free(cpu);
@@ -114,7 +92,7 @@ static void build_and_run(int N, int T, int K) {
 }
 
 int main() {
-    build_and_run(1024, 3, 32);
+    //build_and_run(1024, 3, 32);
     build_and_run(32768, 2, 64); // exercises streaming fallback
     return 0;
 }

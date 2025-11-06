@@ -2534,13 +2534,17 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 // profiling wrapper for SPARSE_TOPK_RADIX (selection only)
                 // guarded by env LLAMA_SPARSE_PROF to avoid log spam
                 auto * __prof_env = getenv("LLAMA_SPARSE_PROF");
+                auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
+                cudaStreamCaptureStatus __iscap = cudaStreamCaptureStatusNone;
+                CUDA_CHECK(cudaStreamIsCapturing(ctx.stream(), &__iscap));
+                bool __do_prof = (__prof_env && *__prof_env && __iscap == cudaStreamCaptureStatusNone);
                 cudaError_t __err_kernel = cudaSuccess;
                 if (scores->type == GGML_TYPE_F16) {
                     // Promote half->float for current kernel
                     const to_fp32_cuda_t to_fp32 = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
                     ggml_cuda_pool_alloc<float> tmp(ctx.pool(ggml_cuda_get_device()), (size_t)N*T);
                     to_fp32((const void *)scores->data, (float *)tmp.get(), (size_t)N*T, ctx.stream());
-                    if (__prof_env && *__prof_env) {
+                    if (__do_prof) {
                         cudaEvent_t __e0, __e1; cudaError_t __e0c = cudaEventCreate(&__e0); cudaError_t __e1c = cudaEventCreate(&__e1);
                         bool __ev_ok = (__e0c == cudaSuccess && __e1c == cudaSuccess);
                         if (__ev_ok) cudaEventRecord(__e0, ctx.stream());
@@ -2555,16 +2559,18 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                             cudaEventDestroy(__e0); cudaEventDestroy(__e1);
                         }
                         static int __cnt = 0; static double __sum = 0.0; __sum += __ms; __cnt++;
-                        if (__cnt % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0)); __sum = 0.0; }
+                        if (__prof_each_env && *__prof_each_env) {
+                            fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
+                        } else {
+                            if (__cnt % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0)); __sum = 0.0; }
+                        }
                     } else {
-                        fprintf(stderr, "no profile f16\n");
-                        fflush(stderr);
                         ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
                         __err_kernel = cudaGetLastError();
                     }
                 } else {
                     GGML_ASSERT(scores->type == GGML_TYPE_F32);
-                    if (__prof_env && *__prof_env) {
+                    if (__do_prof) {
                         cudaEvent_t __e0, __e1;
                         cudaEventCreate(&__e0);
                         cudaEventCreate(&__e1);
@@ -2581,12 +2587,14 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                         static double __sum = 0.0;
                         __sum += __ms;
                         __cnt++;
-                        if (__cnt % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0)); __sum = 0.0; }
+                        if (__prof_each_env && *__prof_each_env) {
+                            fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
+                        } else {
+                            if (__cnt % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0)); __sum = 0.0; }
+                        }
                         cudaEventDestroy(__e0);
                         cudaEventDestroy(__e1);
                     } else {
-                        fprintf(stderr, "no profile f32\n");
-                        fflush(stderr);
                         ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
                         __err_kernel = cudaGetLastError();
                     }
