@@ -24,17 +24,8 @@ static __device__ inline void cp_async_commit() {
 static __device__ inline void cp_async_wait() {
     asm volatile ("cp.async.wait_group 0;\n" ::);
 }
-
-
 #endif
 
-__global__ void k_indexer_busy_wait(int iters) {
-    volatile int acc = 0;
-    for (int i = 0; i < iters; ++i) acc += i;
-    if (acc == 42) {
-        // prevent optimization
-    }
-}
 
 // helpers to read env
 static inline int getenv_int_(const char * name, int def) {
@@ -850,13 +841,11 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     if (const char *s = getenv("LLAMA_INDEXER_USE_WARP_ROW"); s && atoi(s) != 0) use_warp_row = true;
     // Heuristics:
     int HT_unused = H * Tc; (void)HT_unused;
-    if (!use_naive && !use_wmma && !use_warp_row) {
+    if (!use_naive && !use_warp_row && !use_wmma) {
         size_t work = (size_t)Tc * (size_t)kv_end;
-        // prefer WMMA when legal
-        if (D % 16 == 0 && H <= 16 && (16 % H) == 0 && work >= 16384) {
+        // prefer WMMA when legal: standard (H<=16) or head-grouped (H%16==0)
+        if (D % 16 == 0 && ((((H <= 16) && ((16 % H) == 0)) || ((H % 16) == 0))) && work >= 16384) {
             use_wmma = 1;
-        } else {
-            // fallback to tiled path (default)
         }
     }
 
@@ -935,11 +924,6 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                 CUDA_SET_SHARED_MEMORY_LIMIT(k_indexer_logits_tiled_f32, (int)shmem);
                 if (sparse_debug_on()) printf("[INDEXER_DISPATCH] fallback tiled grid=(%d,%d) block=(%d,%d) shmem=%zu Hc=%d stages=%d\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem, HEAD_CHUNK, PIPE_STAGES);
                 k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
-            } else {
-                if (const char *p = getenv("LLAMA_INDEXER_SLOW_WMMA")) {
-                    int it = atoi(p); if (it < 0) it = 0; if (it > 1000000) it = 1000000;
-                    if (it > 0) { k_indexer_busy_wait<<<1,1,0,stream>>>(it); }
-                }
             }
         }
     } else {
