@@ -28,6 +28,14 @@ static __device__ inline void cp_async_wait() {
 
 #endif
 
+__global__ void k_indexer_busy_wait(int iters) {
+    volatile int acc = 0;
+    for (int i = 0; i < iters; ++i) acc += i;
+    if (acc == 42) {
+        // prevent optimization
+    }
+}
+
 // helpers to read env
 static inline int getenv_int_(const char * name, int def) {
     const char * s = getenv(name);
@@ -866,13 +874,42 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=warp_row grid=(%d,%d) block=(%d)\n", grid.x, grid.y, block.x);
         k_indexer_logits_warp_row<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
         CUDA_CHECK(cudaGetLastError());
-    } else if (use_wmma && D % 16 == 0 && (size_t)Tc * kv_end > 4096 && H <= 16 && (16 % H) == 0) {
-        // launch WMMA16 path
+    } else if (use_wmma && D % 16 == 0 && (size_t)Tc * kv_end > 4096) {
         dim3 block(32,1,1);
-        const int tokens_per_tile = max(1, 16 / H);
+        const int tokens_per_tile = max(1, 16 / min(H,16));
         dim3 grid((Tc + tokens_per_tile - 1) / tokens_per_tile, (kv_end + 15) / 16, 1);
-        if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
-        k_indexer_logits_wmma16_f32<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+        if (H % 16 == 0) {
+            if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma_hgrp grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
+            k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+        } else if (H <= 16 && (16 % H) == 0) {
+            if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
+            k_indexer_logits_wmma16_f32<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+        } else {
+            // not WMMA-friendly; fallback to tiled below
+            int HEAD_CHUNK = getenv_int_("LLAMA_INDEXER_HEAD_CHUNK", 32);
+            if (HEAD_CHUNK > 64) HEAD_CHUNK = 64;
+            int PIPE_STAGES = getenv_int_("LLAMA_INDEXER_PIPE_STAGES", 2);
+            if (PIPE_STAGES < 1) PIPE_STAGES = 1;
+            if (PIPE_STAGES > 2) PIPE_STAGES = 2;
+            int maxThreadsPerBlock = 1024;
+            int threadsPerBlock = BLOCK_Q * BLOCK_N;
+            if (threadsPerBlock > maxThreadsPerBlock) {
+                int new_BLOCK_N = maxThreadsPerBlock / max(1, BLOCK_Q);
+                if (new_BLOCK_N < 1) new_BLOCK_N = 1;
+                if (sparse_debug_on()) printf("[INDEXER_DISPATCH] clamp BLOCK_N %d->%d due to threadsPerBlock=%d>=%d\n", BLOCK_N, new_BLOCK_N, threadsPerBlock, maxThreadsPerBlock);
+                BLOCK_N = new_BLOCK_N;
+            }
+            dim3 blockT(BLOCK_Q, BLOCK_N);
+            dim3 gridT((Tc + BLOCK_Q - 1)/BLOCK_Q, (kv_end + BLOCK_N - 1)/BLOCK_N);
+            size_t shmem = (size_t)D_TILE * BLOCK_N * sizeof(float)
+                         + (size_t)D_TILE * BLOCK_Q * HEAD_CHUNK * sizeof(float)
+                         + (PIPE_STAGES >= 2 ? ((size_t)D_TILE * BLOCK_N * sizeof(float) + (size_t)D_TILE * BLOCK_Q * HEAD_CHUNK * sizeof(float)) : 0)
+                         + (size_t)HEAD_CHUNK * BLOCK_Q * sizeof(float);
+            CUDA_SET_SHARED_MEMORY_LIMIT(k_indexer_logits_tiled_f32, (int)shmem);
+            if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=tiled grid=(%d,%d) block=(%d,%d) shmem=%zu Hc=%d stages=%d\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem, HEAD_CHUNK, PIPE_STAGES);
+            k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+            return;
+        }
         {
             cudaError_t __err = cudaGetLastError();
             if (__err != cudaSuccess) {
@@ -898,6 +935,11 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                 CUDA_SET_SHARED_MEMORY_LIMIT(k_indexer_logits_tiled_f32, (int)shmem);
                 if (sparse_debug_on()) printf("[INDEXER_DISPATCH] fallback tiled grid=(%d,%d) block=(%d,%d) shmem=%zu Hc=%d stages=%d\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem, HEAD_CHUNK, PIPE_STAGES);
                 k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+            } else {
+                if (const char *p = getenv("LLAMA_INDEXER_SLOW_WMMA")) {
+                    int it = atoi(p); if (it < 0) it = 0; if (it > 1000000) it = 1000000;
+                    if (it > 0) { k_indexer_busy_wait<<<1,1,0,stream>>>(it); }
+                }
             }
         }
     } else {
