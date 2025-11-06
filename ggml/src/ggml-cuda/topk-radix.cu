@@ -376,11 +376,96 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
 }
 
 
+
+// One-pass block-level top-k selection (register-resident per-thread local top, then block reduction)
+#define TOPK_THREADS 1024
+#define TOPK_LOCAL   4
+
+static __global__ void k_block_select_topk(const float * __restrict__ scores,
+                                           int N, int T, int ld, int k,
+                                           int * __restrict__ idx_out) {
+    int t = blockIdx.x;
+    if (t >= T) return;
+    const float * col = scores + (size_t)ld * t;
+
+    float lval[TOPK_LOCAL]; int lidx[TOPK_LOCAL];
+    for (int i = 0; i < TOPK_LOCAL; ++i) { lval[i] = -1.0e30f; lidx[i] = -1; }
+
+    // Strided scan
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        float v = col[i];
+        // find local min position
+        int min_pos = 0; float min_val = lval[0];
+        #pragma unroll
+        for (int j = 1; j < TOPK_LOCAL; ++j) {
+            if (lval[j] < min_val) { min_val = lval[j]; min_pos = j; }
+        }
+        if (v > min_val) { lval[min_pos] = v; lidx[min_pos] = i; }
+    }
+
+    __shared__ float s_vals[TOPK_THREADS*TOPK_LOCAL];
+    __shared__ int   s_ids[TOPK_THREADS*TOPK_LOCAL];
+
+    int base = threadIdx.x * TOPK_LOCAL;
+    #pragma unroll
+    for (int j = 0; j < TOPK_LOCAL; ++j) { s_vals[base + j] = lval[j]; s_ids[base + j] = lidx[j]; }
+    __syncthreads();
+
+    const int M = TOPK_THREADS*TOPK_LOCAL;
+
+    __shared__ float warp_best_val[32];
+    __shared__ int   warp_best_pos[32];
+    __shared__ int   s_block_best_pos;
+
+    int wid = threadIdx.x >> 5; int lane = threadIdx.x & 31;
+
+    for (int r = 0; r < k; ++r) {
+        float best_val = -1.0e30f; int best_pos = -1;
+        for (int p = threadIdx.x; p < M; p += blockDim.x) {
+            float v = s_vals[p];
+            if (v > best_val) { best_val = v; best_pos = p; }
+        }
+        // warp reduce (max by value, tie-break by smaller index)
+        for (int off = 16; off > 0; off >>= 1) {
+            float v2 = __shfl_down_sync(0xffffffff, best_val, off);
+            int   p2 = __shfl_down_sync(0xffffffff, best_pos, off);
+            if (v2 > best_val || (v2 == best_val && p2 < best_pos)) { best_val = v2; best_pos = p2; }
+        }
+        if (lane == 0) { warp_best_val[wid] = best_val; warp_best_pos[wid] = best_pos; }
+        __syncthreads();
+        if (threadIdx.x < 32) {
+            float v = warp_best_val[lane]; int p = warp_best_pos[lane];
+            for (int off = 16; off > 0; off >>= 1) {
+                float v2 = __shfl_down_sync(0xffffffff, v, off);
+                int   p2 = __shfl_down_sync(0xffffffff, p, off);
+                if (v2 > v || (v2 == v && p2 < p)) { v = v2; p = p2; }
+            }
+            if (lane == 0) s_block_best_pos = p;
+        }
+        __syncthreads();
+        int bp = s_block_best_pos;
+        if (threadIdx.x == 0) {
+            int out_idx = s_ids[bp];
+            idx_out[r + k*t] = out_idx;
+            s_vals[bp] = -1.0e30f; // mark consumed
+        }
+        __syncthreads();
+    }
+}
+#undef TOPK_THREADS
+#undef TOPK_LOCAL
 void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
                                          const float * scores_d, int N, int T, int k,
                                          int * idx_d) {
     cudaStream_t stream = ctx.stream();
-    // Radix-like path: histogram top byte + select with tie refinement
+    const char * impl = getenv("LLAMA_SPARSE_TOPK_IMPL");
+    if (impl && strcmp(impl, "block") == 0) {
+        // one-pass block select
+        const int threads = 1024;
+        k_block_select_topk<<<T, threads, 0, stream>>>(scores_d, N, T, /*ld=*/N, k, idx_d);
+        return;
+    }
+    // default radix path (existing)
     uint32_t * gt_counts_d = nullptr;
     uint32_t * thr_bins_d  = nullptr;
     cudaMalloc(&gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T);
@@ -390,9 +475,7 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
     const size_t hist_shmem = 256 * sizeof(uint32_t);
     k_histogram_topbyte<<<T, hist_threads, hist_shmem, stream>>>(scores_d, N, T, /*ld=*/N, thr_bins_d, gt_counts_d);
 
-    // Equal-bin selection kernel; bound dynamic shared memory to device limit
     const int sel_threads = 1024;
-    // Conservative eq buffer capacity to avoid exceeding per-block shared mem
     int cap_env = 0;
     const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
     if (env_cap) { cap_env = atoi(env_cap); if (cap_env < 0) cap_env = 0; }
@@ -404,6 +487,7 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
     cudaFree(gt_counts_d);
     cudaFree(thr_bins_d);
 }
+
 
 extern "C" void ggml_cuda_topk_radix_indices_host(const float * scores_h, int N, int T, int k, int * idx_h) {
     // Simple host wrapper: copy scores to device, allocate idx device, invoke kernels, copy back
