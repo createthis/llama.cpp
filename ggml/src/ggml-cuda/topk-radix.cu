@@ -108,6 +108,7 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
                                           int N, int T, int ld, int k, int eq_capacity,
                                           const uint32_t * __restrict__ gt_counts, // [256, T]
                                           int * __restrict__ idx_out) {
+
     int t = blockIdx.x;
     if (t >= T) return;
 
@@ -117,7 +118,7 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     }
     __syncthreads();
 
-    // find thr0 from gt_counts
+    // Round 0: use provided greater-counts to find threshold on top byte
     int thr0 = 0;
     for (int b = 255; b >= 0; --b) {
         uint32_t sgt = gt_counts[b + 256*t];
@@ -125,273 +126,179 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         uint32_t eq   = prev - gt_counts[b + 256*t];
         if (sgt < (uint32_t)k && sgt + eq >= (uint32_t)k) { thr0 = b; break; }
     }
-#if SEL_DEBUG
-    if (blockIdx.x == SEL_DEBUG_COL && threadIdx.x == 0) {
-        uint32_t sgt = gt_counts[thr0 + 256*t];
-        uint32_t prev = (thr0 == 0 ? (uint32_t)N : gt_counts[(thr0 - 1) + 256*t]);
-        uint32_t eq   = prev - gt_counts[thr0 + 256*t];
-        printf("[t=%d] thr0=%d sgt=%u eq=%u k=%d\n", t, thr0, sgt, eq, k);
-    }
-#endif
+    __shared__ int sel_sofar;
+    if (threadIdx.x == 0) sel_sofar = 0;
+    __syncthreads();
 
     uint32_t sgt0 = gt_counts[thr0 + 256*t];
     int take_gt0 = min(k, (int)sgt0);
 
-    extern __shared__ int shared[];
-    int * eq_buf = shared; // dynamic shared memory for candidate buffers
-
-    __shared__ int sel_gt0;
-    __shared__ int sel_sofar;
-    __shared__ int eq0_count;
-    if (threadIdx.x == 0) { sel_gt0 = 0; sel_sofar = 0; eq0_count = 0; }
+    extern __shared__ int eq_buf[]; // dynamic shared memory as candidate buffer
+    __shared__ int eq_count0_store;
+    if (threadIdx.x == 0) eq_count0_store = 0;
+    __shared__ int eq_count0_total;
+    if (threadIdx.x == 0) eq_count0_total = 0;
     __syncthreads();
 
-    __shared__ unsigned int h2[256];
-    for (int i = threadIdx.x; i < 256; i += blockDim.x) h2[i] = 0u;
-    __syncthreads();
-
-    // Vectorized Stage A streaming pass
-    int i4 = threadIdx.x * 4;
-    for (; i4 + 3 < N; i4 += blockDim.x * 4) {
-        float4 v = *((const float4 *)(col + i4));
-        uint32_t k0 = float_to_key_desc(v.x);
-        uint32_t k1 = float_to_key_desc(v.y);
-        uint32_t k2 = float_to_key_desc(v.z);
-        uint32_t k3 = float_to_key_desc(v.w);
-        uint32_t arr[4] = {k0,k1,k2,k3};
-        #pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            int idx = i4 + j;
-            int b0 = (arr[j] >> 24) & 0xFF;
-            if (b0 > thr0) {
-                int pos = atomicAdd(&sel_gt0, 1);
-                if (pos < take_gt0) idx_out[pos + k*t] = idx;
-            } else if (b0 == thr0) {
-                int p = atomicAdd(&eq0_count, 1);
-                if (p < eq_capacity) eq_buf[p] = idx;
-                int b1 = (arr[j] >> 16) & 0xFF;
-                atomicAdd(&h2[b1], 1u);
-            }
-        }
-    }
-    int rem = N & 3;
-    int tail_start = N - rem;
-    int ti = tail_start + threadIdx.x;
-    if (threadIdx.x < rem && ti < N) {
-        uint32_t key = float_to_key_desc(col[ti]);
+    // Select MSB > thr0 and collect MSB == thr0 candidates
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        uint32_t key = __float_as_uint(col[i]);
+        key = ((int32_t)key < 0) ? ~key : (key ^ 0x80000000u);
         int b0 = (key >> 24) & 0xFF;
         if (b0 > thr0) {
-            int pos = atomicAdd(&sel_gt0, 1);
-            if (pos < take_gt0) idx_out[pos + k*t] = ti;
+            int pos = atomicAdd(&sel_sofar, 1);
+            if (pos < take_gt0) idx_out[pos + k*t] = i;
         } else if (b0 == thr0) {
-            int p = atomicAdd(&eq0_count, 1);
-            if (p < eq_capacity) eq_buf[p] = ti;
-            int b1 = (key >> 16) & 0xFF;
-            atomicAdd(&h2[b1], 1u);
+            atomicAdd(&eq_count0_total, 1);
+            int p = atomicAdd(&eq_count0_store, 1);
+            if (p < eq_capacity) eq_buf[p] = i;
         }
     }
     __syncthreads();
-    sel_sofar = take_gt0;
+    if (threadIdx.x == 0) sel_sofar = take_gt0;
+    __syncthreads();
 
     int remaining = k - sel_sofar;
     if (remaining <= 0) return;
 
-    // Determine if eq0 overflowed shared buffer
-    __shared__ int fallback_b1;
-    if (threadIdx.x == 0) fallback_b1 = (eq0_count > eq_capacity);
-    __syncthreads();
+    // Helper lambdas (device inline) simulated via macros
+    // Build histogram for next byte over a set (either eq buffer if fully stored, or full column with predicates)
+    auto build_hist = [&](int round, int count_stored, int count_total, int prev_thr0, int prev_thr1, int prev_thr2, unsigned int *hist_out){
+        for (int i = threadIdx.x; i < 256; i += blockDim.x) hist_out[i] = 0u;
+        __syncthreads();
+        if (count_stored == count_total && count_total <= eq_capacity) {
+            // iterate stored candidates
+            for (int j = threadIdx.x; j < count_stored; j += blockDim.x) {
+                int idx = eq_buf[j];
+                uint32_t key = __float_as_uint(col[idx]);
+                key = ((int32_t)key < 0) ? ~key : (key ^ 0x80000000u);
+                int byte;
+                if (round == 1) byte = (key >> 16) & 0xFF; // b1
+                else if (round == 2) byte = (key >> 8) & 0xFF; // b2
+                else byte = key & 0xFF; // b3
+                atomicAdd(&hist_out[byte], 1u);
+            }
+        } else {
+            // iterate full column with predicates on previous rounds' bytes
+            for (int i = threadIdx.x; i < N; i += blockDim.x) {
+                uint32_t raw = __float_as_uint(col[i]);
+                uint32_t key = ((int32_t)raw < 0) ? ~raw : (raw ^ 0x80000000u);
+                int b0 = (key >> 24) & 0xFF; if (b0 != prev_thr0) continue;
+                if (round >= 2) { int b1 = (key >> 16) & 0xFF; if (b1 != prev_thr1) continue; }
+                if (round >= 3) { int b2 = (key >> 8) & 0xFF; if (b2 != prev_thr2) continue; }
+                int byte;
+                if (round == 1) byte = (key >> 16) & 0xFF; // b1
+                else if (round == 2) byte = (key >> 8) & 0xFF; // b2
+                else byte = key & 0xFF; // b3
+                atomicAdd(&hist_out[byte], 1u);
+            }
+        }
+        __syncthreads();
+    };
 
-    // Compute thr1 from h2 histogram
+    // Round 1 (b1)
+    __shared__ unsigned int h1[256];
+    build_hist(1, eq_count0_store, eq_count0_total, thr0, 0, 0, h1);
     __shared__ int thr1;
     if (threadIdx.x == 0) {
         unsigned int sum = 0; unsigned int need = remaining;
         thr1 = 255;
-        for (int b = 255; b >= 0; --b) {
-            unsigned int sgt = sum;
-            unsigned int eqb = h2[b];
-            if (sgt < need && sgt + eqb >= need) { thr1 = b; break; }
-            sum += eqb;
-        }
+        for (int b = 255; b >= 0; --b) { unsigned int sgt = sum; unsigned int eqb = h1[b]; if (sgt < need && sgt + eqb >= need) { thr1 = b; break; } sum += eqb; }
     }
     __syncthreads();
 
-    // Stage B: add items with b1>thr1 and build h3 over b1==thr1
-    __shared__ unsigned int h3[256];
-    for (int i = threadIdx.x; i < 256; i += blockDim.x) h3[i] = 0u;
-    __shared__ int eq2_count;
-    if (threadIdx.x == 0) eq2_count = 0;
-    __syncthreads();
-
-    if (!fallback_b1) {
-        for (int j = threadIdx.x; j < eq0_count; j += blockDim.x) {
+    // Select b1 > thr1; collect b1 == thr1 for next round
+    __shared__ int eq_count1_store; if (threadIdx.x == 0) eq_count1_store = 0; __shared__ int eq_count1_total; if (threadIdx.x == 0) eq_count1_total = 0; __syncthreads();
+    if (eq_count0_store == eq_count0_total && eq_count0_total <= eq_capacity) {
+        for (int j = threadIdx.x; j < eq_count0_store; j += blockDim.x) {
             int idx = eq_buf[j];
-            uint32_t key = float_to_key_desc(col[idx]);
+            uint32_t key = __float_as_uint(col[idx]); key = ((int32_t)key < 0) ? ~key : (key ^ 0x80000000u);
             int b1 = (key >> 16) & 0xFF;
-            if (b1 > thr1) {
-                int pos = atomicAdd(&sel_sofar, 1);
-                if (pos < k) idx_out[pos + k*t] = idx;
-            } else if (b1 == thr1) {
-                int b2 = (key >> 8) & 0xFF;
-                atomicAdd(&h3[b2], 1u);
-                int p = atomicAdd(&eq2_count, 1);
-                if (p < eq_capacity) eq_buf[p] = idx; // reuse eq_buf to store eq2 set
-            }
+            if (b1 > thr1) { int pos = atomicAdd(&sel_sofar, 1); if (pos < k) idx_out[pos + k*t] = idx; }
+            else if (b1 == thr1) { atomicAdd(&eq_count1_total, 1); int p = atomicAdd(&eq_count1_store, 1); if (p < eq_capacity) eq_buf[p] = idx; }
         }
     } else {
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
-            uint32_t key = float_to_key_desc(col[i]);
-            int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue;
-            int b1 = (key >> 16) & 0xFF;
-            if (b1 > thr1) {
-                int pos = atomicAdd(&sel_sofar, 1);
-                if (pos < k) idx_out[pos + k*t] = i;
-            } else if (b1 == thr1) {
-                int b2 = (key >> 8) & 0xFF;
-                atomicAdd(&h3[b2], 1u);
-                int p = atomicAdd(&eq2_count, 1);
-                if (p < eq_capacity) eq_buf[p] = i;
-            }
+            uint32_t raw = __float_as_uint(col[i]); uint32_t key = ((int32_t)raw < 0) ? ~raw : (raw ^ 0x80000000u);
+            int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue; int b1 = (key >> 16) & 0xFF;
+            if (b1 > thr1) { int pos = atomicAdd(&sel_sofar, 1); if (pos < k) idx_out[pos + k*t] = i; }
+            else if (b1 == thr1) { atomicAdd(&eq_count1_total, 1); int p = atomicAdd(&eq_count1_store, 1); if (p < eq_capacity) eq_buf[p] = i; }
         }
     }
     __syncthreads();
+    remaining = k - sel_sofar; if (remaining <= 0) return;
 
-    remaining = k - sel_sofar;
-    if (remaining <= 0) return;
-
-    // Compute thr2 on h3
+    // Round 2 (b2)
+    __shared__ unsigned int h2[256];
+    build_hist(2, eq_count1_store, eq_count1_total, thr0, thr1, 0, h2);
     __shared__ int thr2;
     if (threadIdx.x == 0) {
-        unsigned int sum = 0; unsigned int need = remaining;
-        thr2 = 255;
-        for (int b = 255; b >= 0; --b) {
-            unsigned int sgt = sum;
-            unsigned int eqb = h3[b];
-            if (sgt < need && sgt + eqb >= need) { thr2 = b; break; }
-            sum += eqb;
-        }
+        unsigned int sum = 0; unsigned int need = remaining; thr2 = 255;
+        for (int b = 255; b >= 0; --b) { unsigned int sgt = sum; unsigned int eqb = h2[b]; if (sgt < need && sgt + eqb >= need) { thr2 = b; break; } sum += eqb; }
     }
     __syncthreads();
 
-    // Stage C: add b2>thr2 from eq2 set (or fallback) and build pool of ==thr2
-    if (!fallback_b1) {
-        int lim = min(eq2_count, eq_capacity);
-        for (int j = threadIdx.x; j < lim; j += blockDim.x) {
-            int idx = eq_buf[j];
-            uint32_t key = float_to_key_desc(col[idx]);
-            int b2 = (key >> 8) & 0xFF;
-            if (b2 > thr2) {
-                int pos = atomicAdd(&sel_sofar, 1);
-                if (pos < k) idx_out[pos + k*t] = idx;
-            }
+    __shared__ int eq_count2_store; if (threadIdx.x == 0) eq_count2_store = 0; __shared__ int eq_count2_total; if (threadIdx.x == 0) eq_count2_total = 0; __syncthreads();
+    if (eq_count1_store == eq_count1_total && eq_count1_total <= eq_capacity) {
+        for (int j = threadIdx.x; j < eq_count1_store; j += blockDim.x) {
+            int idx = eq_buf[j]; uint32_t key = __float_as_uint(col[idx]); key = ((int32_t)key < 0) ? ~key : (key ^ 0x80000000u);
+            int b2 = (key >> 8) & 0xFF; if (b2 > thr2) { int pos = atomicAdd(&sel_sofar, 1); if (pos < k) idx_out[pos + k*t] = idx; }
+            else if (b2 == thr2) { atomicAdd(&eq_count2_total, 1); int p = atomicAdd(&eq_count2_store, 1); if (p < eq_capacity) eq_buf[p] = idx; }
         }
     } else {
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
-            uint32_t key = float_to_key_desc(col[i]);
-            int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue;
-            int b1 = (key >> 16) & 0xFF; if (b1 != thr1) continue;
-            int b2 = (key >> 8) & 0xFF; if (b2 <= thr2) continue;
-            int pos = atomicAdd(&sel_sofar, 1);
-            if (pos < k) idx_out[pos + k*t] = i;
+            uint32_t raw = __float_as_uint(col[i]); uint32_t key = ((int32_t)raw < 0) ? ~raw : (raw ^ 0x80000000u);
+            int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue; int b1 = (key >> 16) & 0xFF; if (b1 != thr1) continue; int b2 = (key >> 8) & 0xFF;
+            if (b2 > thr2) { int pos = atomicAdd(&sel_sofar, 1); if (pos < k) idx_out[pos + k*t] = i; }
+            else if (b2 == thr2) { atomicAdd(&eq_count2_total, 1); int p = atomicAdd(&eq_count2_store, 1); if (p < eq_capacity) eq_buf[p] = i; }
         }
+    }
+    __syncthreads(); remaining = k - sel_sofar; if (remaining <= 0) return;
+
+    // Round 3 (b3)
+    __shared__ unsigned int h3[256];
+    build_hist(3, eq_count2_store, eq_count2_total, thr0, thr1, thr2, h3);
+    __shared__ int thr3;
+    if (threadIdx.x == 0) {
+        unsigned int sum = 0; unsigned int need = remaining; thr3 = 255;
+        for (int b = 255; b >= 0; --b) { unsigned int sgt = sum; unsigned int eqb = h3[b]; if (sgt < need && sgt + eqb >= need) { thr3 = b; break; } sum += eqb; }
     }
     __syncthreads();
 
-    remaining = k - sel_sofar;
-    if (remaining <= 0) return;
-
-    // Prepare pool of b2 == thr2 candidates
-    __shared__ int pool_count;
-    if (threadIdx.x == 0) pool_count = 0;
-    __syncthreads();
-
-    if (!fallback_b1) {
-        int lim = min(eq2_count, eq_capacity);
-        for (int j = threadIdx.x; j < lim; j += blockDim.x) {
-            int idx = eq_buf[j];
-            uint32_t key = float_to_key_desc(col[idx]);
-            int b2 = (key >> 8) & 0xFF;
-            if (b2 == thr2) {
-                int p = atomicAdd(&pool_count, 1);
-                if (p < eq_capacity) eq_buf[p] = idx;
-            }
+    // Select b3>thr3
+    if (eq_count2_store == eq_count2_total && eq_count2_total <= eq_capacity) {
+        for (int j = threadIdx.x; j < eq_count2_store; j += blockDim.x) {
+            int idx = eq_buf[j]; uint32_t key = __float_as_uint(col[idx]); key = ((int32_t)key < 0) ? ~key : (key ^ 0x80000000u);
+            int b3 = key & 0xFF; if (b3 > thr3) { int pos = atomicAdd(&sel_sofar, 1); if (pos < k) idx_out[pos + k*t] = idx; }
         }
-        __syncthreads();
-        if (threadIdx.x == 0 && pool_count > eq_capacity) pool_count = eq_capacity;
-        __syncthreads();
     } else {
-        // Fallback: reduce equal third-byte candidates from full column
-        const int LOCAL_TOP = 4;
-        int loc_idx[LOCAL_TOP]; float loc_val[LOCAL_TOP];
-        for (int l = 0; l < LOCAL_TOP; ++l) { loc_idx[l] = -1; loc_val[l] = -1.0e30f; }
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
-            uint32_t key = float_to_key_desc(col[i]);
-            int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue;
-            int b1 = (key >> 16) & 0xFF; if (b1 != thr1) continue;
-            int b2 = (key >> 8) & 0xFF; if (b2 != thr2) continue;
-            float v = col[i];
-            int min_pos = 0; float min_val = loc_val[0];
-            for (int l = 1; l < LOCAL_TOP; ++l) if (loc_val[l] < min_val) { min_val = loc_val[l]; min_pos = l; }
-            if (v > min_val) { loc_val[min_pos] = v; loc_idx[min_pos] = i; }
+            uint32_t raw = __float_as_uint(col[i]); uint32_t key = ((int32_t)raw < 0) ? ~raw : (raw ^ 0x80000000u);
+            int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue; int b1 = (key >> 16) & 0xFF; if (b1 != thr1) continue; int b2 = (key >> 8) & 0xFF; if (b2 != thr2) continue; int b3 = key & 0xFF;
+            if (b3 > thr3) { int pos = atomicAdd(&sel_sofar, 1); if (pos < k) idx_out[pos + k*t] = i; }
         }
-        if (threadIdx.x == 0) pool_count = 0;
-        __syncthreads();
-        for (int l = 0; l < LOCAL_TOP; ++l) {
-            int idx = loc_idx[l];
-            if (idx >= 0) {
-                int p = atomicAdd(&pool_count, 1);
-                if (p < eq_capacity) eq_buf[p] = idx;
-            }
-        }
-        __syncthreads();
-        if (threadIdx.x == 0 && pool_count > eq_capacity) pool_count = eq_capacity;
-        __syncthreads();
     }
+    __syncthreads(); remaining = k - sel_sofar; if (remaining <= 0) return;
 
-    // Fill remaining from pool
-    for (int r = 0; r < remaining; ++r) {
-        __syncthreads();
-        float best_val = -1.0e30f; int best_idx = -1;
-        for (int i0 = threadIdx.x; i0 < pool_count; i0 += blockDim.x) {
-            int idx = eq_buf[i0]; if (idx < 0) continue;
-            float v = col[idx];
-            if (v > best_val || (v == best_val && idx < best_idx)) { best_val = v; best_idx = idx; }
+    // Final: fill equals of last byte up to remaining
+    if (eq_count2_store == eq_count2_total && eq_count2_total <= eq_capacity) {
+        for (int j = threadIdx.x; j < eq_count2_store; j += blockDim.x) {
+            if (remaining <= 0) break; // not atomic-safe but guarded by sel_sofar below
+            int idx = eq_buf[j]; uint32_t key = __float_as_uint(col[idx]); key = ((int32_t)key < 0) ? ~key : (key ^ 0x80000000u);
+            int b3 = key & 0xFF; if (b3 == thr3) { int pos = atomicAdd(&sel_sofar, 1); if (pos < k) idx_out[pos + k*t] = idx; }
         }
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            float v2 = __shfl_down_sync(0xffffffff, best_val, offset);
-            int   i2 = __shfl_down_sync(0xffffffff, best_idx, offset);
-            if (v2 > best_val || (v2 == best_val && i2 < best_idx)) { best_val = v2; best_idx = i2; }
+    } else {
+        for (int i = threadIdx.x; i < N; i += blockDim.x) {
+            if (remaining <= 0) break;
+            uint32_t raw = __float_as_uint(col[i]); uint32_t key = ((int32_t)raw < 0) ? ~raw : (raw ^ 0x80000000u);
+            int b0 = (key >> 24) & 0xFF; if (b0 != thr0) continue; int b1 = (key >> 16) & 0xFF; if (b1 != thr1) continue; int b2 = (key >> 8) & 0xFF; if (b2 != thr2) continue; int b3 = key & 0xFF; if (b3 != thr3) continue;
+            int pos = atomicAdd(&sel_sofar, 1); if (pos < k) idx_out[pos + k*t] = i;
         }
-        __shared__ float warp_best_val[32];
-        __shared__ int   warp_best_idx[32];
-        __shared__ int   s_selected;
-        int wid = threadIdx.x >> 5; int lane = threadIdx.x & 31;
-        if (lane == 0) { warp_best_val[wid] = best_val; warp_best_idx[wid] = best_idx; }
-        __syncthreads();
-        if (wid == 0) {
-            float bv = (threadIdx.x < (blockDim.x+31)/32) ? warp_best_val[lane] : -1.0e30f;
-            int   bi = (threadIdx.x < (blockDim.x+31)/32) ? warp_best_idx[lane] : -1;
-            for (int offset = 16; offset > 0; offset >>= 1) {
-                float v2 = __shfl_down_sync(0xffffffff, bv, offset);
-                int   i2 = __shfl_down_sync(0xffffffff, bi, offset);
-                if (v2 > bv || (v2 == bv && i2 < bi)) { bv = v2; bi = i2; }
-            }
-            if (lane == 0) {
-                s_selected = bi;
-                if (s_selected >= 0) {
-                    int pos = atomicAdd(&sel_sofar, 1);
-                    if (pos < k) idx_out[pos + k*t] = s_selected;
-                }
-            }
-        }
-        __syncthreads();
-        if (s_selected >= 0) {
-            for (int j = threadIdx.x; j < pool_count; j += blockDim.x) {
-                if (eq_buf[j] == s_selected) { eq_buf[j] = -1; }
-            }
-        }
-        __syncthreads();
     }
+    __syncthreads();
+
 }
+
 
 void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
                                          const float * scores_d, int N, int T, int k,
