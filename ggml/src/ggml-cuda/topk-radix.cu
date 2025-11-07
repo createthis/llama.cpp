@@ -1,14 +1,33 @@
 #include "topk-radix.cuh"
+#include "common.cuh"
+
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include <stdio.h>
 #include "../../include/ggml-cuda-radix.h"
+#include <stdlib.h>
+
 #ifndef SEL_DEBUG
 #define SEL_DEBUG 0
 #endif
 #ifndef SEL_DEBUG_COL
 #define SEL_DEBUG_COL 0
 #endif
+static inline __host__ __device__ int env_threads_or_default(const char * name, int deflt) {
+    int v = deflt;
+#ifndef __CUDA_ARCH__
+    const char * e = getenv(name);
+    if (e && *e) {
+        int t = atoi(e);
+        if (t > 0) v = t;
+    }
+#endif
+    if (v < 128) v = 128;
+    if (v > 1024) v = 1024;
+    v = (v + 31) & ~31;
+    return v;
+}
+
 
 
 // float -> key mapping ascending; to get descending selection we pick largest keys
@@ -41,10 +60,26 @@ static __global__ void k_histogram_topbyte(const float * __restrict__ scores,
     const float * col = scores + (size_t)ld * t;
     // accumulate per-warp histograms
     uint32_t * my_hist = hist_warp + ((threadIdx.x >> 5) * 256);
-    for (int i = threadIdx.x; i < N; i += blockDim.x) {
-        uint32_t key = float_to_key_desc(col[i]);
+    int i4 = threadIdx.x * 4;
+    for (; i4 + 3 < N; i4 += blockDim.x * 4) {
+        float4 v = *((const float4 *)(col + i4));
+        uint32_t k0 = float_to_key_desc(v.x);
+        uint32_t k1 = float_to_key_desc(v.y);
+        uint32_t k2 = float_to_key_desc(v.z);
+        uint32_t k3 = float_to_key_desc(v.w);
+        atomicAdd(&my_hist[(k0 >> 24) & 0xFFu], 1u);
+        atomicAdd(&my_hist[(k1 >> 24) & 0xFFu], 1u);
+        atomicAdd(&my_hist[(k2 >> 24) & 0xFFu], 1u);
+        atomicAdd(&my_hist[(k3 >> 24) & 0xFFu], 1u);
+    }
+    int rem = N & 3;
+    int tail_start = N - rem;
+    int li = tail_start + threadIdx.x;
+    if (threadIdx.x < rem && li < N) {
+        uint32_t key = float_to_key_desc(col[li]);
         atomicAdd(&my_hist[(key >> 24) & 0xFFu], 1u);
     }
+
     __syncthreads();
 
     // reduce to final hist
@@ -67,15 +102,16 @@ static __global__ void k_histogram_topbyte(const float * __restrict__ scores,
 
 
 // select indices > threshold bin and collect equals for tail passes; simplified single-pass fallback uses argsort for small N
+
+// select indices > threshold bin and collect equals for tail passes
 static __global__ void k_select_topk_bins(const float * __restrict__ scores,
-                                             int N, int T, int ld, int k, int eq_capacity,
-                                             const uint32_t * __restrict__ gt_counts, // [256, T]
-                                             int * __restrict__ idx_out) {
+                                          int N, int T, int ld, int k, int eq_capacity,
+                                          const uint32_t * __restrict__ gt_counts, // [256, T]
+                                          int * __restrict__ idx_out) {
     int t = blockIdx.x;
     if (t >= T) return;
 
     const float * col = scores + (size_t)ld * t;
-    // initialize output indices defensively to 0
     if (threadIdx.x == 0) {
         for (int i = 0; i < k; ++i) idx_out[i + k*t] = 0;
     }
@@ -94,13 +130,10 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         uint32_t sgt = gt_counts[thr0 + 256*t];
         uint32_t prev = (thr0 == 0 ? (uint32_t)N : gt_counts[(thr0 - 1) + 256*t]);
         uint32_t eq   = prev - gt_counts[thr0 + 256*t];
-        printf("[t=%d] thr0=%d sgt=%u eq=%u k=%d
-", t, thr0, sgt, eq, k);
+        printf("[t=%d] thr0=%d sgt=%u eq=%u k=%d\n", t, thr0, sgt, eq, k);
     }
 #endif
 
-    // Stage A: single streaming pass to (1) take items with b0>thr0 up to take_gt0
-    // and (2) collect b0==thr0 candidates while building next-byte histogram h2
     uint32_t sgt0 = gt_counts[thr0 + 256*t];
     int take_gt0 = min(k, (int)sgt0);
 
@@ -117,15 +150,42 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     for (int i = threadIdx.x; i < 256; i += blockDim.x) h2[i] = 0u;
     __syncthreads();
 
-    for (int i = threadIdx.x; i < N; i += blockDim.x) {
-        uint32_t key = float_to_key_desc(col[i]);
+    // Vectorized Stage A streaming pass
+    int i4 = threadIdx.x * 4;
+    for (; i4 + 3 < N; i4 += blockDim.x * 4) {
+        float4 v = *((const float4 *)(col + i4));
+        uint32_t k0 = float_to_key_desc(v.x);
+        uint32_t k1 = float_to_key_desc(v.y);
+        uint32_t k2 = float_to_key_desc(v.z);
+        uint32_t k3 = float_to_key_desc(v.w);
+        uint32_t arr[4] = {k0,k1,k2,k3};
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            int idx = i4 + j;
+            int b0 = (arr[j] >> 24) & 0xFF;
+            if (b0 > thr0) {
+                int pos = atomicAdd(&sel_gt0, 1);
+                if (pos < take_gt0) idx_out[pos + k*t] = idx;
+            } else if (b0 == thr0) {
+                int p = atomicAdd(&eq0_count, 1);
+                if (p < eq_capacity) eq_buf[p] = idx;
+                int b1 = (arr[j] >> 16) & 0xFF;
+                atomicAdd(&h2[b1], 1u);
+            }
+        }
+    }
+    int rem = N & 3;
+    int tail_start = N - rem;
+    int ti = tail_start + threadIdx.x;
+    if (threadIdx.x < rem && ti < N) {
+        uint32_t key = float_to_key_desc(col[ti]);
         int b0 = (key >> 24) & 0xFF;
         if (b0 > thr0) {
             int pos = atomicAdd(&sel_gt0, 1);
-            if (pos < take_gt0) idx_out[pos + k*t] = i;
+            if (pos < take_gt0) idx_out[pos + k*t] = ti;
         } else if (b0 == thr0) {
             int p = atomicAdd(&eq0_count, 1);
-            if (p < eq_capacity) eq_buf[p] = i;
+            if (p < eq_capacity) eq_buf[p] = ti;
             int b1 = (key >> 16) & 0xFF;
             atomicAdd(&h2[b1], 1u);
         }
@@ -333,8 +393,6 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     }
 }
 
-
-
 void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
                                          const float * scores_d, int N, int T, int k,
                                          int * idx_d) {
@@ -345,12 +403,12 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
     cudaMalloc(&gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T);
     cudaMalloc(&thr_bins_d,  sizeof(uint32_t) * (size_t)T);
 
-    const int hist_threads = 1024;
+    const int hist_threads = env_threads_or_default("LLAMA_SPARSE_TOPK_THREADS", 1024);
     const size_t hist_shmem = (size_t)(((hist_threads/32) + 1) * 256) * sizeof(uint32_t);
     k_histogram_topbyte<<<T, hist_threads, hist_shmem, stream>>>(scores_d, N, T, /*ld=*/N, thr_bins_d, gt_counts_d);
 
     // Equal-bin selection kernel; bound dynamic shared memory to device limit
-    const int sel_threads = 1024;
+    const int sel_threads = hist_threads;
     // Conservative eq buffer capacity to avoid exceeding per-block shared mem
     int cap_env = 0;
     const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
@@ -358,6 +416,7 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
     int cap_default = 4096;
     const int eq_cap = max(k, min(N, cap_env ? cap_env : cap_default));
     size_t sel_shmem = (size_t) eq_cap * sizeof(int);
+    CUDA_SET_SHARED_MEMORY_LIMIT(k_select_topk_bins, (int)sel_shmem);
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap, gt_counts_d, idx_d);
 
     cudaFree(gt_counts_d);
@@ -393,7 +452,7 @@ extern "C" void ggml_cuda_topk_histogram_host(const float * scores_h, int N, int
 
     cudaMemcpyAsync(scores_d, scores_h, sizeof(float) * (size_t)N * T, cudaMemcpyHostToDevice, stream);
 
-    const int hist_threads = 1024;
+    const int hist_threads = env_threads_or_default("LLAMA_SPARSE_TOPK_THREADS", 1024);
     const size_t hist_shmem = (size_t)(((hist_threads/32) + 1) * 256) * sizeof(uint32_t);
     k_histogram_topbyte<<<T, hist_threads, hist_shmem, stream>>>(scores_d, N, T, /*ld=*/N, thr_bins_d, gt_counts_d);
 
@@ -420,12 +479,13 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
     cudaMemcpyAsync(scores_d, scores_h, sizeof(float) * (size_t)N * T, cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(gt_counts_d, gt_counts_h, sizeof(uint32_t) * 256 * (size_t)T, cudaMemcpyHostToDevice, stream);
 
-    const int sel_threads = 1024;
+    const int sel_threads = env_threads_or_default("LLAMA_SPARSE_TOPK_THREADS", 1024);
     int cap_env = 0; const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
     if (env_cap) { cap_env = atoi(env_cap); if (cap_env < 0) cap_env = 0; }
     int cap_default = 4096;
     const int eq_cap_host = max(k, min(N, cap_env ? cap_env : cap_default));
     const size_t sel_shmem = (size_t) eq_cap_host * sizeof(int);
+    CUDA_SET_SHARED_MEMORY_LIMIT(k_select_topk_bins, (int)sel_shmem);
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap_host, gt_counts_d, idx_d);
 
     cudaMemcpyAsync(idx_h, idx_d, sizeof(int) * (size_t)k * T, cudaMemcpyDeviceToHost, stream);

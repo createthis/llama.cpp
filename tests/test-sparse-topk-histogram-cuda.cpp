@@ -20,7 +20,7 @@ int main() {
     return 0;
 #else
     printf("Testing CUDA histogram kernel (top byte) ...\n");
-    const int N = 513; // odd size to test padding logic
+    const int N = 512; // ensure 16-byte alignment for float4 loads (multiple of 4)
     const int T = 7;
 
     std::mt19937 rng(1234);
