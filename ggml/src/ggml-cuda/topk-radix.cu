@@ -481,33 +481,38 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
                                          int * idx_d) {
     cudaStream_t stream = ctx.stream();
     const char * impl = getenv("LLAMA_SPARSE_TOPK_IMPL");
-    if (impl && strcmp(impl, "block") == 0) {
+    if (impl && strcmp(impl, "orig") == 0) {
+        fprintf(stderr, "orig");
+        fflush(stderr);
+        // default radix path (existing)
+        uint32_t * gt_counts_d = nullptr;
+        uint32_t * thr_bins_d  = nullptr;
+        cudaMalloc(&gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T);
+        cudaMalloc(&thr_bins_d,  sizeof(uint32_t) * (size_t)T);
+
+        const int hist_threads = 256;
+        const size_t hist_shmem = 256 * sizeof(uint32_t);
+        k_histogram_topbyte<<<T, hist_threads, hist_shmem, stream>>>(scores_d, N, T, /*ld=*/N, thr_bins_d, gt_counts_d);
+
+        const int sel_threads = 1024;
+        int cap_env = 0;
+        const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
+        if (env_cap) { cap_env = atoi(env_cap); if (cap_env < 0) cap_env = 0; }
+        int cap_default = 4096;
+        const int eq_cap = max(k, min(N, cap_env ? cap_env : cap_default));
+        size_t sel_shmem = (size_t) eq_cap * sizeof(int);
+        k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap, gt_counts_d, idx_d);
+
+        cudaFree(gt_counts_d);
+        cudaFree(thr_bins_d);
+    } else {
+        fprintf(stderr, "block");
+        fflush(stderr);
         // one-pass block select
         const int threads = 1024;
         k_block_select_topk<<<T, threads, 0, stream>>>(scores_d, N, T, /*ld=*/N, k, idx_d);
         return;
     }
-    // default radix path (existing)
-    uint32_t * gt_counts_d = nullptr;
-    uint32_t * thr_bins_d  = nullptr;
-    cudaMalloc(&gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T);
-    cudaMalloc(&thr_bins_d,  sizeof(uint32_t) * (size_t)T);
-
-    const int hist_threads = 256;
-    const size_t hist_shmem = 256 * sizeof(uint32_t);
-    k_histogram_topbyte<<<T, hist_threads, hist_shmem, stream>>>(scores_d, N, T, /*ld=*/N, thr_bins_d, gt_counts_d);
-
-    const int sel_threads = 1024;
-    int cap_env = 0;
-    const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
-    if (env_cap) { cap_env = atoi(env_cap); if (cap_env < 0) cap_env = 0; }
-    int cap_default = 4096;
-    const int eq_cap = max(k, min(N, cap_env ? cap_env : cap_default));
-    size_t sel_shmem = (size_t) eq_cap * sizeof(int);
-    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap, gt_counts_d, idx_d);
-
-    cudaFree(gt_counts_d);
-    cudaFree(thr_bins_d);
 }
 
 
