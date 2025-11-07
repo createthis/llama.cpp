@@ -2,6 +2,8 @@
 #include "common.cuh"
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
+
 #include <stdint.h>
 #include <stdio.h>
 #include "../../include/ggml-cuda-radix.h"
@@ -28,17 +30,15 @@ static inline __host__ __device__ int env_threads_or_default(const char * name, 
     return v;
 }
 
-
-
-// float -> key mapping ascending; to get descending selection we pick largest keys
-static __device__ __forceinline__ uint32_t float_to_key_desc(float x) {
+// Key32-based MSB bin for descending order: transform float to lexicographic-descending key and take high byte
+static __device__ __forceinline__ uint32_t key32_desc(float x) {
     uint32_t u = __float_as_uint(x);
-    if ((int32_t)u < 0) {
-        return ~u;
-    } else {
-        return u ^ 0x80000000u;
-    }
+    return ((int32_t)u < 0) ? ~u : (u ^ 0x80000000u);
 }
+static __device__ __forceinline__ uint8_t key32_msb_bin_desc(float x) {
+    return (uint8_t)(key32_desc(x) >> 24);
+}
+
 
 // Compute K-th threshold bin for top byte of keys of a given column
 // Here we implement a block-per-column approach where each block processes N elements.
@@ -65,26 +65,33 @@ static __global__ void k_histogram_topbyte(const float * __restrict__ scores,
         int i4 = threadIdx.x * 4;
         for (; i4 + 3 < N; i4 += blockDim.x * 4) {
             float4 v = *((const float4 *)(col + i4));
-            uint32_t k0 = float_to_key_desc(v.x);
-            uint32_t k1 = float_to_key_desc(v.y);
-            uint32_t k2 = float_to_key_desc(v.z);
-            uint32_t k3 = float_to_key_desc(v.w);
-            atomicAdd(&my_hist[(k0 >> 24) & 0xFFu], 1u);
-            atomicAdd(&my_hist[(k1 >> 24) & 0xFFu], 1u);
-            atomicAdd(&my_hist[(k2 >> 24) & 0xFFu], 1u);
-            atomicAdd(&my_hist[(k3 >> 24) & 0xFFu], 1u);
+            uint8_t b0_0 = key32_msb_bin_desc(v.x);
+            uint8_t b0_1 = key32_msb_bin_desc(v.y);
+            uint8_t b0_2 = key32_msb_bin_desc(v.z);
+            uint8_t b0_3 = key32_msb_bin_desc(v.w);
+            if (b0_0==b0_1 && b0_1==b0_2 && b0_2==b0_3) {
+                atomicAdd(&my_hist[b0_0], 4u);
+            } else if (b0_0==b0_1 && b0_2==b0_3) {
+                atomicAdd(&my_hist[b0_0], 2u);
+                atomicAdd(&my_hist[b0_2], 2u);
+            } else {
+                atomicAdd(&my_hist[b0_0], 1u);
+                atomicAdd(&my_hist[b0_1], 1u);
+                atomicAdd(&my_hist[b0_2], 1u);
+                atomicAdd(&my_hist[b0_3], 1u);
+            }
         }
         int rem = N & 3;
         int tail_start = N - rem;
         int li = tail_start + threadIdx.x;
         if (threadIdx.x < rem && li < N) {
-            uint32_t key = float_to_key_desc(col[li]);
-            atomicAdd(&my_hist[(key >> 24) & 0xFFu], 1u);
+            uint8_t b0 = key32_msb_bin_desc(col[li]);
+            atomicAdd(&my_hist[b0], 1u);
         }
     } else {
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
-            uint32_t key = float_to_key_desc(col[i]);
-            atomicAdd(&my_hist[(key >> 24) & 0xFFu], 1u);
+            uint8_t b0 = key32_msb_bin_desc(col[i]);
+            atomicAdd(&my_hist[b0], 1u);
         }
     }
     __syncthreads();
@@ -108,8 +115,6 @@ static __global__ void k_histogram_topbyte(const float * __restrict__ scores,
 }
 
 
-// select indices > threshold bin and collect equals for tail passes; simplified single-pass fallback uses argsort for small N
-
 // select indices > threshold bin and collect equals for tail passes
 static __global__ void k_select_topk_bins(const float * __restrict__ scores,
                                           int N, int T, int ld, int k, int eq_capacity,
@@ -119,8 +124,9 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     int t = blockIdx.x;
     if (t >= T) return;
     const float * col = scores + (size_t)ld * t;
+    // initialize output indices to -1 to avoid mistaking zeros as valid index 0
     if (threadIdx.x == 0) {
-        for (int i = 0; i < k; ++i) idx_out[i + k*t] = 0;
+        for (int i = 0; i < k; ++i) idx_out[i + k*t] = -1;
     }
     __syncthreads();
 
@@ -142,10 +148,19 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     __shared__ unsigned int pw_final[256];
     int warp_count = (blockDim.x + 31) >> 5;
     __shared__ int sel_sofar;
+#if SEL_DEBUG
+    __shared__ int sel_before_R1;
+    __shared__ int sel_before_R2;
+#endif
     if (threadIdx.x == 0) sel_sofar = 0;
     __syncthreads();
     uint32_t sgt0 = gt_counts[thr0 + 256*t];
     int take_gt0 = min(k, (int)sgt0);
+#if SEL_DEBUG
+    if (threadIdx.x == 0 && (SEL_DEBUG_COL==0 || blockIdx.x == SEL_DEBUG_COL)) {
+        printf("[SEL] t=%d thr0=%d sgt0=%u k=%d\n", t, thr0, sgt0, k);
+    }
+#endif
 
     extern __shared__ int s_eq[];
     int *eq0 = s_eq;
@@ -159,29 +174,38 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     // Select b0>thr0; collect b0==thr0 into eq0 (store up to capacity), track total
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
         uint32_t raw = __float_as_uint(col[i]);
-        uint32_t key = ((int32_t)raw < 0) ? ~raw : (raw ^ 0x80000000u);
-        int b0 = (key >> 24) & 0xFF;
-        if (b0 > thr0) { int pos = atomicAdd(&sel_sofar, 1);
+        int b0 = (int)key32_msb_bin_desc(__uint_as_float(raw));
+        if (b0 > thr0) {
+            int pos = atomicAdd(&sel_sofar, 1);
             if (pos < take_gt0) idx_out[pos + k*t] = i;
-        } else if (b0 == thr0) { atomicAdd(&eq0_total, 1);
+        } else if (b0 == thr0) {
+            atomicAdd(&eq0_total, 1);
             int p = atomicAdd(&eq0_store, 1);
             if (p < eq_capacity) eq0[p] = i;
         }
     }
     __syncthreads();
+#if SEL_DEBUG
+    if (threadIdx.x == 0 && (SEL_DEBUG_COL==0 || blockIdx.x == SEL_DEBUG_COL)) {
+        printf("[SEL] after R0: eq0_total=%d eq0_store=%d sel_sofar=%d take_gt0=%d\n", eq0_total, eq0_store, sel_sofar, take_gt0);
+    }
+#endif
     if (threadIdx.x == 0) sel_sofar = take_gt0;
     __syncthreads();
     int remaining = k - sel_sofar;
-    if (remaining <= 0) return;
+#if SEL_DEBUG
+    if (threadIdx.x == 0) sel_before_R1 = sel_sofar;
+#endif
+    __syncthreads();
 
     // Round 1: build h1 over b1 on eq0 if fully stored, else scan full column with b0==thr0
     __shared__ unsigned int h1[256];
     for (int i = threadIdx.x; i < 256; i += blockDim.x) h1[i] = 0u;
     __syncthreads();
-    if (eq0_store == eq0_total && eq0_total <= eq_capacity) {
-        for (int j = threadIdx.x;
-                j < eq0_store;
-                j += blockDim.x) { int idx = eq0[j];
+    if (eq0_total <= eq_capacity) {
+        int lim0 = min(eq0_store, eq_capacity);
+        for (int j = threadIdx.x; j < lim0; j += blockDim.x) {
+            int idx = eq0[j];
             uint32_t raw = __float_as_uint(col[idx]);
             uint32_t key = ((int32_t)raw < 0)?~raw:(raw^0x80000000u);
             int b1 = (key>>16)&0xFF;
@@ -191,8 +215,8 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
             uint32_t raw = __float_as_uint(col[i]);
             uint32_t key = ((int32_t)raw < 0)?~raw:(raw^0x80000000u);
-            int b0 = (key>>24)&0xFF;
-            if (b0!=thr0) continue;
+            int b0c = (int)key32_msb_bin_desc(__uint_as_float(raw));
+            if (b0c!=thr0) continue;
             int b1=(key>>16)&0xFF;
             atomicAdd(&h1[b1],1u);
         }
@@ -213,6 +237,15 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         }
     }
     __syncthreads();
+#if SEL_DEBUG
+      if (threadIdx.x == 0 && (SEL_DEBUG_COL==0 || blockIdx.x == SEL_DEBUG_COL)) {
+          unsigned int sum_h1 = 0;
+          for (int b = 0; b < 256; ++b) sum_h1 += h1[b];
+          printf("[SEL] R1: thr1=%d remaining=%d path=%s sum_h1=%u eq0_total=%d eq0_store=%d\n",
+                 thr1, remaining, (eq0_total <= eq_capacity) ? "buf" : "fallback", sum_h1, eq0_total, eq0_store);
+      }
+#endif
+
 
     // Select b1>thr1; collect b1==thr1 into eq1
     __shared__ int eq1_store;
@@ -220,8 +253,9 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     __shared__ int eq1_total;
     if (threadIdx.x == 0) eq1_total = 0;
     __syncthreads();
-    if (eq0_store == eq0_total && eq0_total <= eq_capacity) {
-        for (int j = threadIdx.x; j < eq0_store; j += blockDim.x) {
+    if (eq0_total <= eq_capacity) {
+        int lim0 = min(eq0_store, eq_capacity);
+        for (int j = threadIdx.x; j < lim0; j += blockDim.x) {
             int idx = eq0[j];
             uint32_t raw = __float_as_uint(col[idx]);
             uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
@@ -232,6 +266,13 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
             } else if(b1==thr1){
                 atomicAdd(&eq1_total,1);
                 int p=atomicAdd(&eq1_store,1);
+#if SEL_DEBUG
+                if (threadIdx.x == 0 && (SEL_DEBUG_COL==0 || blockIdx.x == SEL_DEBUG_COL)) {
+                    printf("[SEL] R1 buf select end: sel_sofar=%d emitted=%d eq1_total=%d eq1_store=%d\n",
+                            sel_sofar, sel_sofar - sel_before_R1, eq1_total, eq1_store);
+                }
+#endif
+
                 if(p<eq_capacity) eq1[p]=idx;
             }
         }
@@ -239,13 +280,19 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
             uint32_t raw=__float_as_uint(col[i]);
             uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
-            int b0=(key>>24)&0xFF;
-            if(b0!=thr0) continue;
+            int b0c=(int)key32_msb_bin_desc(__uint_as_float(raw));
+            if(b0c!=thr0) continue;
             int b1=(key>>16)&0xFF;
             if(b1>thr1){
                 int pos=atomicAdd(&sel_sofar,1);
                 if(pos<k) idx_out[pos+k*t]=i;
             } else if(b1==thr1){
+#if SEL_DEBUG
+                if (threadIdx.x == 0 && (SEL_DEBUG_COL==0 || blockIdx.x == SEL_DEBUG_COL)) {
+                    printf("[SEL] after R1 select: sel_sofar=%d eq1_total=%d eq1_store=%d\n", sel_sofar, eq1_total, eq1_store);
+                }
+#endif
+
                 atomicAdd(&eq1_total,1);
                 int p=atomicAdd(&eq1_store,1);
                 if(p<eq_capacity) eq1[p]=i;
@@ -255,13 +302,19 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     __syncthreads();
     remaining = k - sel_sofar;
     if (remaining <= 0) return;
+#if SEL_DEBUG
+    if (threadIdx.x == 0) sel_before_R2 = sel_sofar;
+#endif
+    __syncthreads();
+
 
     // Round 2: histogram on b2 using per-warp hist
     for (int i = threadIdx.x; i < 32*256; i += blockDim.x) pw_hist[i] = 0u;
     for (int i = threadIdx.x; i < 256; i += blockDim.x) pw_final[i] = 0u;
     __syncthreads();
-    if (eq1_store == eq1_total && eq1_total <= eq_capacity) {
-        for (int j = threadIdx.x; j < eq1_store; j += blockDim.x) {
+    if (eq1_total <= eq_capacity) {
+        int lim1 = min(eq1_store, eq_capacity);
+        for (int j = threadIdx.x; j < lim1; j += blockDim.x) {
             int idx=eq1[j];
             uint32_t raw=__float_as_uint(col[idx]);
             uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
@@ -272,8 +325,8 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
             uint32_t raw=__float_as_uint(col[i]);
             uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
-            int b0=(key>>24)&0xFF;
-            if(b0!=thr0) continue;
+            int b0c=(int)key32_msb_bin_desc(__uint_as_float(raw));
+            if(b0c!=thr0) continue;
             int b1=(key>>16)&0xFF;
             if(b1!=thr1) continue;
             int b2=(key>>8)&0xFF;
@@ -303,14 +356,20 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         }
     }
     __syncthreads();
+#if SEL_DEBUG
+    if (threadIdx.x == 0 && (SEL_DEBUG_COL==0 || blockIdx.x == SEL_DEBUG_COL)) {
+        printf("[SEL] thr2=%d remaining=%d (R2 path=%s)\n", thr2, remaining, (eq1_store==eq1_total && eq1_total<=eq_capacity)?"buf":"fallback");
+    }
+#endif
 
     // Select b2>thr2; collect b2==thr2 back into eq0 (ping-pong)
     if (threadIdx.x == 0) eq0_store = 0;
     __shared__ int eq2_total;
     if (threadIdx.x == 0) eq2_total = 0;
     __syncthreads();
-    if (eq1_store == eq1_total && eq1_total <= eq_capacity) {
-        for (int j = threadIdx.x; j < eq1_store; j += blockDim.x) {
+    if (eq1_total <= eq_capacity) {
+        int lim1 = min(eq1_store, eq_capacity);
+        for (int j = threadIdx.x; j < lim1; j += blockDim.x) {
             int idx=eq1[j];
             uint32_t raw=__float_as_uint(col[idx]);
             uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
@@ -324,12 +383,19 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
                 if(p<eq_capacity) eq0[p]=idx;
             }
         }
+        __syncthreads();
+#if SEL_DEBUG
+        if (threadIdx.x == 0 && (SEL_DEBUG_COL==0 || blockIdx.x == SEL_DEBUG_COL)) {
+            printf("[SEL] R2 buf end: sel_sofar=%d emitted=%d eq2_total=%d eq0_store=%d lim1=%d eq1_store=%d eq1_total=%d\n",
+                    sel_sofar, sel_sofar - sel_before_R2, eq2_total, eq0_store, lim1, eq1_store, eq1_total);
+        }
+#endif
     } else {
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
             uint32_t raw=__float_as_uint(col[i]);
             uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
-            int b0=(key>>24)&0xFF;
-            if(b0!=thr0) continue;
+            int b0c=(int)key32_msb_bin_desc(__uint_as_float(raw));
+            if(b0c!=thr0) continue;
             int b1=(key>>16)&0xFF;
             if(b1!=thr1) continue;
             int b2=(key>>8)&0xFF;
@@ -347,12 +413,13 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     remaining = k - sel_sofar;
     if (remaining <= 0) return;
 
-    // Round 3: histogram on b3 using per-warp hist
+    // Round 3: histogram on b2 (third byte) using per-warp hist
     for (int i = threadIdx.x; i < 32*256; i += blockDim.x) pw_hist[i] = 0u;
     for (int i = threadIdx.x; i < 256; i += blockDim.x) pw_final[i] = 0u;
     __syncthreads();
-    if (eq0_store == eq2_total && eq2_total <= eq_capacity) {
-        for (int j = threadIdx.x; j < eq0_store; j += blockDim.x) {
+    if (eq2_total <= eq_capacity) {
+        int lim0 = min(eq0_store, eq_capacity);
+        for (int j = threadIdx.x; j < lim0; j += blockDim.x) {
             int idx=eq0[j];
             uint32_t raw=__float_as_uint(col[idx]);
             uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
@@ -363,8 +430,8 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
             uint32_t raw=__float_as_uint(col[i]);
             uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
-            int b0=(key>>24)&0xFF;
-            if(b0!=thr0) continue;
+            int b0c=(int)key32_msb_bin_desc(__uint_as_float(raw));
+            if(b0c!=thr0) continue;
             int b1=(key>>16)&0xFF;
             if(b1!=thr1) continue;
             int b2=(key>>8)&0xFF;
@@ -396,14 +463,20 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         }
     }
     __syncthreads();
+#if SEL_DEBUG
+    if (threadIdx.x == 0 && (SEL_DEBUG_COL==0 || blockIdx.x == SEL_DEBUG_COL)) {
+        printf("[SEL] thr3=%d remaining=%d (R3 path=%s)\n", thr3, remaining, (eq0_store==eq2_total && eq2_total<=eq_capacity)?"buf":"fallback");
+    }
+#endif
 
     // Select b3>thr3; collect b3==thr3 into eq1
     if (threadIdx.x == 0) eq1_store = 0;
     __shared__ int eq3_total;
     if (threadIdx.x == 0) eq3_total = 0;
     __syncthreads();
-    if (eq0_store == eq2_total && eq2_total <= eq_capacity) {
-        for (int j = threadIdx.x; j < eq0_store; j += blockDim.x) {
+    if (eq2_total <= eq_capacity) {
+        int lim0 = min(eq0_store, eq_capacity);
+        for (int j = threadIdx.x; j < lim0; j += blockDim.x) {
             int idx=eq0[j];
             uint32_t raw=__float_as_uint(col[idx]);
             uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
@@ -415,14 +488,35 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
                 atomicAdd(&eq3_total,1);
                 int p=atomicAdd(&eq1_store,1);
                 if(p<eq_capacity) eq1[p]=idx;
+#if SEL_DEBUG
+                if (threadIdx.x == 0 && (SEL_DEBUG_COL==0 || blockIdx.x == SEL_DEBUG_COL)) {
+                    printf("[SEL] indices for t=%d:\n", t);
+                    for (int i = 0; i < k; ++i) {
+                        int idx = idx_out[i + k*t];
+                        if (idx >= 0 && idx < N) {
+                            float v = col[idx];
+                            unsigned int raw = __float_as_uint(v);
+                            unsigned int key = ((int)raw < 0) ? ~raw : (raw ^ 0x80000000u);
+                            int b0 = (int)key32_msb_bin_desc(v);
+                            int b1 = (key >> 16) & 0xFF;
+                            int b2 = (key >> 8) & 0xFF;
+                            int b3 = key & 0xFF;
+                            printf("(%d:%.5f b0=%d b1=%d b2=%d b3=%d)\n", idx, v, b0, b1, b2, b3);
+                        } else {
+                            printf("(%d:invalid)\n", idx);
+                        }
+                    }
+                    printf("\n");
+                }
+#endif
             }
         }
     } else {
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
             uint32_t raw=__float_as_uint(col[i]);
             uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
-            int b0=(key>>24)&0xFF;
-            if(b0!=thr0) continue;
+            int b0c=(int)key32_msb_bin_desc(__uint_as_float(raw));
+            if(b0c!=thr0) continue;
             int b1=(key>>16)&0xFF;
             if(b1!=thr1) continue;
             int b2=(key>>8)&0xFF;
@@ -444,7 +538,8 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
 
     // Final: fill remaining from equals (eq1) or scan predicated if overflow
     if (eq1_store == eq3_total && eq3_total <= eq_capacity) {
-        for (int j = threadIdx.x; j < eq1_store; j += blockDim.x) {
+        int lim1 = min(eq1_store, eq_capacity);
+        for (int j = threadIdx.x; j < lim1; j += blockDim.x) {
             int idx=eq1[j];
             int pos=atomicAdd(&sel_sofar,1);
             if (pos < k) idx_out[pos + k*t] = idx;
@@ -453,19 +548,46 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
             uint32_t raw=__float_as_uint(col[i]);
             uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
-            int b0=(key>>24)&0xFF;
-            if(b0!=thr0) continue;
+            int b0c=(int)key32_msb_bin_desc(__uint_as_float(raw));
+            if(b0c!=thr0) continue;
             int b1=(key>>16)&0xFF;
             if(b1!=thr1) continue;
             int b2=(key>>8)&0xFF;
             if(b2!=thr2) continue;
             int b3= key & 0xFF;
+#if SEL_DEBUG
+            if (threadIdx.x == 0 && (SEL_DEBUG_COL==0 || blockIdx.x == SEL_DEBUG_COL)) {
+                printf("[SEL] final indices t=%d: ", t);
+                for (int i = 0; i < k; ++i) {
+                    int idx = idx_out[i + k*t];
+                    if (idx >= 0 && idx < N) {
+                        float v = col[idx];
+                        unsigned int raw = __float_as_uint(v);
+                        unsigned int key = ((int)raw < 0) ? ~raw : (raw ^ 0x80000000u);
+                        int b0 = (int)key32_msb_bin_desc(v);
+                        int b1 = (key >> 16) & 0xFF;
+                        int b2 = (key >> 8) & 0xFF;
+                        int b3 = key & 0xFF;
+                        printf("(%d:%.5f b0=%d b1=%d b2=%d b3=%d) ", idx, v, b0, b1, b2, b3);
+                    } else {
+                        printf("(%d:invalid) ", idx);
+                    }
+                }
+                printf("\n");
+            }
+#endif
+
             if(b3!=thr3) continue;
             int pos=atomicAdd(&sel_sofar,1);
             if (pos < k) idx_out[pos + k*t] = i;
         }
     }
     __syncthreads();
+#if SEL_DEBUG
+    if (threadIdx.x == 0 && (SEL_DEBUG_COL==0 || blockIdx.x == SEL_DEBUG_COL)) {
+        printf("[SEL] final sel_sofar=%d\n", sel_sofar);
+    }
+#endif
 }
 
 
@@ -490,7 +612,10 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
     // Conservative eq buffer capacity to avoid exceeding per-block shared mem
     int cap_env = 0;
     const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
-    if (env_cap) { cap_env = atoi(env_cap); if (cap_env < 0) cap_env = 0; }
+    if (env_cap) {
+        cap_env = atoi(env_cap);
+        if (cap_env < 0) cap_env = 0;
+    }
     int cap_default = 4096;
     const int eq_cap = max(k, min(N, cap_env ? cap_env : cap_default));
     size_t sel_shmem = (size_t) (2*eq_cap) * sizeof(int);
@@ -559,7 +684,10 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
 
     const int sel_threads = env_threads_or_default("LLAMA_SPARSE_TOPK_THREADS", 1024);
     int cap_env = 0; const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
-    if (env_cap) { cap_env = atoi(env_cap); if (cap_env < 0) cap_env = 0; }
+    if (env_cap) {
+        cap_env = atoi(env_cap);
+        if (cap_env < 0) cap_env = 0;
+    }
     int cap_default = 4096;
     const int eq_cap_host = max(k, min(N, cap_env ? cap_env : cap_default));
     const size_t sel_shmem = (size_t) (2*eq_cap_host) * sizeof(int);

@@ -5,6 +5,7 @@
 #include <vector>
 #include <random>
 #include <algorithm>
+#include <cstdlib>
 
 static void build_and_run(int N, int T, int K) {
     // host scores
@@ -81,6 +82,13 @@ static void build_and_run(int N, int T, int K) {
         }
         if (!ok) break;
     }
+    if (!ok) {
+        // force non-zero exit to make ctest fail
+        std::fprintf(stderr, "sparse_topk_radix op test failed (N=%d T=%d K=%d)\n", N, T, K);
+        std::fflush(stderr);
+        std::exit(1);
+    }
+
 
     printf("sparse_topk_radix op test (%d,%d,%d): %s\n", N, T, K, ok?"PASS":"FAIL");
     fflush(stdout);
