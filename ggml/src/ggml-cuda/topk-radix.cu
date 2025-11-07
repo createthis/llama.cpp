@@ -387,20 +387,35 @@ static __global__ void k_block_select_topk(const float * __restrict__ scores,
     int t = blockIdx.x;
     if (t >= T) return;
     const float * col = scores + (size_t)ld * t;
+    if (N <= 0) { if (threadIdx.x == 0) { for (int r = 0; r < k; ++r) idx_out[r + k*t] = 0; } return; }
 
     float lval[TOPK_LOCAL]; int lidx[TOPK_LOCAL];
     for (int i = 0; i < TOPK_LOCAL; ++i) { lval[i] = -1.0e30f; lidx[i] = -1; }
 
-    // Strided scan
+    // Strided scan with fill-first-empty then replace-min (tie-break by smaller index)
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
         float v = col[i];
-        // find local min position
-        int min_pos = 0; float min_val = lval[0];
+        int empty = -1;
         #pragma unroll
-        for (int j = 1; j < TOPK_LOCAL; ++j) {
-            if (lval[j] < min_val) { min_val = lval[j]; min_pos = j; }
+        for (int j = 0; j < TOPK_LOCAL; ++j) { if (lidx[j] == -1) { empty = j; break; } }
+        if (empty != -1) {
+            lval[empty] = v; lidx[empty] = i;
+        } else {
+            int min_pos = 0; float min_val = lval[0];
+            #pragma unroll
+            for (int j = 1; j < TOPK_LOCAL; ++j) {
+                if (lval[j] < min_val || (lval[j] == min_val && lidx[j] > lidx[min_pos])) { min_val = lval[j]; min_pos = j; }
+            }
+            if (v > min_val || (v == min_val && i < lidx[min_pos])) { lval[min_pos] = v; lidx[min_pos] = i; }
         }
-        if (v > min_val) { lval[min_pos] = v; lidx[min_pos] = i; }
+    }
+    // Post-scan: ensure no empty slots
+    #pragma unroll
+    for (int j = 0; j < TOPK_LOCAL; ++j) {
+        if (lidx[j] < 0) {
+            int idx = (threadIdx.x * TOPK_LOCAL + j) % N;
+            lidx[j] = idx; lval[j] = col[idx];
+        }
     }
 
     __shared__ float s_vals[TOPK_THREADS*TOPK_LOCAL];
@@ -416,6 +431,7 @@ static __global__ void k_block_select_topk(const float * __restrict__ scores,
     __shared__ float warp_best_val[32];
     __shared__ int   warp_best_pos[32];
     __shared__ int   s_block_best_pos;
+    __shared__ int   s_sel_idx;
 
     int wid = threadIdx.x >> 5; int lane = threadIdx.x & 31;
 
@@ -445,9 +461,15 @@ static __global__ void k_block_select_topk(const float * __restrict__ scores,
         __syncthreads();
         int bp = s_block_best_pos;
         if (threadIdx.x == 0) {
-            int out_idx = s_ids[bp];
+            int out_idx = (bp >= 0 && bp < (int)(TOPK_THREADS*TOPK_LOCAL)) ? s_ids[bp] : 0;
+            if (out_idx < 0 || out_idx >= N) out_idx = 0;
+            s_sel_idx = out_idx;
             idx_out[r + k*t] = out_idx;
-            s_vals[bp] = -1.0e30f; // mark consumed
+        }
+        __syncthreads();
+        // Dedup: mark all entries with selected idx as consumed
+        for (int p = threadIdx.x; p < (int)(TOPK_THREADS*TOPK_LOCAL); p += blockDim.x) {
+            if (s_ids[p] == s_sel_idx) s_vals[p] = -1.0e30f;
         }
         __syncthreads();
     }
