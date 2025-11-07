@@ -591,6 +591,177 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
 }
 
 
+// Global-equals variant: use device-global buffers for equals to avoid shared-mem capacity limits
+static __global__ void k_select_topk_bins_global(const float * __restrict__ scores,
+                                                 int N, int T, int ld, int k,
+                                                 const uint32_t * __restrict__ gt_counts, // [256, T]
+                                                 int * __restrict__ idx_out,
+                                                 int * __restrict__ eq0_g, // [N, T]
+                                                 int * __restrict__ eq1_g, // [N, T]
+                                                 int * __restrict__ cnt0,  // [T]
+                                                 int * __restrict__ cnt1)  // [T]
+{
+    int t = blockIdx.x;
+    if (t >= T) return;
+    const float * col = scores + (size_t)ld * t;
+
+    // Round 0 threshold from gt_counts
+    int thr0 = 0;
+    for (int b = 255; b >= 0; --b) {
+        uint32_t sgt = gt_counts[b + 256*(size_t)t];
+        uint32_t prev = (b == 0 ? (uint32_t)N : gt_counts[(b - 1) + 256*(size_t)t]);
+        uint32_t eq   = prev - gt_counts[b + 256*(size_t)t];
+        if (sgt < (uint32_t)k && sgt + eq >= (uint32_t)k) { thr0 = b; break; }
+    }
+
+    __shared__ unsigned int pw_hist[32*256];
+    __shared__ unsigned int pw_final[256];
+    int warp_count = (blockDim.x + 31) >> 5;
+    __shared__ int sel_sofar;
+    if (threadIdx.x == 0) {
+        sel_sofar   = 0;
+        cnt0[t] = 0;
+        cnt1[t] = 0;
+    }
+    __syncthreads();
+
+    uint32_t sgt0 = gt_counts[thr0 + 256*(size_t)t];
+    int take_gt0 = min(k, (int)sgt0);
+
+    size_t base = (size_t)N * (size_t)t;
+
+    // Round 0: build eq0_g and take >thr0
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        uint32_t raw = __float_as_uint(col[i]);
+        int b0 = (int)key32_msb_bin_desc(__uint_as_float(raw));
+        if (b0 > thr0) {
+            int pos = atomicAdd(&sel_sofar, 1);
+            if (pos < take_gt0) idx_out[pos + k*t] = i;
+        } else if (b0 == thr0) {
+            int p = atomicAdd(&cnt0[t], 1);
+            eq0_g[base + p] = i;
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) sel_sofar = take_gt0;
+    __syncthreads();
+    int remaining = k - sel_sofar;
+    if (remaining <= 0) return;
+
+    // Round 1: histogram b1 over eq0_g
+    __shared__ unsigned int h1[256];
+    for (int i = threadIdx.x; i < 256; i += blockDim.x) h1[i] = 0u;
+    __syncthreads();
+    int eq0_total = cnt0[t];
+    for (int j = threadIdx.x; j < eq0_total; j += blockDim.x) {
+        int idx = eq0_g[base + j];
+        uint32_t raw = __float_as_uint(col[idx]);
+        uint32_t key = ((int32_t)raw < 0)?~raw:(raw^0x80000000u);
+        int b1 = (key>>16)&0xFF;
+        atomicAdd(&h1[b1], 1u);
+    }
+    __syncthreads();
+    __shared__ int thr1;
+    if (threadIdx.x==0){
+        unsigned int sum=0,need=remaining;
+        thr1=255;
+        for(int b=255;b>=0;--b){ unsigned int sgt=sum; unsigned int eqb=h1[b]; if(sgt<need&&sgt+eqb>=need){ thr1=b; break; } sum+=eqb; }
+    }
+    __syncthreads();
+
+    // Select b1>thr1; collect b1==thr1 into eq1_g
+    for (int j = threadIdx.x; j < eq0_total; j += blockDim.x) {
+        int idx = eq0_g[base + j];
+        uint32_t raw = __float_as_uint(col[idx]);
+        uint32_t key = ((int32_t)raw < 0)?~raw:(raw^0x80000000u);
+        int b1=(key>>16)&0xFF;
+        if(b1>thr1){ int pos=atomicAdd(&sel_sofar,1); if(pos<k) idx_out[pos+k*t]=idx; }
+        else if(b1==thr1){ int p=atomicAdd(&cnt1[t],1); eq1_g[base + p]=idx; }
+    }
+    __syncthreads();
+    remaining = k - sel_sofar; if (remaining <= 0) return;
+
+    // Round 2: histogram on b2 using per-warp hist over eq1_g
+    for (int i = threadIdx.x; i < 32*256; i += blockDim.x) pw_hist[i] = 0u;
+    for (int i = threadIdx.x; i < 256; i += blockDim.x) pw_final[i] = 0u;
+    __syncthreads();
+    int eq1_total = cnt1[t];
+    for (int j = threadIdx.x; j < eq1_total; j += blockDim.x) {
+        int idx=eq1_g[base + j];
+        uint32_t raw=__float_as_uint(col[idx]);
+        uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
+        int b2=(key>>8)&0xFF;
+        atomicAdd(&pw_hist[((threadIdx.x>>5)*256) + b2], 1u);
+    }
+    __syncthreads();
+    for (int b = threadIdx.x; b < 256; b += blockDim.x) {
+        unsigned int s=0; for (int w=0; w<warp_count; ++w) s += pw_hist[w*256 + b]; pw_final[b] = s;
+    }
+    __syncthreads();
+
+    __shared__ int thr2;
+    if (threadIdx.x==0){ unsigned int sum=0,need=remaining; thr2=255; for(int b=255;b>=0;--b){ unsigned int sgt=sum; unsigned int eqb=pw_final[b]; if(sgt<need&&sgt+eqb>=need){ thr2=b; break; } sum+=eqb; } }
+    __syncthreads();
+
+    // Select b2>thr2; collect b2==thr2 back into eq0_g (reset cnt0)
+    if (threadIdx.x == 0) cnt0[t] = 0;
+    __syncthreads();
+    for (int j = threadIdx.x; j < eq1_total; j += blockDim.x) {
+        int idx=eq1_g[base + j];
+        uint32_t raw=__float_as_uint(col[idx]);
+        uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
+        int b2=(key>>8)&0xFF;
+        if(b2>thr2){ int pos=atomicAdd(&sel_sofar,1); if(pos<k) idx_out[pos+k*t]=idx; }
+        else if(b2==thr2){ int p=atomicAdd(&cnt0[t],1); eq0_g[base + p]=idx; }
+    }
+    __syncthreads();
+    remaining = k - sel_sofar; if (remaining <= 0) return;
+
+    // Round 3: histogram on b3 over eq0_g
+    for (int i = threadIdx.x; i < 32*256; i += blockDim.x) pw_hist[i] = 0u;
+    for (int i = threadIdx.x; i < 256; i += blockDim.x) pw_final[i] = 0u;
+    __syncthreads();
+    eq0_total = cnt0[t];
+    for (int j = threadIdx.x; j < eq0_total; j += blockDim.x) {
+        int idx=eq0_g[base + j];
+        uint32_t raw=__float_as_uint(col[idx]);
+        uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
+        int b3= key & 0xFF;
+        atomicAdd(&pw_hist[((threadIdx.x>>5)*256) + b3], 1u);
+    }
+    __syncthreads();
+    for (int b = threadIdx.x; b < 256; b += blockDim.x) {
+        unsigned int s=0; for (int w=0; w<warp_count; ++w) s += pw_hist[w*256 + b]; pw_final[b] = s;
+    }
+    __syncthreads();
+
+    __shared__ int thr3;
+    if (threadIdx.x==0){ unsigned int sum=0,need=remaining; thr3=255; for(int b=255;b>=0;--b){ unsigned int sgt=sum; unsigned int eqb=pw_final[b]; if(sgt<need&&sgt+eqb>=need){ thr3=b; break; } sum+=eqb; } }
+    __syncthreads();
+
+    // Select b3>thr3; collect b3==thr3 into eq1_g (reset cnt1)
+    if (threadIdx.x == 0) cnt1[t] = 0;
+    __syncthreads();
+    for (int j = threadIdx.x; j < eq0_total; j += blockDim.x) {
+        int idx=eq0_g[base + j];
+        uint32_t raw=__float_as_uint(col[idx]);
+        uint32_t key=((int32_t)raw<0)?~raw:(raw^0x80000000u);
+        int b3= key & 0xFF;
+        if(b3>thr3){ int pos=atomicAdd(&sel_sofar,1); if(pos<k) idx_out[pos+k*t]=idx; }
+        else if(b3==thr3){ int p=atomicAdd(&cnt1[t],1); eq1_g[base + p]=idx; }
+    }
+    __syncthreads();
+    remaining = k - sel_sofar; if (remaining <= 0) return;
+
+    // Final fill from equals eq1_g up to k
+    eq1_total = cnt1[t];
+    for (int j = threadIdx.x; j < eq1_total; j += blockDim.x) {
+        int idx = eq1_g[base + j];
+        int pos = atomicAdd(&sel_sofar, 1);
+        if (pos < k) idx_out[pos + k*t] = idx;
+    }
+    __syncthreads();
+}
 
 
 void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
@@ -607,20 +778,24 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
     const size_t hist_shmem = (size_t)(((hist_threads/32) + 1) * 256) * sizeof(uint32_t);
     k_histogram_topbyte<<<T, hist_threads, hist_shmem, stream>>>(scores_d, N, T, /*ld=*/N, thr_bins_d, gt_counts_d);
 
-    // Equal-bin selection kernel; bound dynamic shared memory to device limit
+    // Equal-bin selection kernel
+
     const int sel_threads = hist_threads;
-    // Conservative eq buffer capacity to avoid exceeding per-block shared mem
-    int cap_env = 0;
-    const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
-    if (env_cap) {
-        cap_env = atoi(env_cap);
-        if (cap_env < 0) cap_env = 0;
+    // Global-equals buffers
+    int *eq0_g=nullptr, *eq1_g=nullptr; int *cnt0=nullptr, *cnt1=nullptr;
+    cudaMalloc(&eq0_g, sizeof(int) * (size_t)N * T);
+    cudaMalloc(&eq1_g, sizeof(int) * (size_t)N * T);
+    cudaMalloc(&cnt0, sizeof(int) * (size_t)T); cudaMemsetAsync(cnt0, 0, sizeof(int)*(size_t)T, stream);
+    cudaMalloc(&cnt1, sizeof(int) * (size_t)T); cudaMemsetAsync(cnt1, 0, sizeof(int)*(size_t)T, stream);
+    {
+        size_t eq_bytes = sizeof(int) * (size_t)N * (size_t)T * 2 + sizeof(int) * (size_t)T * 2;
+        const char *pr = getenv("LLAMA_SPARSE_PROF");
+        if (pr && *pr) {
+            fprintf(stderr, "[TOPK_SELECT] kernel=global_eq N=%d T=%d k=%d threads=%d eq_bytes=%zu\n", N, T, k, sel_threads, eq_bytes);
+        }
     }
-    int cap_default = 4096;
-    const int eq_cap = max(k, min(N, cap_env ? cap_env : cap_default));
-    size_t sel_shmem = (size_t) (2*eq_cap) * sizeof(int);
-    CUDA_SET_SHARED_MEMORY_LIMIT(k_select_topk_bins, (int)sel_shmem);
-    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap, gt_counts_d, idx_d);
+    k_select_topk_bins_global<<<T, sel_threads, 0, stream>>>(scores_d, N, T, /*ld=*/N, k, gt_counts_d, idx_d, eq0_g, eq1_g, cnt0, cnt1);
+    cudaFree(eq0_g); cudaFree(eq1_g); cudaFree(cnt0); cudaFree(cnt1);
 
     cudaFree(gt_counts_d);
     cudaFree(thr_bins_d);
@@ -683,16 +858,21 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
     cudaMemcpyAsync(gt_counts_d, gt_counts_h, sizeof(uint32_t) * 256 * (size_t)T, cudaMemcpyHostToDevice, stream);
 
     const int sel_threads = env_threads_or_default("LLAMA_SPARSE_TOPK_THREADS", 1024);
-    int cap_env = 0; const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
-    if (env_cap) {
-        cap_env = atoi(env_cap);
-        if (cap_env < 0) cap_env = 0;
+    // Global-equals buffers (host path)
+    int *eq0_gh=nullptr, *eq1_gh=nullptr; int *cnt0h=nullptr, *cnt1h=nullptr;
+    cudaMalloc(&eq0_gh, sizeof(int) * (size_t)N * T);
+    cudaMalloc(&eq1_gh, sizeof(int) * (size_t)N * T);
+    cudaMalloc(&cnt0h, sizeof(int) * (size_t)T); cudaMemsetAsync(cnt0h, 0, sizeof(int)*(size_t)T, stream);
+    cudaMalloc(&cnt1h, sizeof(int) * (size_t)T); cudaMemsetAsync(cnt1h, 0, sizeof(int)*(size_t)T, stream);
+    {
+        size_t eq_bytes = sizeof(int) * (size_t)N * (size_t)T * 2 + sizeof(int) * (size_t)T * 2;
+        const char *pr = getenv("LLAMA_SPARSE_PROF");
+        if (pr && *pr) {
+            fprintf(stderr, "[TOPK_SELECT_HOST] kernel=global_eq N=%d T=%d k=%d threads=%d eq_bytes=%zu\n", N, T, k, sel_threads, eq_bytes);
+        }
     }
-    int cap_default = 4096;
-    const int eq_cap_host = max(k, min(N, cap_env ? cap_env : cap_default));
-    const size_t sel_shmem = (size_t) (2*eq_cap_host) * sizeof(int);
-    CUDA_SET_SHARED_MEMORY_LIMIT(k_select_topk_bins, (int)sel_shmem);
-    k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap_host, gt_counts_d, idx_d);
+    k_select_topk_bins_global<<<T, sel_threads, 0, stream>>>(scores_d, N, T, /*ld=*/N, k, gt_counts_d, idx_d, eq0_gh, eq1_gh, cnt0h, cnt1h);
+    cudaFree(eq0_gh); cudaFree(eq1_gh); cudaFree(cnt0h); cudaFree(cnt1h);
 
     cudaMemcpyAsync(idx_h, idx_d, sizeof(int) * (size_t)k * T, cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
