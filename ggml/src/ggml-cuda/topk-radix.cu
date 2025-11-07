@@ -482,8 +482,6 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
     cudaStream_t stream = ctx.stream();
     const char * impl = getenv("LLAMA_SPARSE_TOPK_IMPL");
     if (impl && strcmp(impl, "orig") == 0) {
-        fprintf(stderr, "orig");
-        fflush(stderr);
         // default radix path (existing)
         uint32_t * gt_counts_d = nullptr;
         uint32_t * thr_bins_d  = nullptr;
@@ -506,8 +504,6 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
         cudaFree(gt_counts_d);
         cudaFree(thr_bins_d);
     } else {
-        fprintf(stderr, "block");
-        fflush(stderr);
         // one-pass block select
         const int threads = 1024;
         k_block_select_topk<<<T, threads, 0, stream>>>(scores_d, N, T, /*ld=*/N, k, idx_d);
