@@ -15,6 +15,7 @@
 #ifndef SEL_DEBUG_COL
 #define SEL_DEBUG_COL 0
 #endif
+
 static inline __host__ __device__ int env_threads_or_default(const char * name, int deflt) {
     int v = deflt;
 #ifndef __CUDA_ARCH__
@@ -38,7 +39,6 @@ static __device__ __forceinline__ uint32_t key32_desc(float x) {
 static __device__ __forceinline__ uint8_t key32_msb_bin_desc(float x) {
     return (uint8_t)(key32_desc(x) >> 24);
 }
-
 
 // Compute K-th threshold bin for top byte of keys of a given column
 // Here we implement a block-per-column approach where each block processes N elements.
@@ -114,7 +114,6 @@ static __global__ void k_histogram_topbyte(const float * __restrict__ scores,
     }
 }
 
-
 // select indices > threshold bin and collect equals for tail passes
 static __global__ void k_select_topk_bins(const float * __restrict__ scores,
                                           int N, int T, int ld, int k, int eq_capacity,
@@ -166,17 +165,26 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     int *eq0 = s_eq;
     int *eq1 = s_eq + eq_capacity;
     __shared__ int eq0_store;
-    if (threadIdx.x == 0) eq0_store = 0;
     __shared__ int eq0_total;
-    if (threadIdx.x == 0) eq0_total = 0;
+    if (threadIdx.x == 0) {
+        eq0_store = 0;
+        eq0_total = 0;
+    }
     __syncthreads();
 
-    // Select b0>thr0; collect b0==thr0 into eq0 (store up to capacity), track total
+    // Select b0>thr0 using per-bin prefix allocation; collect b0==thr0 into eq0 (store up to capacity)
+    __shared__ int s_written[256];
+    // initialize per-bin write cursors to the prefix count from gt_counts
+    for (int b = threadIdx.x; b < 256; b += blockDim.x) {
+        s_written[b] = (int)gt_counts[b + 256*t];
+    }
+    __syncthreads();
+
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
         uint32_t raw = __float_as_uint(col[i]);
         int b0 = (int)key32_msb_bin_desc(__uint_as_float(raw));
         if (b0 > thr0) {
-            int pos = atomicAdd(&sel_sofar, 1);
+            int pos = atomicAdd(&s_written[b0], 1);
             if (pos < take_gt0) idx_out[pos + k*t] = i;
         } else if (b0 == thr0) {
             atomicAdd(&eq0_total, 1);
@@ -249,9 +257,11 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
 
     // Select b1>thr1; collect b1==thr1 into eq1
     __shared__ int eq1_store;
-    if (threadIdx.x == 0) eq1_store = 0;
     __shared__ int eq1_total;
-    if (threadIdx.x == 0) eq1_total = 0;
+    if (threadIdx.x == 0) {
+        eq1_store = 0;
+        eq1_total = 0;
+    }
     __syncthreads();
     if (eq0_total <= eq_capacity) {
         int lim0 = min(eq0_store, eq_capacity);
@@ -348,7 +358,7 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
         for(int b=255;b>=0;--b){
             unsigned int sgt=sum;
             unsigned int eqb=pw_final[b];
-            if(sgt<need&&sgt+eqb>=need){
+            if(sgt < need && sgt + eqb >= need){
                 thr2=b;
                 break;
             }
@@ -363,9 +373,11 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
 #endif
 
     // Select b2>thr2; collect b2==thr2 back into eq0 (ping-pong)
-    if (threadIdx.x == 0) eq0_store = 0;
     __shared__ int eq2_total;
-    if (threadIdx.x == 0) eq2_total = 0;
+    if (threadIdx.x == 0) {
+        eq0_store = 0;
+        eq2_total = 0;
+    }
     __syncthreads();
     if (eq1_total <= eq_capacity) {
         int lim1 = min(eq1_store, eq_capacity);
@@ -452,10 +464,10 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     if (threadIdx.x==0){
         unsigned int sum=0,need=remaining;
         thr3=255;
-        for(int b=255;b>=0;--b){
+        for(int b=255; b>=0; --b){
             unsigned int sgt=sum;
             unsigned int eqb=pw_final[b];
-            if(sgt<need&&sgt+eqb>=need){
+            if(sgt < need && sgt + eqb >= need){
                 thr3=b;
                 break;
             }
@@ -470,9 +482,11 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
 #endif
 
     // Select b3>thr3; collect b3==thr3 into eq1
-    if (threadIdx.x == 0) eq1_store = 0;
     __shared__ int eq3_total;
-    if (threadIdx.x == 0) eq3_total = 0;
+    if (threadIdx.x == 0) {
+        eq1_store = 0;
+        eq3_total = 0;
+    }
     __syncthreads();
     if (eq2_total <= eq_capacity) {
         int lim0 = min(eq0_store, eq_capacity);
@@ -589,9 +603,6 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
     }
 #endif
 }
-
-
-
 
 void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
                                          const float * scores_d, int N, int T, int k,
