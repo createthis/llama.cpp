@@ -101,6 +101,9 @@ static void build_and_run(int N, int T, int K) {
 
 int main() {
     //build_and_run(1024, 3, 32);
-    build_and_run(163840, 1, 256); // stress target config similar to 163840x1x256
+    //build_and_run(4096, 1, 256);
+    //build_and_run(16384, 1, 256); // stress target config similar to 163840x1x256
+    build_and_run(40000, 2, 256); // stress target config similar to 163840x1x256
+    //build_and_run(163840, 1, 256); // stress target config similar to 163840x1x256
     return 0;
 }
