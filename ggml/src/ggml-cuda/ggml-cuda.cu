@@ -2587,7 +2587,14 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                         cudaEventCreate(&__e0);
                         cudaEventCreate(&__e1);
                         cudaEventRecord(__e0, ctx.stream());
-                        ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+                        {
+                            const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
+                            if (use_tl && *use_tl) {
+                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+                            } else {
+                                ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+                            }
+                        }
                         __err_kernel = cudaGetLastError();
                         cudaEventRecord(__e1, ctx.stream());
                         cudaEventSynchronize(__e1);

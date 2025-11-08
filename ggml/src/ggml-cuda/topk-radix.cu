@@ -969,7 +969,29 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
     // Launch the ported kernel: batch=T, seq_len=N
     dim3 grid(T);
     dim3 block(TL_TOPK_BLOCK_SIZE);
-    k_tl_topk_port<<<grid, block, 0, stream>>>(tmp_TN, T, N, k, idx_d, d_starts, d_ends);
+    const char * __prof_env = getenv("LLAMA_SPARSE_PROF");
+    auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
+    if (__prof_env && *__prof_env) {
+        cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
+        cudaEventRecord(__e0, stream);
+        k_tl_topk_port<<<grid, block, 0, stream>>>(tmp_TN, T, N, k, idx_d, d_starts, d_ends);
+        cudaEventRecord(__e1, stream); cudaEventSynchronize(__e1);
+        float __ms = 0.0f; cudaEventElapsedTime(&__ms, __e0, __e1);
+        static int __cnt_idx_cuda = 0;
+        static double __sum_idx_cuda = 0.0;
+        __sum_idx_cuda += __ms;
+        __cnt_idx_cuda++;
+        if (__prof_each_env && *__prof_each_env) {
+            fprintf(stderr, "[PROFILE_TL_ONLY] TILELANG_TOPK N=%d T=%d k=%d ms=%.3f\n", N, T, k, __ms);
+        } else {
+            fprintf(stderr, "[PROFILE_TL_ONLY] TILELANG_TOPK N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n",
+                    N, T, k,  (float)(__sum_idx_cuda/50.0));
+            __sum_idx_cuda = 0.0;
+        }
+        cudaEventDestroy(__e0); cudaEventDestroy(__e1);
+    } else {
+        k_tl_topk_port<<<grid, block, 0, stream>>>(tmp_TN, T, N, k, idx_d, d_starts, d_ends);
+    }
 
     cudaFree(tmp_TN);
     cudaFree(d_starts);
