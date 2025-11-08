@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <cstdlib>
 
-static void build_and_run(int N, int T, int K) {
+static void build_and_run(int N, int T, int K, bool warmup = false) {
     // host scores
     std::mt19937 rng(42);
     std::uniform_real_distribution<float> dist(-5.0f, 5.0f);
@@ -51,6 +51,23 @@ static void build_and_run(int N, int T, int K) {
     // copy host scores into device tensor
     ggml_backend_tensor_set(scores, scores_h.data(), 0, ggml_nbytes(scores));
 
+    if (warmup) {
+        // during warmup, don’t print failures and don’t pollute profiling averages
+        const char *sav_prof    = getenv("LLAMA_SPARSE_PROF");
+        const char *sav_prof_ea = getenv("LLAMA_SPARSE_PROF_EACH");
+        if (sav_prof)    unsetenv("LLAMA_SPARSE_PROF");
+        if (sav_prof_ea) unsetenv("LLAMA_SPARSE_PROF_EACH");
+        ggml_backend_sched_graph_compute(sched, gf);
+        if (sav_prof)    setenv("LLAMA_SPARSE_PROF", sav_prof, 1); else unsetenv("LLAMA_SPARSE_PROF");
+        if (sav_prof_ea) setenv("LLAMA_SPARSE_PROF_EACH", sav_prof_ea, 1); else unsetenv("LLAMA_SPARSE_PROF_EACH");
+        // skip the rest of validation and cleanup; return early
+        ggml_graph_clear(gf);
+        ggml_backend_sched_free(sched);
+        ggml_backend_free(cuda);
+        ggml_backend_free(cpu);
+        ggml_free(ctx);
+        return;
+    }
     printf("starting compute\n");
     fflush(stdout);
     ggml_status st = ggml_backend_sched_graph_compute(sched, gf);
@@ -100,10 +117,7 @@ static void build_and_run(int N, int T, int K) {
 }
 
 int main() {
-    //build_and_run(1024, 3, 32);
-    //build_and_run(4096, 1, 256);
-    //build_and_run(16384, 1, 256); // stress target config similar to 163840x1x256
-    build_and_run(40000, 2, 256); // stress target config similar to 163840x1x256
-    //build_and_run(163840, 1, 256); // stress target config similar to 163840x1x256
+    build_and_run(4096, 1, 256, /*warmup=*/true);
+    build_and_run(40000, 2, 256);
     return 0;
 }
