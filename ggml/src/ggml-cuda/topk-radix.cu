@@ -712,3 +712,267 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
     cudaFree(gt_counts_d);
     cudaFree(idx_d);
 }
+
+// -----------------------------------------------------------------------------
+// TileLang DeepSeek V3.2 top-k selector (ported line-by-line to CUDA)
+// This kernel mirrors the control flow and comments of
+// /workspace/tilelang/examples/deepseek_v32/topk_selector.py
+// Inputs:
+//   input  : [batch, seq_len] float32 scores
+//   index  : [batch, topk] int32 output indices
+//   starts : [batch] int32 per-batch start index (inclusive)
+//   ends   : [batch] int32 per-batch end index (exclusive)
+// Notes:
+// - BLOCK_SIZE is 1024 threads per block; one block per batch element
+// - RADIX = 256; SMEM_INPUT_SIZE = 4096 (tie buffer per round)
+// - convert_to_uint16 / convert_to_uint32 match the TileLang mapping
+// Simple glue kernels for wiring the TileLang-ported selector
+static __global__ void k_transpose_scores(const float *src, float *dst, int N, int T) {
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= N*T) return;
+    int t = gid / N;
+    int i = gid % N;
+    dst[(size_t)t * N + i] = src[(size_t)i + (size_t)N * t];
+}
+static __global__ void k_fill_int_kernel(int *arr, int len, int val) {
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid < len) arr[gid] = val;
+}
+
+// -----------------------------------------------------------------------------
+
+static __device__ __forceinline__ uint16_t tl_convert_to_uint16(float x) {
+    // Cast to float16, reinterpret bits, then map sign for descending order
+    __half h = __float2half(x);
+    unsigned short bits_uint = __half_as_ushort(h);
+    bits_uint = (x < 0.0f) ? (unsigned short)(~bits_uint & 0xFFFFu)
+                           : (unsigned short)(bits_uint | 0x8000u);
+    return (uint16_t)(bits_uint >> 8);
+}
+
+static __device__ __forceinline__ uint32_t tl_convert_to_uint32(float x) {
+    uint32_t bits_uint = __float_as_uint(x);
+    return ((int32_t)bits_uint < 0) ? ~bits_uint : (bits_uint | 0x80000000u);
+}
+
+// Fixed configuration to match TileLang example
+#ifndef TL_TOPK_RADIX
+#define TL_TOPK_RADIX 256
+#endif
+#ifndef TL_TOPK_BLOCK_SIZE
+#define TL_TOPK_BLOCK_SIZE 1024
+#endif
+#ifndef TL_TOPK_SMEM_INPUT_SIZE
+#define TL_TOPK_SMEM_INPUT_SIZE 4096
+#endif
+
+// Port of tl_topk_impl kernel
+static __global__ void k_tl_topk_port(
+        const float * __restrict__ input, // [batch, seq_len]
+        int batch,
+        int seq_len,
+        int topk,
+        int * __restrict__ index,         // [batch, topk]
+        const int * __restrict__ starts,  // [batch]
+        const int * __restrict__ ends) {  // [batch]
+    // with T.Kernel(batch, threads=BLOCK_SIZE) as (bx):
+    int bx = blockIdx.x;
+    if (bx >= batch) return;
+    int tx = threadIdx.x; // T.get_thread_binding()
+
+    // Shared allocations (names match TileLang code)
+    __shared__ int s_threshold_bin_id[1];
+    __shared__ int s_histogram[TL_TOPK_RADIX + 1];
+    __shared__ int s_num_input[2];
+    __shared__ int s_input_idx[2][TL_TOPK_SMEM_INPUT_SIZE];
+
+    // Local vars (l_* prefix to mirror TileLang code)
+    int l_threshold_bin_id = 0;
+    int l_new_topk = topk;
+    int l_num_input = 0;
+    int l_bin_id32 = 0;
+    int l_val = 0;
+    int l_start_pos = 0;
+    int l_start_idx = starts[bx];
+    int l_end_idx   = ends[bx];
+
+    // stage 1: use 8bit to do quick topk
+    // T.fill(s_histogram, 0)
+    for (int i = tx; i < TL_TOPK_RADIX + 1; i += blockDim.x) s_histogram[i] = 0;
+    if (tx == 0) s_num_input[0] = 0; // T.fill(s_num_input[0], 0)
+
+    __syncthreads();
+    // for s in T.serial(T.ceildiv(seq_len, BLOCK_SIZE)):
+    int iters = (seq_len + TL_TOPK_BLOCK_SIZE - 1) / TL_TOPK_BLOCK_SIZE;
+    for (int s = 0; s < iters; ++s) {
+        int input_idx = s * TL_TOPK_BLOCK_SIZE + tx;
+        if (input_idx < l_end_idx && input_idx >= l_start_idx && input_idx < seq_len) {
+            // inval_int16 = convert_to_uint16(input[bx, input_idx])
+            float v = input[(size_t)bx * seq_len + input_idx];
+            uint16_t inval_int16 = tl_convert_to_uint16(v);
+            atomicAdd(&s_histogram[inval_int16], 1);
+        }
+    }
+    __syncthreads();
+
+    // cumsum over RADIX bins (suffix-style, following TileLang pattern)
+    if (tx < TL_TOPK_RADIX) {
+        for (int i = 0; i < 8; ++i) {
+            int offset = 1 << i;
+            __syncthreads();
+            if (tx < TL_TOPK_RADIX - offset) {
+                l_val = s_histogram[tx] + s_histogram[tx + offset];
+            }
+            __syncthreads();
+            if (tx < TL_TOPK_RADIX - offset) {
+                s_histogram[tx] = l_val;
+            }
+        }
+
+        // find threshold bin id
+        __syncthreads();
+        if (s_histogram[tx] > l_new_topk && s_histogram[tx + 1] <= l_new_topk) {
+            s_threshold_bin_id[0] = tx;
+        }
+    }
+    __syncthreads();
+    l_threshold_bin_id = s_threshold_bin_id[0];
+    l_new_topk = l_new_topk - s_histogram[l_threshold_bin_id + 1];
+    __syncthreads();
+
+    // collect all elements with exponent  threshold
+    for (int s = 0; s < iters; ++s) {
+        __syncthreads();
+        int input_idx = s * TL_TOPK_BLOCK_SIZE + tx;
+        if (input_idx < l_end_idx && input_idx >= l_start_idx && input_idx < seq_len) {
+            float v = input[(size_t)bx * seq_len + input_idx];
+            int bin_id = (int)tl_convert_to_uint16(v);
+            l_bin_id32 = bin_id;
+            if (l_bin_id32 > l_threshold_bin_id) {
+                // pos = atomic_add(s_histogram[l_bin_id32 + 1], 1)
+                int pos = atomicAdd(&s_histogram[l_bin_id32 + 1], 1);
+                // index[bx, pos] = input_idx
+                if (pos < topk) index[bx * topk + pos] = input_idx;
+            } else if (l_bin_id32 == l_threshold_bin_id && l_new_topk > 0) {
+                int pos = atomicAdd(&s_num_input[0], 1);
+                if (pos < TL_TOPK_SMEM_INPUT_SIZE) {
+                    s_input_idx[0][pos] = input_idx;
+                }
+            }
+        }
+    }
+
+    // stage 2: tail pass
+    for (int round = 0; round < 4; ++round) {
+        if (l_new_topk <= 0) break; // T.loop_break()
+
+        int r_idx = round & 1;
+        l_start_pos = topk - l_new_topk;
+
+        __syncthreads();
+        // T.fill(s_histogram, 0)
+        for (int i = tx; i < TL_TOPK_RADIX + 1; i += blockDim.x) s_histogram[i] = 0;
+        if (tx == 0) s_num_input[r_idx ^ 1] = 0;
+        __syncthreads();
+
+        l_num_input = s_num_input[r_idx];
+        int it2 = (l_num_input + TL_TOPK_BLOCK_SIZE - 1) / TL_TOPK_BLOCK_SIZE;
+        for (int s = 0; s < it2; ++s) {
+            int idx = s * TL_TOPK_BLOCK_SIZE + tx;
+            if (idx < l_num_input) {
+                int in_idx = s_input_idx[r_idx][idx];
+                float v = input[(size_t)bx * seq_len + in_idx];
+                l_bin_id32 = (int)((tl_convert_to_uint32(v) >> (24 - round * 8)) & 0xFFu);
+                atomicAdd(&s_histogram[l_bin_id32], 1);
+            }
+        }
+        __syncthreads();
+
+        // cumsum
+        if (tx < TL_TOPK_RADIX) {
+            for (int i = 0; i < 8; ++i) {
+                int offset = 1 << i;
+                __syncthreads();
+                if (tx < TL_TOPK_RADIX - offset) {
+                    l_val = s_histogram[tx] + s_histogram[tx + offset];
+                }
+                __syncthreads();
+                if (tx < TL_TOPK_RADIX - offset) {
+                    s_histogram[tx] = l_val;
+                }
+            }
+            // find threshold bin id
+            __syncthreads();
+            if (s_histogram[tx] > l_new_topk && s_histogram[tx + 1] <= l_new_topk) {
+                s_threshold_bin_id[0] = tx;
+            }
+        }
+        __syncthreads();
+
+        l_threshold_bin_id = s_threshold_bin_id[0];
+        l_new_topk = l_new_topk - s_histogram[l_threshold_bin_id + 1];
+        __syncthreads();
+
+        for (int s = 0; s < it2; ++s) {
+            __syncthreads();
+            int idx = s * TL_TOPK_BLOCK_SIZE + tx;
+            if (idx < l_num_input) {
+                int in_idx = s_input_idx[r_idx][idx];
+                float v = input[(size_t)bx * seq_len + in_idx];
+                l_bin_id32 = (int)((tl_convert_to_uint32(v) >> (24 - round * 8)) & 0xFFu);
+                if (l_bin_id32 > l_threshold_bin_id) {
+                    int pos = atomicAdd(&s_histogram[l_bin_id32 + 1], 1) + l_start_pos;
+                    if (pos < topk) index[bx * topk + pos] = in_idx;
+                } else if (l_bin_id32 == l_threshold_bin_id && l_new_topk > 0) {
+                    if (round == 3) {
+                        int l_out_pos = atomicAdd(&s_histogram[l_bin_id32 + 1], 1) + l_start_pos;
+                        if (l_out_pos < topk) index[bx * topk + l_out_pos] = in_idx;
+                    } else {
+                        int pos = atomicAdd(&s_num_input[r_idx ^ 1], 1);
+                        if (pos < TL_TOPK_SMEM_INPUT_SIZE) {
+                            s_input_idx[r_idx ^ 1][pos] = in_idx;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Optional host wrapper for future wiring/testing; not used now
+extern "C" void ggml_cuda_topk_tilelang_port_host(const float * input_h, int batch, int seq_len, int topk,
+                                                   int * index_h, const int * starts_h, const int * ends_h) {
+    // Intentionally left as a placeholder; do not wire yet.
+    (void)input_h; (void)batch; (void)seq_len; (void)topk; (void)index_h; (void)starts_h; (void)ends_h;
+}
+
+
+void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
+                                         const float * scores_d, int N, int T, int k,
+                                         int * idx_d) {
+    cudaStream_t stream = ctx.stream();
+    // Synthesize starts/ends as [0, N)
+    int * d_starts = nullptr, * d_ends = nullptr;
+    cudaMalloc(&d_starts, sizeof(int) * (size_t)T);
+    cudaMalloc(&d_ends,   sizeof(int) * (size_t)T);
+    std::vector<int> h_starts(T, 0), h_ends(T, N);
+    cudaMemcpyAsync(d_starts, h_starts.data(), sizeof(int) * (size_t)T, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_ends,   h_ends.data(),   sizeof(int) * (size_t)T, cudaMemcpyHostToDevice, stream);
+
+    // Transpose [N, T] -> [T, N] into a temp buffer so k_tl_topk_port can read row-major by seq_len
+    float * tmp_TN = nullptr;
+    cudaMalloc(&tmp_TN, sizeof(float) * (size_t)N * T);
+    int threads = 256;
+    int blocks = (N*T + threads - 1)/threads;
+    k_transpose_scores<<<blocks, threads, 0, stream>>>(scores_d, tmp_TN, N, T);
+
+    // Launch the ported kernel: batch=T, seq_len=N
+    dim3 grid(T);
+    dim3 block(TL_TOPK_BLOCK_SIZE);
+    k_tl_topk_port<<<grid, block, 0, stream>>>(tmp_TN, T, N, k, idx_d, d_starts, d_ends);
+
+    cudaFree(tmp_TN);
+    cudaFree(d_starts);
+    cudaFree(d_ends);
+}
+

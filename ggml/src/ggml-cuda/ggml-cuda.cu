@@ -2548,7 +2548,14 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                         cudaEvent_t __e0, __e1; cudaError_t __e0c = cudaEventCreate(&__e0); cudaError_t __e1c = cudaEventCreate(&__e1);
                         bool __ev_ok = (__e0c == cudaSuccess && __e1c == cudaSuccess);
                         if (__ev_ok) cudaEventRecord(__e0, ctx.stream());
-                        ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                        {
+                            const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
+                            if (use_tl && *use_tl) {
+                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                            } else {
+                                ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                            }
+                        }
                         __err_kernel = cudaGetLastError();
                         float __ms = 0.0f;
                         if (__ev_ok) {
@@ -2563,7 +2570,14 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                             if (__cnt % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0)); __sum = 0.0; }
                         }
                     } else {
-                        ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                        {
+                            const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
+                            if (use_tl && *use_tl) {
+                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                            } else {
+                                ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                            }
+                        }
                         __err_kernel = cudaGetLastError();
                     }
                 } else {

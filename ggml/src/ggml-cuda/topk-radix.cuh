@@ -7,3 +7,8 @@
 void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
                                          const float * scores_d, int N, int T, int k,
                                          int * idx_d);
+
+// Launch TileLang-ported top-k kernel with starts/ends synthesized as [0, N)
+void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
+                                         const float * scores_d, int N, int T, int k,
+                                         int * idx_d);
