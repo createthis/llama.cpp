@@ -755,18 +755,6 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
 // - RADIX = 256; SMEM_INPUT_SIZE = 4096 (tie buffer per round)
 // - convert_to_uint16 / convert_to_uint32 match the TileLang mapping
 // Simple glue kernels for wiring the TileLang-ported selector
-static __global__ void k_transpose_scores(const float *src, float *dst, int N, int T) {
-    int gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= N*T) return;
-    int t = gid / N;
-    int i = gid % N;
-    dst[(size_t)t * N + i] = src[(size_t)i + (size_t)N * t];
-}
-static __global__ void k_fill_int_kernel(int *arr, int len, int val) {
-    int gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid < len) arr[gid] = val;
-}
-
 // -----------------------------------------------------------------------------
 
 static __device__ __forceinline__ uint16_t tl_convert_to_uint16(float x) {
