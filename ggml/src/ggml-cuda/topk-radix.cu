@@ -38,7 +38,7 @@ static inline uint8_t host_convert_to_uint16_bin(float x) {
 }
 
 #ifndef SEL_DEBUG
-#define SEL_DEBUG 0
+#define SEL_DEBUG 1
 #endif
 #ifndef SEL_DEBUG_COL
 #define SEL_DEBUG_COL 0
@@ -846,18 +846,21 @@ static __global__ void k_tl_topk_port(
     }
     __syncthreads();
 
-    // cumsum over RADIX bins (suffix-style): compute S[b] = sum_{i=b}^{255} hist[i]
-    if (tx == 0) {
-        int run = 0;
-        for (int b = TL_TOPK_RADIX - 1; b >= 0; --b) {
-            run += s_histogram[b];
-            s_histogram[b] = run;
-        }
-        s_histogram[TL_TOPK_RADIX] = 0;
-    }
-    __syncthreads();
-    // find threshold bin id
+    // cumsum over RADIX bins (suffix-style), TileLang parity
     if (tx < TL_TOPK_RADIX) {
+        for (int i = 0; i < 8; ++i) {
+            int offset = 1 << i;
+            __syncthreads();
+            if (tx < TL_TOPK_RADIX - offset) {
+                l_val = s_histogram[tx] + s_histogram[tx + offset];
+            }
+            __syncthreads();
+            if (tx < TL_TOPK_RADIX - offset) {
+                s_histogram[tx] = l_val;
+            }
+        }
+        // find threshold bin id
+        __syncthreads();
         if (s_histogram[tx] > l_new_topk && s_histogram[tx + 1] <= l_new_topk) {
             s_threshold_bin_id[0] = tx;
         }
@@ -920,18 +923,21 @@ static __global__ void k_tl_topk_port(
         }
         __syncthreads();
 
-        // cumsum (suffix sum)
-        if (tx == 0) {
-            int run = 0;
-            for (int b = TL_TOPK_RADIX - 1; b >= 0; --b) {
-                run += s_histogram[b];
-                s_histogram[b] = run;
-            }
-            s_histogram[TL_TOPK_RADIX] = 0;
-        }
-        __syncthreads();
-        // find threshold bin id
+        // cumsum over RADIX bins (suffix-style), TileLang parity
         if (tx < TL_TOPK_RADIX) {
+            for (int i = 0; i < 8; ++i) {
+                int offset = 1 << i;
+                __syncthreads();
+                if (tx < TL_TOPK_RADIX - offset) {
+                    l_val = s_histogram[tx] + s_histogram[tx + offset];
+                }
+                __syncthreads();
+                if (tx < TL_TOPK_RADIX - offset) {
+                    s_histogram[tx] = l_val;
+                }
+            }
+            // find threshold bin id
+            __syncthreads();
             if (s_histogram[tx] > l_new_topk && s_histogram[tx + 1] <= l_new_topk) {
                 s_threshold_bin_id[0] = tx;
             }
