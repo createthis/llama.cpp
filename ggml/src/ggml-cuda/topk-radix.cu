@@ -987,25 +987,19 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
     cudaMemcpyAsync(d_starts, h_starts.data(), sizeof(int) * (size_t)T, cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(d_ends,   h_ends.data(),   sizeof(int) * (size_t)T, cudaMemcpyHostToDevice, stream);
 
-    // Transpose [N, T] -> [T, N] into a temp buffer so k_tl_topk_port can read row-major by seq_len
-    float * tmp_TN = nullptr;
-    cudaMalloc(&tmp_TN, sizeof(float) * (size_t)N * T);
-    int threads = 256;
-    int blocks = (N*T + threads - 1)/threads;
-    k_transpose_scores<<<blocks, threads, 0, stream>>>(scores_d, tmp_TN, N, T);
-
-    // Launch the ported kernel: batch=T, seq_len=N
+    // Directly launch the ported kernel on [N, T] row-major (batch=T, seq_len=N)
     dim3 grid(T);
     dim3 block(TL_TOPK_BLOCK_SIZE);
     CUDA_CHECK(cudaMemsetAsync(idx_d, 0xFF, sizeof(int) * (size_t)k * T, stream));
     const char * __prof_env = getenv("LLAMA_SPARSE_PROF");
+
     auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
     if (__prof_env && *__prof_env) {
         cudaEvent_t __e0, __e1;
         cudaEventCreate(&__e0);
         cudaEventCreate(&__e1);
         cudaEventRecord(__e0, stream);
-        k_tl_topk_port<<<grid, block, 0, stream>>>(tmp_TN, T, N, k, idx_d, d_starts, d_ends);
+        k_tl_topk_port<<<grid, block, 0, stream>>>(scores_d, T, N, k, idx_d, d_starts, d_ends);
         cudaEventRecord(__e1, stream);
         cudaEventSynchronize(__e1);
         float __ms = 0.0f;
@@ -1026,18 +1020,18 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
         cudaEventDestroy(__e0);
         cudaEventDestroy(__e1);
     } else {
-        k_tl_topk_port<<<grid, block, 0, stream>>>(tmp_TN, T, N, k, idx_d, d_starts, d_ends);
+        k_tl_topk_port<<<grid, block, 0, stream>>>(scores_d, T, N, k, idx_d, d_starts, d_ends);
     }
 
     // Debug: validate first column indices against threshold when profiling is enabled (SEL_DEBUG only)
     if (SEL_DEBUG) {
         const char * __prof_env2 = getenv("LLAMA_SPARSE_PROF");
         if (__prof_env2 && *__prof_env2) {
-        // Copy first column t=0 of tmp_TN and first k indices
+        // Copy first column t=0 of input and first k indices
         std::vector<int> idx0(k, -1);
         CUDA_CHECK(cudaMemcpyAsync(idx0.data(), idx_d, sizeof(int) * (size_t)k, cudaMemcpyDeviceToHost, stream));
         std::vector<float> col0(N);
-        CUDA_CHECK(cudaMemcpyAsync(col0.data(), tmp_TN, sizeof(float) * (size_t)N, cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaMemcpyAsync(col0.data(), scores_d, sizeof(float) * (size_t)N, cudaMemcpyDeviceToHost, stream));
         CUDA_CHECK(cudaStreamSynchronize(stream));
         // Compute Kth threshold
         // Host compute sgt0 for t=0 for debugging
@@ -1085,7 +1079,6 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
 
     }
 
-    cudaFree(tmp_TN);
     cudaFree(d_starts);
     cudaFree(d_ends);
 }
