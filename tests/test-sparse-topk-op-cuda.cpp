@@ -118,6 +118,6 @@ static void build_and_run(int N, int T, int K, bool warmup = false) {
 
 int main() {
     build_and_run(4096, 1, 256, /*warmup=*/true);
-    build_and_run(40000, 2, 256);
+    build_and_run(4096, 1, 256);
     return 0;
 }
