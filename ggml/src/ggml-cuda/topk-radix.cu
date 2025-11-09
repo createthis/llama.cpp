@@ -991,14 +991,6 @@ static __global__ void k_tl_topk_port(
 }
 
 
-// Optional host wrapper for future wiring/testing; not used now
-extern "C" void ggml_cuda_topk_tilelang_port_host(const float * input_h, int batch, int seq_len, int topk,
-                                                   int * index_h, const int * starts_h, const int * ends_h) {
-    // Intentionally left as a placeholder; do not wire yet.
-    (void)input_h; (void)batch; (void)seq_len; (void)topk; (void)index_h; (void)starts_h; (void)ends_h;
-}
-
-
 void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
                                          const float * scores_d, int N, int T, int k,
                                          int * idx_d,
@@ -1006,8 +998,9 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
                                          const int * ends_d) {
     cudaStream_t stream = ctx.stream();
     // Prepare starts/ends: if provided, use them; else synthesize [0,N) by deriving ends from scores
-    int * d_starts = (int *)starts_d;
-    int * d_ends   = (int *)ends_d;
+    // Treat starts_d/ends_d as potentially const; when we need to allocate, we create writable buffers
+    int * d_starts = (int *)(uintptr_t)starts_d;
+    int * d_ends   = (int *)(uintptr_t)ends_d;
     int * tmp_alloc_starts = nullptr;
     int * tmp_alloc_ends   = nullptr;
     // Optionally fill device windows from scores (default: enabled)
