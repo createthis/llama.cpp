@@ -783,6 +783,21 @@ static __device__ __forceinline__ uint32_t tl_convert_to_uint32(float x) {
     return ((int32_t)bits_uint < 0) ? ~bits_uint : (bits_uint | 0x80000000u);
 }
 
+// Derive per-column end (exclusive) from scores by scanning for last value > threshold
+static __global__ void k_derive_ends_from_scores(const float * __restrict__ scores,
+                                                 int N, int T, int ld, float masked_thresh,
+                                                 int * __restrict__ ends) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= T) return;
+    const float * col = scores + (size_t)ld * t;
+    int e = 0;
+    for (int i = N - 1; i >= 0; --i) {
+        float v = col[i];
+        if (v > masked_thresh) { e = i + 1; break; }
+    }
+    ends[t] = e;
+}
+
 // Fixed configuration to match TileLang example
 #ifndef TL_TOPK_RADIX
 #define TL_TOPK_RADIX 256
@@ -986,6 +1001,13 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
 
     cudaMemcpyAsync(d_starts, h_starts.data(), sizeof(int) * (size_t)T, cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(d_ends,   h_ends.data(),   sizeof(int) * (size_t)T, cudaMemcpyHostToDevice, stream);
+
+    // Derive per-column ends from masked scores to avoid scanning beyond kv_end
+    {
+        int threads = 128;
+        int blocks = (T + threads - 1)/threads;
+        k_derive_ends_from_scores<<<blocks, threads, 0, stream>>>(scores_d, N, T, /*ld=*/N, -1.0e29f, d_ends);
+    }
 
     // Directly launch the ported kernel on [N, T] row-major (batch=T, seq_len=N)
     dim3 grid(T);
