@@ -782,19 +782,34 @@ static __device__ __forceinline__ uint32_t tl_convert_to_uint32(float x) {
 }
 
 // Derive per-column end (exclusive) from scores by scanning for last value > threshold
+// Cooperative within a block: one block per column, threads stride from the end
 static __global__ void k_derive_ends_from_scores(const float * __restrict__ scores,
                                                  int N, int T, int ld, float masked_thresh,
                                                  int * __restrict__ ends) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    int t = blockIdx.x;
     if (t >= T) return;
     const float * col = scores + (size_t)ld * t;
-    int e = 0;
-    for (int i = N - 1; i >= 0; --i) {
+    int e_local = 0;
+    // Stride from the end: each thread scans its own tail segment
+    for (int i = N - 1 - threadIdx.x; i >= 0; i -= blockDim.x) {
         float v = col[i];
-        if (v > masked_thresh) { e = i + 1; break; }
+        if (v > masked_thresh) { e_local = i + 1; break; }
     }
-    if (e <= 256) ends[t] = 257;
-    else ends[t] = e;
+    // Reduce max e_local across threads
+    extern __shared__ int smax[]; // sized by blockDim.x when launching with dynamic smem=0 -> use static array instead
+    // Fallback to static shared memory sized for <= 1024 threads
+    __shared__ int smax_static[1024];
+    int *s = smax_static;
+    s[threadIdx.x] = e_local;
+    __syncthreads();
+    for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (threadIdx.x < offset) s[threadIdx.x] = max(s[threadIdx.x], s[threadIdx.x + offset]);
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        int e = s[0];
+        ends[t] = (e <= 256) ? 257 : e;
+    }
 }
 
 // Fixed configuration to match TileLang example
@@ -1013,15 +1028,13 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
     int * d_starts = nullptr, * d_ends = nullptr;
     cudaMalloc(&d_starts, sizeof(int) * (size_t)T);
     cudaMalloc(&d_ends,   sizeof(int) * (size_t)T);
-    std::vector<int> h_starts(T, 0), h_ends(T, N);
-
-    cudaMemcpyAsync(d_starts, h_starts.data(), sizeof(int) * (size_t)T, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_ends,   h_ends.data(),   sizeof(int) * (size_t)T, cudaMemcpyHostToDevice, stream);
+    // Initialize starts to zero on device; ends will be derived directly on device
+    CUDA_CHECK(cudaMemsetAsync(d_starts, 0, sizeof(int) * (size_t)T, stream));
 
     // Derive per-column ends from masked scores to avoid scanning beyond kv_end
     {
-        int threads = 128;
-        int blocks = (T + threads - 1)/threads;
+        const int threads = 128;
+        const int blocks = T;
         k_derive_ends_from_scores<<<blocks, threads, 0, stream>>>(scores_d, N, T, /*ld=*/N, -1.0e29f, d_ends);
     }
 

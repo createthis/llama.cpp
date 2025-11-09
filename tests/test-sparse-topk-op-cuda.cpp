@@ -128,8 +128,8 @@ static void build_and_run(int N, int T, int K, int end=0, bool warmup = false) {
 
 int main() {
     build_and_run(4096, 1, 256, /*end=*/0, /*warmup=*/true);
-    build_and_run(4096, 1, 256, 0);
-    build_and_run(4096, 1, 256, 1);
-    build_and_run(163840, 1, 256, 1);
+    build_and_run(4096, 1, 256, /*end=*/0);
+    build_and_run(4096, 1, 256, /*end=*/1);
+    build_and_run(163840, 1, 256, /*end=*/1);
     return 0;
 }
