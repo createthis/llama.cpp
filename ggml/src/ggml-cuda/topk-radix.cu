@@ -43,7 +43,7 @@ __device__ __forceinline__ void named_sync(int count) {
 }
 
 #ifndef SEL_DEBUG
-#define SEL_DEBUG 0
+#define SEL_DEBUG 1
 #endif
 #ifndef SEL_DEBUG_COL
 #define SEL_DEBUG_COL 0
@@ -837,10 +837,15 @@ static __global__ void k_tl_topk_port(
     int l_start_idx = starts[bx];
     int l_end_idx   = ends[bx];
 
+    if (SEL_DEBUG && bx == 0 && tx == 0) {
+        printf("[TL_KERNEL] l_new_topk=%d l_start_idx=%d l_end_idx=%d\n", l_new_topk, l_start_idx, l_end_idx);
+    }
+
     // stage 1: use 8bit to do quick topk
     // T.fill(s_histogram, 0)
     for (int i = tx; i < TL_TOPK_RADIX + 1; i += blockDim.x) s_histogram[i] = 0;
     if (tx == 0) s_num_input[0] = 0; // T.fill(s_num_input[0], 0)
+    if (tx == 0) s_threshold_bin_id[0] = -1;
 
     __syncthreads();
     // for s in T.serial(T.ceildiv(seq_len, BLOCK_SIZE)):
@@ -872,6 +877,9 @@ static __global__ void k_tl_topk_port(
         named_sync<3>(TL_TOPK_RADIX);
         if (s_histogram[tx] > l_new_topk && s_histogram[tx + 1] <= l_new_topk) {
             s_threshold_bin_id[0] = tx;
+            if (SEL_DEBUG) {
+                printf("[TL_KERNEL] thr0=%d tx=%d\n", l_threshold_bin_id, tx);
+            }
         }
     }
     __syncthreads();
@@ -927,6 +935,7 @@ static __global__ void k_tl_topk_port(
         for (int s = 0; s < it2; ++s) {
             int idx = s * TL_TOPK_BLOCK_SIZE + tx;
             if (idx < l_num_input) {
+                if (idx >= TL_TOPK_SMEM_INPUT_SIZE) asm("brkpt;");
                 int in_idx = s_input_idx[r_idx][idx];
                 float v = input[(size_t)bx * seq_len + in_idx];
                 l_bin_id32 = (int)((tl_convert_to_uint32(v) >> (24 - round * 8)) & 0xFFu);

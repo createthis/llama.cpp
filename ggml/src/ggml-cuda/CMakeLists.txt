@@ -44,6 +44,8 @@ if (CUDAToolkit_FOUND)
     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda-radix.h")
 
+    set_source_files_properties(topk-radix.cu PROPERTIES COMPILE_OPTIONS "-lineinfo")
+
     file(GLOB   GGML_SOURCES_CUDA "*.cu")
     list(APPEND GGML_SOURCES_CUDA "topk-radix.cu" indexer-fused.cu sparse-mla-decode.cu)
 

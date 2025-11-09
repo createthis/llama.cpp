@@ -7,12 +7,22 @@
 #include <algorithm>
 #include <cstdlib>
 
-static void build_and_run(int N, int T, int K, bool warmup = false) {
+static void build_and_run(int N, int T, int K, int end=0, bool warmup = false) {
     // host scores
     std::mt19937 rng(42);
     std::uniform_real_distribution<float> dist(-5.0f, 5.0f);
     std::vector<float> scores_h((size_t)N*T);
     for (auto & v : scores_h) v = dist(rng);
+
+    if (end) {
+        // Force l_end_idx = 1 for every column: only row 0 is > -1e29
+        for (int t = 0; t < T; ++t) {
+            scores_h[0 + (size_t)N * t] = 1.0f; // any normal value > -1e29
+            for (int i = end; i < N; ++i) {
+                scores_h[i + (size_t)N * t] = -1.0e30f; // masked (<= -1e29)
+            }
+        }
+    }
 
     ggml_init_params ip{}; ip.mem_size = 64ull*1024*1024; ip.no_alloc = true;
     ggml_context* ctx = ggml_init(ip);
@@ -117,7 +127,8 @@ static void build_and_run(int N, int T, int K, bool warmup = false) {
 }
 
 int main() {
-    build_and_run(4096, 1, 256, /*warmup=*/true);
-    build_and_run(4096, 1, 256);
+    build_and_run(4096, 1, 256, /*end=*/0, /*warmup=*/true);
+    build_and_run(4096, 1, 256, 0);
+    build_and_run(4096, 1, 256, 1);
     return 0;
 }
