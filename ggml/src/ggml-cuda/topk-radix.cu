@@ -37,8 +37,13 @@ static inline uint8_t host_convert_to_uint16_bin(float x) {
     return (uint8_t)(bits >> 8);
 }
 
+template<int ID>
+__device__ __forceinline__ void named_sync(int count) {
+  asm volatile("bar.sync %0, %1;" :: "n"(ID), "r"(count) : "memory");
+}
+
 #ifndef SEL_DEBUG
-#define SEL_DEBUG 1
+#define SEL_DEBUG 0
 #endif
 #ifndef SEL_DEBUG_COL
 #define SEL_DEBUG_COL 0
@@ -280,6 +285,11 @@ static __global__ void k_select_topk_bins(const float * __restrict__ scores,
           printf("[SEL] R1: thr1=%d remaining=%d path=%s sum_h1=%u eq0_total=%d eq0_store=%d\n",
                  thr1, remaining, (eq0_total <= eq_capacity) ? "buf" : "fallback", sum_h1, eq0_total, eq0_store);
       }
+#endif
+#if SEL_DEBUG
+    if (threadIdx.x == 0 && (SEL_DEBUG_COL==0 || blockIdx.x == SEL_DEBUG_COL)) {
+        printf("[TL_KERNEL] R1 thr1=%d\n", thr1);
+    }
 #endif
 
 
@@ -757,8 +767,8 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
 // Simple glue kernels for wiring the TileLang-ported selector
 // -----------------------------------------------------------------------------
 
+// Cast to float16, reinterpret bits, then map sign for descending order
 static __device__ __forceinline__ uint16_t tl_convert_to_uint16(float x) {
-    // Cast to float16, reinterpret bits, then map sign for descending order
     __half h = __float2half(x);
     unsigned short bits_uint = __half_as_ushort(h);
     bits_uint = (x < 0.0f) ? (unsigned short)(~bits_uint & 0xFFFFu)
@@ -838,7 +848,6 @@ static __global__ void k_tl_topk_port(
     for (int s = 0; s < iters; ++s) {
         int input_idx = s * TL_TOPK_BLOCK_SIZE + tx;
         if (input_idx < l_end_idx && input_idx >= l_start_idx && input_idx < seq_len) {
-            // inval_int16 = convert_to_uint16(input[bx, input_idx])
             float v = input[(size_t)bx * seq_len + input_idx];
             uint16_t inval_int16 = tl_convert_to_uint16(v);
             atomicAdd(&s_histogram[inval_int16], 1);
@@ -850,17 +859,17 @@ static __global__ void k_tl_topk_port(
     if (tx < TL_TOPK_RADIX) {
         for (int i = 0; i < 8; ++i) {
             int offset = 1 << i;
-            __syncthreads();
+            named_sync<3>(TL_TOPK_RADIX);
             if (tx < TL_TOPK_RADIX - offset) {
                 l_val = s_histogram[tx] + s_histogram[tx + offset];
             }
-            __syncthreads();
+            named_sync<3>(TL_TOPK_RADIX);
             if (tx < TL_TOPK_RADIX - offset) {
                 s_histogram[tx] = l_val;
             }
         }
         // find threshold bin id
-        __syncthreads();
+        named_sync<3>(TL_TOPK_RADIX);
         if (s_histogram[tx] > l_new_topk && s_histogram[tx + 1] <= l_new_topk) {
             s_threshold_bin_id[0] = tx;
         }
@@ -911,6 +920,9 @@ static __global__ void k_tl_topk_port(
         __syncthreads();
 
         l_num_input = s_num_input[r_idx];
+        if (SEL_DEBUG && bx == 0 && tx == 0) {
+            printf("[TL_KERNEL] R%d start: l_new_topk=%d l_num_input=%d l_start_pos=%d\n", round, l_new_topk, l_num_input, l_start_pos);
+        }
         int it2 = (l_num_input + TL_TOPK_BLOCK_SIZE - 1) / TL_TOPK_BLOCK_SIZE;
         for (int s = 0; s < it2; ++s) {
             int idx = s * TL_TOPK_BLOCK_SIZE + tx;
@@ -927,17 +939,17 @@ static __global__ void k_tl_topk_port(
         if (tx < TL_TOPK_RADIX) {
             for (int i = 0; i < 8; ++i) {
                 int offset = 1 << i;
-                __syncthreads();
+                named_sync<3>(TL_TOPK_RADIX);
                 if (tx < TL_TOPK_RADIX - offset) {
                     l_val = s_histogram[tx] + s_histogram[tx + offset];
                 }
-                __syncthreads();
+                named_sync<3>(TL_TOPK_RADIX);
                 if (tx < TL_TOPK_RADIX - offset) {
                     s_histogram[tx] = l_val;
                 }
             }
             // find threshold bin id
-            __syncthreads();
+            named_sync<3>(TL_TOPK_RADIX);
             if (s_histogram[tx] > l_new_topk && s_histogram[tx + 1] <= l_new_topk) {
                 s_threshold_bin_id[0] = tx;
             }
@@ -1043,49 +1055,49 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
     if (SEL_DEBUG) {
         const char * __prof_env2 = getenv("LLAMA_SPARSE_PROF");
         if (__prof_env2 && *__prof_env2) {
-        // Copy first column t=0 of input and first k indices
-        std::vector<int> idx0(k, -1);
-        CUDA_CHECK(cudaMemcpyAsync(idx0.data(), idx_d, sizeof(int) * (size_t)k, cudaMemcpyDeviceToHost, stream));
-        std::vector<float> col0(N);
-        CUDA_CHECK(cudaMemcpyAsync(col0.data(), scores_d, sizeof(float) * (size_t)N, cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        // Compute Kth threshold
-        // Host compute sgt0 for t=0 for debugging
-        {
-            unsigned int hist[256] = {0};
-            for (int i = 0; i < N; ++i) {
-                uint8_t b = host_convert_to_uint16_bin(col0[i]);
-                hist[b]++;
+            // Copy first column t=0 of input and first k indices
+            std::vector<int> idx0(k, -1);
+            CUDA_CHECK(cudaMemcpyAsync(idx0.data(), idx_d, sizeof(int) * (size_t)k, cudaMemcpyDeviceToHost, stream));
+            std::vector<float> col0(N);
+            CUDA_CHECK(cudaMemcpyAsync(col0.data(), scores_d, sizeof(float) * (size_t)N, cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            // Compute Kth threshold
+            // Host compute sgt0 for t=0 for debugging
+            {
+                unsigned int hist[256] = {0};
+                for (int i = 0; i < N; ++i) {
+                    uint8_t b = host_convert_to_uint16_bin(col0[i]);
+                    hist[b]++;
+                }
+                unsigned int S[257];
+                S[256] = 0;
+                for (int b = 255; b >= 0; --b) S[b] = S[b+1] + hist[b];
+                int thr0 = 0;
+                for (int b = 255; b >= 0; --b) {
+                    if (S[b] > (unsigned)k && S[b+1] <= (unsigned)k) { thr0 = b; break; }
+                }
+                unsigned int sgt0 = S[thr0+1];
+                if (SEL_DEBUG) fprintf(stderr, "[TL_HOST_DBG] thr0=%d sgt0=%u\n", thr0, sgt0);
             }
-            unsigned int S[257];
-            S[256] = 0;
-            for (int b = 255; b >= 0; --b) S[b] = S[b+1] + hist[b];
-            int thr0 = 0;
-            for (int b = 255; b >= 0; --b) {
-                if (S[b] > (unsigned)k && S[b+1] <= (unsigned)k) { thr0 = b; break; }
-            }
-            unsigned int sgt0 = S[thr0+1];
-            if (SEL_DEBUG) fprintf(stderr, "[TL_HOST_DBG] thr0=%d sgt0=%u\n", thr0, sgt0);
-        }
 
-        std::vector<float> sorted = col0;
-        if (k > 0 && k <= N) {
-            std::nth_element(sorted.begin(), sorted.begin() + (k-1), sorted.end(), std::greater<float>());
-            float thresh = sorted[k-1];
-            // compute MSB threshold bin for host check
-            int thr_bin = host_convert_to_uint16_bin(thresh);
-            int below = 0; int bad_idx = -1; float bad_v = 0.0f; int bad_bin = -1;
-            std::vector<char> seen(N, 0);
-            for (int i = 0; i < k; ++i) {
-                int ix = idx0[i];
-                if (ix < 0 || ix >= N) { below++; bad_idx = ix; bad_v = NAN; bad_bin = -1; break; }
-                if (!seen[ix]) seen[ix] = 1;
-                float v = col0[ix];
-                int vb = host_convert_to_uint16_bin(v);
-                if (!(v >= thresh)) { below++; bad_idx = ix; bad_v = v; bad_bin = vb; break; }
+            std::vector<float> sorted = col0;
+            if (k > 0 && k <= N) {
+                std::nth_element(sorted.begin(), sorted.begin() + (k-1), sorted.end(), std::greater<float>());
+                float thresh = sorted[k-1];
+                // compute MSB threshold bin for host check
+                int thr_bin = host_convert_to_uint16_bin(thresh);
+                int below = 0; int bad_idx = -1; float bad_v = 0.0f; int bad_bin = -1;
+                std::vector<char> seen(N, 0);
+                for (int i = 0; i < k; ++i) {
+                    int ix = idx0[i];
+                    if (ix < 0 || ix >= N) { below++; bad_idx = ix; bad_v = NAN; bad_bin = -1; break; }
+                    if (!seen[ix]) seen[ix] = 1;
+                    float v = col0[ix];
+                    int vb = host_convert_to_uint16_bin(v);
+                    if (!(v >= thresh)) { below++; bad_idx = ix; bad_v = v; bad_bin = vb; break; }
+                }
+                if (SEL_DEBUG) fprintf(stderr, "[TL_DEBUG] t=0 thresh=%.6f (bin=%d) below=%d bad_idx=%d bad_v=%g bad_bin=%d\n", thresh, thr_bin, below, bad_idx, bad_v, bad_bin);
             }
-            if (SEL_DEBUG) fprintf(stderr, "[TL_DEBUG] t=0 thresh=%.6f (bin=%d) below=%d bad_idx=%d bad_v=%g bad_bin=%d\n", thresh, thr_bin, below, bad_idx, bad_v, bad_bin);
-        }
             if (SEL_DEBUG) {
                 fprintf(stderr, "[TL_DEBUG_IDX] idx0: ");
                 for (int i = 0; i < k; ++i) fprintf(stderr, "%d ", idx0[i]);
