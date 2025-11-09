@@ -7312,16 +7312,26 @@ GGML_API struct ggml_tensor * ggml_sparse_topk_radix_ex(
         int                   k,
         struct ggml_tensor  * starts,
         struct ggml_tensor  * ends) {
-    // Basic shape checks
     GGML_ASSERT(scores->type == GGML_TYPE_F32 || scores->type == GGML_TYPE_F16);
     GGML_ASSERT(scores->ne[2] == 1 && scores->ne[3] == 1);
     GGML_ASSERT(k > 0 && k <= scores->ne[0]);
-    // starts/ends optional; if provided, require 1D of length T
-    (void)starts; (void)ends;
     struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, k, scores->ne[1]);
     ggml_set_op_params_i32(result, 0, k);
     result->op     = GGML_OP_SPARSE_TOPK_RADIX;
     result->src[0] = scores;
-    // For now, we don’t thread starts/ends through CPU path; CUDA backend may read them via dst->src[1:2] in future
+    // Thread optional starts/ends to backend via src[1]/src[2]; CPU path ignores them
+    if (starts) {
+        // starts must be 1D of length T (scores->ne[1])
+        GGML_ASSERT(starts->ne[0] == scores->ne[1]);
+        result->src[1] = starts;
+    } else {
+        result->src[1] = NULL;
+    }
+    if (ends) {
+        GGML_ASSERT(ends->ne[0] == scores->ne[1]);
+        result->src[2] = ends;
+    } else {
+        result->src[2] = NULL;
+    }
     return result;
 }

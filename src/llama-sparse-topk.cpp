@@ -373,6 +373,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
             ggml_cuda_mask_window_starts_device_to_host_simple((const float *)kq_mask->data, (int)N_kv, (int)T, starts_h.data());
             ggml_tensor * starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
             memcpy(starts->data, starts_h.data(), sizeof(int32_t) * (size_t)T);
+            ggml_set_input(starts);
             win_starts = starts; have_windows = true;
         }
 #endif
@@ -382,6 +383,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
             ggml_cuda_mask_window_ends_device_to_host_simple((const float *)kq_mask->data, (int)N_kv, (int)T, ends_h.data());
             ggml_tensor * ends = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
             memcpy(ends->data, ends_h.data(), sizeof(int32_t) * (size_t)T);
+            ggml_set_input(ends);
             win_ends = ends; have_windows = true;
         }
 #endif
@@ -667,7 +669,25 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
         ggml_tensor * scores_clamped = ggml_clamp(ctx, scores_pre, -1e30f, 1e30f);
         // Compute top-k indices via CUDA radix selection
         const int64_t k_tile = std::min<int64_t>(k, scores_clamped->ne[0]);
-        ggml_tensor * topk_tc = ggml_sparse_topk_radix(ctx, scores_clamped, (int)k_tile);
+        ggml_tensor * topk_tc = nullptr;
+        if (have_windows && win_ends) {
+            // slice starts/ends for this tile [t0, t0+Tc)
+            ggml_tensor * starts_tile = nullptr;
+            ggml_tensor * ends_tile   = nullptr;
+            if (win_starts) {
+                size_t off_s = (size_t)t0 * win_starts->nb[0];
+                starts_tile = ggml_view_1d(ctx, win_starts, Tc, off_s);
+                starts_tile = ggml_cont(ctx, starts_tile);
+            }
+            if (win_ends) {
+                size_t off_e = (size_t)t0 * win_ends->nb[0];
+                ends_tile   = ggml_view_1d(ctx, win_ends,   Tc, off_e);
+                ends_tile   = ggml_cont(ctx, ends_tile);
+            }
+            topk_tc = ggml_sparse_topk_radix_ex(ctx, scores_clamped, (int)k_tile, starts_tile, ends_tile);
+        } else {
+            topk_tc = ggml_sparse_topk_radix(ctx, scores_clamped, (int)k_tile);
+        }
         if (dbg && t0 == 0) {
             cb(topk_tc, "idxkv_topk_radix", -1);
             int64_t kk = std::min<int64_t>(k_tile, (int64_t)16);
