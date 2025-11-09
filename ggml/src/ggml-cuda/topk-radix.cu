@@ -676,11 +676,9 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
 }
 
 extern "C" void ggml_cuda_topk_radix_indices_host(const float * scores_h, int N, int T, int k, int * idx_h) {
-    // Simple host wrapper: copy scores to device, allocate idx device, invoke kernels, copy back
     ggml_backend_cuda_context ctx(0);
     cudaStream_t stream = ctx.stream();
-    float * scores_d = nullptr;
-    int * idx_d = nullptr;
+    float * scores_d = nullptr; int * idx_d = nullptr;
     cudaMalloc(&scores_d, sizeof(float) * (size_t)N * T);
     cudaMalloc(&idx_d, sizeof(int) * (size_t)k * T);
     cudaMemcpyAsync(scores_d, scores_h, sizeof(float) * (size_t)N * T, cudaMemcpyHostToDevice, stream);
@@ -692,63 +690,44 @@ extern "C" void ggml_cuda_topk_radix_indices_host(const float * scores_h, int N,
 }
 
 extern "C" void ggml_cuda_topk_histogram_host(const float * scores_h, int N, int T,
-                                               unsigned int * gt_counts_h, unsigned int * thr_bins_h) {
+                                     unsigned int * gt_counts_h, unsigned int * thr_bins_h) {
     ggml_backend_cuda_context ctx(0);
     cudaStream_t stream = ctx.stream();
-    float * scores_d = nullptr;
-    uint32_t * gt_counts_d = nullptr;
-    uint32_t * thr_bins_d = nullptr;
+    float * scores_d = nullptr; uint32_t * gt_counts_d = nullptr; uint32_t * thr_bins_d = nullptr;
     cudaMalloc(&scores_d, sizeof(float) * (size_t)N * T);
     cudaMalloc(&gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T);
     cudaMalloc(&thr_bins_d,  sizeof(uint32_t) * (size_t)T);
-
     cudaMemcpyAsync(scores_d, scores_h, sizeof(float) * (size_t)N * T, cudaMemcpyHostToDevice, stream);
-
     const int hist_threads = env_threads_or_default("LLAMA_SPARSE_TOPK_THREADS", 1024);
     const size_t hist_shmem = (size_t)(((hist_threads/32) + 1) * 256) * sizeof(uint32_t);
     k_histogram_topbyte<<<T, hist_threads, hist_shmem, stream>>>(scores_d, N, T, /*ld=*/N, thr_bins_d, gt_counts_d);
-
     cudaMemcpyAsync(gt_counts_h, gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T, cudaMemcpyDeviceToHost, stream);
     cudaMemcpyAsync(thr_bins_h,  thr_bins_d,  sizeof(uint32_t) * (size_t)T,        cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
-
-    cudaFree(scores_d);
-    cudaFree(gt_counts_d);
-    cudaFree(thr_bins_d);
+    cudaFree(scores_d); cudaFree(gt_counts_d); cudaFree(thr_bins_d);
 }
 
 extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T, int k,
-                                            const unsigned int * gt_counts_h, int * idx_h) {
+                                const unsigned int * gt_counts_h, int * idx_h) {
     ggml_backend_cuda_context ctx(0);
     cudaStream_t stream = ctx.stream();
-    float * scores_d = nullptr;
-    uint32_t * gt_counts_d = nullptr;
-    int * idx_d = nullptr;
+    float * scores_d = nullptr; uint32_t * gt_counts_d = nullptr; int * idx_d = nullptr;
     cudaMalloc(&scores_d, sizeof(float) * (size_t)N * T);
     cudaMalloc(&gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T);
     cudaMalloc(&idx_d, sizeof(int) * (size_t)k * T);
-
     cudaMemcpyAsync(scores_d, scores_h, sizeof(float) * (size_t)N * T, cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(gt_counts_d, gt_counts_h, sizeof(uint32_t) * 256 * (size_t)T, cudaMemcpyHostToDevice, stream);
-
     const int sel_threads = env_threads_or_default("LLAMA_SPARSE_TOPK_THREADS", 1024);
     int cap_env = 0; const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
-    if (env_cap) {
-        cap_env = atoi(env_cap);
-        if (cap_env < 0) cap_env = 0;
-    }
+    if (env_cap) { cap_env = atoi(env_cap); if (cap_env < 0) cap_env = 0; }
     int cap_default = 4096;
     const int eq_cap_host = max(k, min(N, cap_env ? cap_env : cap_default));
     const size_t sel_shmem = (size_t) (2*eq_cap_host) * sizeof(int);
     CUDA_SET_SHARED_MEMORY_LIMIT(k_select_topk_bins, (int)sel_shmem);
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap_host, gt_counts_d, idx_d);
-
     cudaMemcpyAsync(idx_h, idx_d, sizeof(int) * (size_t)k * T, cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
-
-    cudaFree(scores_d);
-    cudaFree(gt_counts_d);
-    cudaFree(idx_d);
+    cudaFree(scores_d); cudaFree(gt_counts_d); cudaFree(idx_d);
 }
 
 // -----------------------------------------------------------------------------
@@ -1022,20 +1001,26 @@ extern "C" void ggml_cuda_topk_tilelang_port_host(const float * input_h, int bat
 
 void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
                                          const float * scores_d, int N, int T, int k,
-                                         int * idx_d) {
+                                         int * idx_d,
+                                         const int * starts_d,
+                                         const int * ends_d) {
     cudaStream_t stream = ctx.stream();
-    // Synthesize starts/ends as [0, N)
-    int * d_starts = nullptr, * d_ends = nullptr;
-    cudaMalloc(&d_starts, sizeof(int) * (size_t)T);
-    cudaMalloc(&d_ends,   sizeof(int) * (size_t)T);
-    // Initialize starts to zero on device; ends will be derived directly on device
-    CUDA_CHECK(cudaMemsetAsync(d_starts, 0, sizeof(int) * (size_t)T, stream));
-
-    // Derive per-column ends from masked scores to avoid scanning beyond kv_end
-    {
+    // Prepare starts/ends: if provided, use them; else synthesize [0,N) by deriving ends from scores
+    int * d_starts = (int *)starts_d;
+    int * d_ends   = (int *)ends_d;
+    int * tmp_alloc_starts = nullptr;
+    int * tmp_alloc_ends   = nullptr;
+    if (d_starts == nullptr) {
+        CUDA_CHECK(cudaMalloc(&tmp_alloc_starts, sizeof(int) * (size_t)T));
+        CUDA_CHECK(cudaMemsetAsync(tmp_alloc_starts, 0, sizeof(int) * (size_t)T, stream));
+        d_starts = tmp_alloc_starts;
+    }
+    if (d_ends == nullptr) {
+        CUDA_CHECK(cudaMalloc(&tmp_alloc_ends, sizeof(int) * (size_t)T));
         const int threads = 128;
         const int blocks = T;
-        k_derive_ends_from_scores<<<blocks, threads, 0, stream>>>(scores_d, N, T, /*ld=*/N, -1.0e29f, d_ends);
+        k_derive_ends_from_scores<<<blocks, threads, 0, stream>>>(scores_d, N, T, /*ld=*/N, -1.0e29f, tmp_alloc_ends);
+        d_ends = tmp_alloc_ends;
     }
 
     // Directly launch the ported kernel on [N, T] row-major (batch=T, seq_len=N)
@@ -1130,6 +1115,6 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
 
     }
 
-    cudaFree(d_starts);
-    cudaFree(d_ends);
+    if (tmp_alloc_starts) cudaFree(tmp_alloc_starts);
+    if (tmp_alloc_ends)   cudaFree(tmp_alloc_ends);
 }

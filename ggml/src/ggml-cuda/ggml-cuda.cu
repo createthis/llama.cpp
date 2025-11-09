@@ -2539,6 +2539,11 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 CUDA_CHECK(cudaStreamIsCapturing(ctx.stream(), &__iscap));
                 bool __do_prof = (__prof_env && *__prof_env && __iscap == cudaStreamCaptureStatusNone);
                 cudaError_t __err_kernel = cudaSuccess;
+                // Optional per-column KV windows (starts/ends) passed via src[1]/src[2]
+                const int * tl_starts = nullptr;
+                const int * tl_ends   = nullptr;
+                if (dst->src[1] && dst->src[1]->type == GGML_TYPE_I32) tl_starts = (const int *)dst->src[1]->data;
+                if (dst->src[2] && dst->src[2]->type == GGML_TYPE_I32) tl_ends   = (const int *)dst->src[2]->data;
                 if (scores->type == GGML_TYPE_F16) {
                     // Promote half->float for current kernel
                     const to_fp32_cuda_t to_fp32 = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
@@ -2551,7 +2556,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                         {
                             const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
                             if (use_tl && *use_tl) {
-                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data, tl_starts, tl_ends);
                             } else {
                                 ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
                             }
@@ -2573,7 +2578,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                         {
                             const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
                             if (use_tl && *use_tl) {
-                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data, tl_starts, tl_ends);
                             } else {
                                 ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
                             }
@@ -2590,7 +2595,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                         {
                             const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
                             if (use_tl && *use_tl) {
-                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data, tl_starts, tl_ends);
                             } else {
                                 ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
                             }
@@ -2614,7 +2619,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     } else {
                         const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
                         if (use_tl && *use_tl) {
-                            ggml_cuda_topk_tilelang_port_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+                            ggml_cuda_topk_tilelang_port_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data, tl_starts, tl_ends);
                         } else {
                             ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
                         }
