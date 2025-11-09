@@ -363,30 +363,55 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
     }
 
     ggml_tensor * mask_full = nullptr;
+    bool prefer_device_windows = true;
+    if (const char *env = getenv("LLAMA_SPARSE_TOPK_WINDOWS_DEVICE")) {
+        prefer_device_windows = atoi(env) != 0;
+    }
+
     ggml_tensor * win_starts = nullptr;
     (void)win_starts;
     ggml_tensor * win_ends   = nullptr;
     bool have_windows = false;
 #ifdef GGML_USE_CUDA
         if (kq_mask && kq_mask->buffer && !ggml_backend_buffer_is_host(kq_mask->buffer)) {
-            std::vector<int32_t> starts_h((size_t)T, 0);
-            ggml_cuda_mask_window_starts_device_to_host_simple((const float *)kq_mask->data, (int)N_kv, (int)T, starts_h.data());
-            ggml_tensor * starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
-            memcpy(starts->data, starts_h.data(), sizeof(int32_t) * (size_t)T);
-            ggml_set_input(starts);
-            win_starts = starts; have_windows = true;
+            if (prefer_device_windows) {
+                // Create device-resident starts/ends tensors and fill them via device kernels
+                win_starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+                win_ends   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+                // We will make sure they are placed on CUDA via scheduling; initialization happens in CUDA backend compute
+                // For visibility in eval-callback if needed, expose as inputs
+                ggml_set_input(win_starts);
+                ggml_set_input(win_ends);
+                have_windows = true;
+            } else {
+                std::vector<int32_t> starts_h((size_t)T, 0);
+                ggml_cuda_mask_window_starts_device_to_host_simple((const float *)kq_mask->data, (int)N_kv, (int)T, starts_h.data());
+                ggml_tensor * starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+                memcpy(starts->data, starts_h.data(), sizeof(int32_t) * (size_t)T);
+                ggml_set_input(starts);
+                win_starts = starts; have_windows = true;
+
+                std::vector<int32_t> ends_h((size_t)T, 0);
+                ggml_cuda_mask_window_ends_device_to_host_simple((const float *)kq_mask->data, (int)N_kv, (int)T, ends_h.data());
+                ggml_tensor * ends = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+                memcpy(ends->data, ends_h.data(), sizeof(int32_t) * (size_t)T);
+                ggml_set_input(ends);
+                win_ends = ends; have_windows = true;
+            }
         }
 #endif
-#ifdef GGML_USE_CUDA
-        if (kq_mask && kq_mask->buffer && !ggml_backend_buffer_is_host(kq_mask->buffer)) {
-            std::vector<int32_t> ends_h((size_t)T, 0);
-            ggml_cuda_mask_window_ends_device_to_host_simple((const float *)kq_mask->data, (int)N_kv, (int)T, ends_h.data());
-            ggml_tensor * ends = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
-            memcpy(ends->data, ends_h.data(), sizeof(int32_t) * (size_t)T);
-            ggml_set_input(ends);
-            win_ends = ends; have_windows = true;
-        }
-#endif
+    // If no device-resident windows were created, but we prefer device windows, create empty device
+    // starts/ends now and let the CUDA top-k kernel derive them from scores
+    #ifdef GGML_USE_CUDA
+    if (!have_windows && prefer_device_windows) {
+        win_starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+        win_ends   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
+        ggml_set_input(win_starts);
+        ggml_set_input(win_ends);
+        have_windows = true;
+    }
+    #endif
+
 
 #ifdef GGML_USE_CUDA
 
@@ -684,8 +709,17 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                 ends_tile   = ggml_view_1d(ctx, win_ends,   Tc, off_e);
                 ends_tile   = ggml_cont(ctx, ends_tile);
             }
+            if (dbg) {
+                printf("[TOPK] using start and end\n");
+                fflush(stdout);
+            }
             topk_tc = ggml_sparse_topk_radix_ex(ctx, scores_clamped, (int)k_tile, starts_tile, ends_tile);
         } else {
+            if (dbg) {
+                printf("[TOPK] not using start and end, have_windows=%s win_ends=%s\n", 
+                        have_windows ? "true" : "false", win_ends ? "true" : "false");
+                fflush(stdout);
+            }
             topk_tc = ggml_sparse_topk_radix(ctx, scores_clamped, (int)k_tile);
         }
         if (dbg && t0 == 0) {

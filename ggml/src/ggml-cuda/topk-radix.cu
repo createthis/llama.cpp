@@ -1010,17 +1010,22 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
     int * d_ends   = (int *)ends_d;
     int * tmp_alloc_starts = nullptr;
     int * tmp_alloc_ends   = nullptr;
+    // Optionally fill device windows from scores (default: enabled)
+    bool fill_win = true; if (const char *e = getenv("LLAMA_SPARSE_TOPK_WINDOWS_DEVICE")) fill_win = atoi(e) != 0;
     if (d_starts == nullptr) {
         CUDA_CHECK(cudaMalloc(&tmp_alloc_starts, sizeof(int) * (size_t)T));
-        CUDA_CHECK(cudaMemsetAsync(tmp_alloc_starts, 0, sizeof(int) * (size_t)T, stream));
         d_starts = tmp_alloc_starts;
     }
     if (d_ends == nullptr) {
         CUDA_CHECK(cudaMalloc(&tmp_alloc_ends, sizeof(int) * (size_t)T));
-        const int threads = 128;
-        const int blocks = T;
-        k_derive_ends_from_scores<<<blocks, threads, 0, stream>>>(scores_d, N, T, /*ld=*/N, -1.0e29f, tmp_alloc_ends);
         d_ends = tmp_alloc_ends;
+    }
+    if (fill_win) {
+        // starts := 0, ends := last index+1 where score > -1e29
+        CUDA_CHECK(cudaMemsetAsync(d_starts, 0, sizeof(int) * (size_t)T, stream));
+        const int threads = TL_TOPK_BLOCK_SIZE;
+        const int blocks = T;
+        k_derive_ends_from_scores<<<blocks, threads, 0, stream>>>(scores_d, N, T, /*ld=*/N, -1.0e29f, d_ends);
     }
 
     // Directly launch the ported kernel on [N, T] row-major (batch=T, seq_len=N)
