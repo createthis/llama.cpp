@@ -43,7 +43,7 @@ __device__ __forceinline__ void named_sync(int count) {
 }
 
 #ifndef SEL_DEBUG
-#define SEL_DEBUG 1
+#define SEL_DEBUG 0
 #endif
 #ifndef SEL_DEBUG_COL
 #define SEL_DEBUG_COL 0
@@ -793,7 +793,8 @@ static __global__ void k_derive_ends_from_scores(const float * __restrict__ scor
         float v = col[i];
         if (v > masked_thresh) { e = i + 1; break; }
     }
-    ends[t] = e;
+    if (e <= 256) ends[t] = 257;
+    else ends[t] = e;
 }
 
 // Fixed configuration to match TileLang example
