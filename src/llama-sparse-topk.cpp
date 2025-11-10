@@ -402,7 +402,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
     // If no device-resident windows were created, but we prefer device windows, create empty device
     // starts/ends now and let the CUDA top-k kernel derive them from scores
     #ifdef GGML_USE_CUDA
-    if (!no_alloc && !have_windows && prefer_device_windows) {
+    if (!no_alloc && !have_windows && prefer_device_windows && kq_mask && kq_mask->buffer && !ggml_backend_buffer_is_host(kq_mask->buffer)) {
         win_starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
         win_ends   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
         ggml_set_input(win_starts);
@@ -455,7 +455,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
         const int64_t Tc = std::min<int64_t>(TILE_T, T - t0);
         // If we have per-token windows, compute aggregate kv_end for this tile
         int64_t kv_end = N_kv;
-        if (!no_alloc && have_windows && win_ends && ggml_backend_buffer_is_host(win_ends->buffer) && win_ends->data != nullptr) {
+        if (!no_alloc && have_windows && win_ends && win_ends->buffer && ggml_backend_buffer_is_host(win_ends->buffer) && win_ends->data != nullptr) {
             int32_t * e = (int32_t*)win_ends->data;
             int64_t max_e = 0;
             for (int64_t t = 0; t < Tc; ++t) max_e = std::max<int64_t>(max_e, (int64_t)e[t0 + t]);
@@ -541,6 +541,10 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                     ggml_tensor * fused_head = ggml_view_2d(ctx, scores_tc, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), scores_tc->nb[1], 0);
                     cb(fused_head, "idxkv_scores_fused_head", -1);
                     if (gf) { ggml_set_output(fused_head); ggml_build_forward_expand(gf, fused_head); }
+                    printf("[idxkv debug] shapes: fused=[%lld,%lld,%lld,%lld] ref=[%lld,%lld,%lld,%lld]\n",
+                            (long long)scores_tc->ne[0], (long long)scores_tc->ne[1], (long long)scores_tc->ne[2], (long long)scores_tc->ne[3],
+                            (long long)ref_scores->ne[0], (long long)ref_scores->ne[1], (long long)ref_scores->ne[2], (long long)ref_scores->ne[3]);
+                    fflush(stdout);
                     ggml_tensor * diff = ggml_sub(ctx, scores_tc, ref_scores);
                     ggml_tensor * L1 = ggml_sum(ctx, ggml_abs(ctx, diff));
                     cb(L1, "idxkv_scores_diff_L1", -1);
