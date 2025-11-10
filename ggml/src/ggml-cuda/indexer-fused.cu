@@ -245,6 +245,134 @@ __global__ void k_indexer_logits_tiled_f32(
     Out[kv_idx + (size_t)kv * token] = acc;
 }
 
+// -----------------------------------------------------------------------------
+// TileLang DeepSeek V3.2 lightning indexer (ported line-by-line)
+// This mirrors /workspace/tilelang/examples/deepseek_v32/fp8_lighting_indexer.py
+// mqa_attn_return_logits_kernel structure and comments.
+// Notes:
+// - The original TileLang kernel uses FP8 inputs and shared fragments; this CUDA
+//   port keeps the exact control flow and comments, using float math for build-only
+//   purposes. It is not yet wired into the runtime.
+// -----------------------------------------------------------------------------
+__global__ void k_tl_mqa_attn_return_logits_port(
+        // IndexQ: T.Tensor(index_q_shape, dtype)  # type: ignore
+        // IndexK: T.Tensor(index_k_shape, dtype)  # type: ignore
+        // IndexKScale: T.Tensor(index_k_scale_shape, accum_dtype)  # type: ignore
+        // Logits: T.Tensor(logits_shape, accum_dtype)  # type: ignore
+        // Weights: T.Tensor([seq_len, heads], accum_dtype)  # type: ignore
+        // CuSeqLenKS: T.Tensor([seq_len], index_dtype)  # type: ignore
+        // CuSeqLenKE: T.Tensor([seq_len], index_dtype)  # type: ignore
+        const float * __restrict__ IndexQ,
+        const float * __restrict__ IndexK,
+        const float * __restrict__ IndexKScale,
+        float * __restrict__ Logits,
+        const float * __restrict__ Weights,
+        const int * __restrict__ CuSeqLenKS,
+        const int * __restrict__ CuSeqLenKE,
+        // dynamic shapes and params
+        int seq_len,
+        int seq_len_kv,
+        int heads,
+        int index_dim,
+        int block_N,
+        int num_stages,
+        int threads,
+        int block_Q) {
+
+    // with T.Kernel(T.ceildiv(seq_len, block_Q), threads=threads) as bx:
+    int bx = blockIdx.x;
+
+    // index_q_shared = T.alloc_shared([block_Q * heads, index_dim], dtype)
+    // index_k_shared = T.alloc_shared([block_N, index_dim], dtype)
+    // index_k_scale_fragment = T.alloc_fragment([block_N], accum_dtype)
+    // s = T.alloc_fragment([block_N, block_Q * heads], accum_dtype)
+    // s_reshaped = T.alloc_fragment([block_N, block_Q, heads], accum_dtype)
+    // logits = T.alloc_fragment([block_N, block_Q], accum_dtype)
+    // weights = T.alloc_fragment([block_Q, heads], accum_dtype)
+
+    // seq_len_i = bx * block_Q
+    int seq_len_i = bx * block_Q;
+
+    // cu_k_s_min = T.alloc_local([1], index_dtype)
+    // cu_k_e_max = T.alloc_local([1], index_dtype)
+    int cu_k_s_min = 2147483647;
+    int cu_k_e_max = -2147483648;
+
+    // for bq_i in T.serial(block_Q):
+    //     cu_k_s_min[0] = T.min(cu_k_s_min[0], T.min(CuSeqLenKS[seq_len_i + bq_i], seq_len_kv))
+    for (int bq_i = 0; bq_i < block_Q; ++bq_i) {
+        int t = seq_len_i + bq_i;
+        if (t < seq_len) {
+            int v = CuSeqLenKS[t];
+            if (v > seq_len_kv) v = seq_len_kv;
+            if (v < cu_k_s_min) cu_k_s_min = v;
+        }
+    }
+    // for bq_i in T.serial(block_Q):
+    //     cu_k_e_max[0] = T.max(cu_k_e_max[0], T.max(CuSeqLenKE[seq_len_i + bq_i], seq_len_kv))
+    for (int bq_i = 0; bq_i < block_Q; ++bq_i) {
+        int t = seq_len_i + bq_i;
+        if (t < seq_len) {
+            int v = CuSeqLenKE[t];
+            if (v > seq_len_kv) v = seq_len_kv;
+            if (v > cu_k_e_max) cu_k_e_max = v;
+        }
+    }
+
+    // T.copy(IndexQ[seq_len_i * heads, 0], index_q_shared)
+    // T.copy(Weights[seq_len_i, 0], weights)
+    // (We will read IndexQ/Weights on demand inline below)
+
+    // for nbn_i in T.Pipelined(T.ceildiv(cu_k_e_max[0] - cu_k_s_min[0], block_N), num_stages=num_stages):
+    int total_k = cu_k_e_max - cu_k_s_min;
+    if (total_k < 0) total_k = 0;
+    int iters_nb = (total_k + block_N - 1) / block_N;
+    for (int nbn_i = 0; nbn_i < iters_nb; ++nbn_i) {
+        // T.copy(IndexK[cu_k_s_min[0] + nbn_i * block_N, 0], index_k_shared)
+        // T.copy(IndexKScale[cu_k_s_min[0] + nbn_i * block_N], index_k_scale_fragment)
+        int k_start = cu_k_s_min + nbn_i * block_N;
+        int cur_N = block_N;
+        if (k_start + cur_N > cu_k_e_max) cur_N = cu_k_e_max - k_start;
+
+        // T.gemm(index_k_shared, index_q_shared, s, transpose_B=True, clear_accum=True, policy=T.GemmWarpPolicy.FullCol)
+        // Implement GEMM by explicit loops, then apply ReLU, weights, and k_scale
+
+        // Clear logits (block_N x block_Q)
+        // T.reduce_sum(s_reshaped, logits, dim=-1, clear=True)
+        // We'll compute logits inline
+
+        for (int bn_i = 0; bn_i < cur_N; ++bn_i) {
+            for (int bq_i = 0; bq_i < block_Q; ++bq_i) {
+                // guard for seq_len
+                int tok = seq_len_i + bq_i;
+                if (tok >= seq_len) continue;
+                float acc_logits = 0.0f;
+                // accumulate over heads
+                for (int h_i = 0; h_i < heads; ++h_i) {
+                    // dot between K[k_start+bn_i, :] and Q[tok*heads + h_i, :]
+                    float dot = 0.0f;
+                    const float * Krow = IndexK + (size_t)(k_start + bn_i) * (size_t)index_dim;
+                    const float * Qrow = IndexQ + (size_t)(tok * heads + h_i) * (size_t)index_dim;
+                    #pragma unroll 1
+                    for (int d = 0; d < index_dim; ++d) dot += Krow[d] * Qrow[d];
+                    // s_reshaped = ReLU(s) * weights
+                    if (dot < 0.0f) dot = 0.0f;
+                    float w = Weights[(size_t)tok * (size_t)heads + h_i];
+                    acc_logits += dot * w;
+                }
+                // logits_sum *= k_scale
+                float ks = IndexKScale[k_start + bn_i];
+                acc_logits *= ks;
+                // Logits[seq_len_i + bq_i, cu_k_s_min[0] + nbn_i * block_N + bn_i] = logits[bn_i, bq_i]
+                int kv_col = k_start + bn_i;
+                if (kv_col < seq_len_kv) {
+                    Logits[(size_t)tok * (size_t)seq_len_kv + kv_col] = acc_logits;
+                }
+            }
+        }
+    }
+}
+
 // WMMA kernel (half input, float accum) for D multiple of 16
 __global__ void k_indexer_logits_wmma_hf(
     const half * __restrict__ Q, // [D, Tc*H]
