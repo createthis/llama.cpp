@@ -955,7 +955,6 @@ static __global__ void k_tl_topk_port(
         for (int s = 0; s < it2; ++s) {
             int idx = s * TL_TOPK_BLOCK_SIZE + tx;
             if (idx < l_num_input) {
-                if (idx >= TL_TOPK_SMEM_INPUT_SIZE) asm("brkpt;");
                 int in_idx = s_input_idx[r_idx][idx];
                 float v = input[(size_t)bx * seq_len + in_idx];
                 l_bin_id32 = (int)((tl_convert_to_uint32(v) >> (24 - round * 8)) & 0xFFu);
