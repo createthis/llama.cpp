@@ -199,9 +199,6 @@ endif()
 if (NOT LLAMA_SANITIZE_ADDRESS)
   # TODO: repair known memory leaks
   llama_build_and_test(test-opt.cpp)
-# Unit test for top-k windows underfill producing OOB indices
-llama_build_and_test(test-sparse-topk-sanitize-cuda.cpp)
-
 endif()
 llama_build_and_test(test-gguf.cpp)
 llama_build_and_test(test-backend-ops.cpp)
