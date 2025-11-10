@@ -362,6 +362,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
         }
     }
 
+    bool no_alloc = ggml_get_no_alloc(ctx);
     ggml_tensor * mask_full = nullptr;
     bool prefer_device_windows = true;
     if (const char *env = getenv("LLAMA_SPARSE_TOPK_WINDOWS_DEVICE")) {
@@ -373,13 +374,11 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
     ggml_tensor * win_ends   = nullptr;
     bool have_windows = false;
 #ifdef GGML_USE_CUDA
-        if (kq_mask && kq_mask->buffer && !ggml_backend_buffer_is_host(kq_mask->buffer)) {
+        if (!no_alloc && kq_mask && kq_mask->buffer && !ggml_backend_buffer_is_host(kq_mask->buffer)) {
             if (prefer_device_windows) {
                 // Create device-resident starts/ends tensors and fill them via device kernels
                 win_starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
                 win_ends   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
-                // We will make sure they are placed on CUDA via scheduling; initialization happens in CUDA backend compute
-                // For visibility in eval-callback if needed, expose as inputs
                 ggml_set_input(win_starts);
                 ggml_set_input(win_ends);
                 have_windows = true;
@@ -403,7 +402,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
     // If no device-resident windows were created, but we prefer device windows, create empty device
     // starts/ends now and let the CUDA top-k kernel derive them from scores
     #ifdef GGML_USE_CUDA
-    if (!have_windows && prefer_device_windows) {
+    if (!no_alloc && !have_windows && prefer_device_windows) {
         win_starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
         win_ends   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
         ggml_set_input(win_starts);
@@ -456,7 +455,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
         const int64_t Tc = std::min<int64_t>(TILE_T, T - t0);
         // If we have per-token windows, compute aggregate kv_end for this tile
         int64_t kv_end = N_kv;
-        if (have_windows && win_ends) {
+        if (!no_alloc && have_windows && win_ends && ggml_backend_buffer_is_host(win_ends->buffer) && win_ends->data != nullptr) {
             int32_t * e = (int32_t*)win_ends->data;
             int64_t max_e = 0;
             for (int64_t t = 0; t < Tc; ++t) max_e = std::max<int64_t>(max_e, (int64_t)e[t0 + t]);
