@@ -13,7 +13,8 @@
 #include <algorithm>
 
 static inline uint16_t host_float_to_half_bits_rtne(float f) {
-    uint32_t x; memcpy(&x, &f, sizeof(x));
+    uint32_t x;
+    memcpy(&x, &f, sizeof(x));
     uint32_t sign = (x >> 16) & 0x8000u;
     int32_t  exp  = (int32_t)((x >> 23) & 0xFFu) - 127 + 15;
     uint32_t mant = x & 0x007FFFFFu;
@@ -25,9 +26,17 @@ static inline uint16_t host_float_to_half_bits_rtne(float f) {
         return (uint16_t)(sign | (sub >> 13));
     } else if (exp >= 31) {
         if (mant == 0) return (uint16_t)(sign | 0x7C00u);
-        mant >>= 13; return (uint16_t)(sign | 0x7C00u | mant | (mant == 0));
+        mant >>= 13;
+        return (uint16_t)(sign | 0x7C00u | mant | (mant == 0));
     } else {
-        if (mant & 0x00001000u) { mant += 0x00002000u; if (mant & 0x00800000u) { mant = 0; exp += 1; if (exp >= 31) return (uint16_t)(sign | 0x7C00u); } }
+        if (mant & 0x00001000u) {
+            mant += 0x00002000u;
+            if (mant & 0x00800000u) {
+                mant = 0;
+                exp += 1;
+                if (exp >= 31) return (uint16_t)(sign | 0x7C00u);
+            }
+        }
         return (uint16_t)(sign | ((uint32_t)exp << 10) | (mant >> 13));
     }
 }
@@ -678,7 +687,8 @@ void ggml_cuda_topk_radix_indices_device(ggml_backend_cuda_context & ctx,
 extern "C" void ggml_cuda_topk_radix_indices_host(const float * scores_h, int N, int T, int k, int * idx_h) {
     ggml_backend_cuda_context ctx(0);
     cudaStream_t stream = ctx.stream();
-    float * scores_d = nullptr; int * idx_d = nullptr;
+    float * scores_d = nullptr;
+    int * idx_d = nullptr;
     cudaMalloc(&scores_d, sizeof(float) * (size_t)N * T);
     cudaMalloc(&idx_d, sizeof(int) * (size_t)k * T);
     cudaMemcpyAsync(scores_d, scores_h, sizeof(float) * (size_t)N * T, cudaMemcpyHostToDevice, stream);
@@ -693,7 +703,9 @@ extern "C" void ggml_cuda_topk_histogram_host(const float * scores_h, int N, int
                                      unsigned int * gt_counts_h, unsigned int * thr_bins_h) {
     ggml_backend_cuda_context ctx(0);
     cudaStream_t stream = ctx.stream();
-    float * scores_d = nullptr; uint32_t * gt_counts_d = nullptr; uint32_t * thr_bins_d = nullptr;
+    float * scores_d = nullptr;
+    uint32_t * gt_counts_d = nullptr;
+    uint32_t * thr_bins_d = nullptr;
     cudaMalloc(&scores_d, sizeof(float) * (size_t)N * T);
     cudaMalloc(&gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T);
     cudaMalloc(&thr_bins_d,  sizeof(uint32_t) * (size_t)T);
@@ -704,22 +716,30 @@ extern "C" void ggml_cuda_topk_histogram_host(const float * scores_h, int N, int
     cudaMemcpyAsync(gt_counts_h, gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T, cudaMemcpyDeviceToHost, stream);
     cudaMemcpyAsync(thr_bins_h,  thr_bins_d,  sizeof(uint32_t) * (size_t)T,        cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
-    cudaFree(scores_d); cudaFree(gt_counts_d); cudaFree(thr_bins_d);
+    cudaFree(scores_d);
+    cudaFree(gt_counts_d);
+    cudaFree(thr_bins_d);
 }
 
 extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T, int k,
                                 const unsigned int * gt_counts_h, int * idx_h) {
     ggml_backend_cuda_context ctx(0);
     cudaStream_t stream = ctx.stream();
-    float * scores_d = nullptr; uint32_t * gt_counts_d = nullptr; int * idx_d = nullptr;
+    float * scores_d = nullptr;
+    uint32_t * gt_counts_d = nullptr;
+    int * idx_d = nullptr;
     cudaMalloc(&scores_d, sizeof(float) * (size_t)N * T);
     cudaMalloc(&gt_counts_d, sizeof(uint32_t) * 256 * (size_t)T);
     cudaMalloc(&idx_d, sizeof(int) * (size_t)k * T);
     cudaMemcpyAsync(scores_d, scores_h, sizeof(float) * (size_t)N * T, cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(gt_counts_d, gt_counts_h, sizeof(uint32_t) * 256 * (size_t)T, cudaMemcpyHostToDevice, stream);
     const int sel_threads = env_threads_or_default("LLAMA_SPARSE_TOPK_THREADS", 1024);
-    int cap_env = 0; const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
-    if (env_cap) { cap_env = atoi(env_cap); if (cap_env < 0) cap_env = 0; }
+    int cap_env = 0;
+    const char *env_cap = getenv("LLAMA_SPARSE_TOPK_EQ_CAP");
+    if (env_cap) {
+        cap_env = atoi(env_cap);
+        if (cap_env < 0) cap_env = 0;
+    }
     int cap_default = 4096;
     const int eq_cap_host = max(k, min(N, cap_env ? cap_env : cap_default));
     const size_t sel_shmem = (size_t) (2*eq_cap_host) * sizeof(int);
@@ -727,7 +747,9 @@ extern "C" void ggml_cuda_topk_select_host(const float * scores_h, int N, int T,
     k_select_topk_bins<<<T, sel_threads, sel_shmem, stream>>>(scores_d, N, T, /*ld=*/N, k, eq_cap_host, gt_counts_d, idx_d);
     cudaMemcpyAsync(idx_h, idx_d, sizeof(int) * (size_t)k * T, cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
-    cudaFree(scores_d); cudaFree(gt_counts_d); cudaFree(idx_d);
+    cudaFree(scores_d);
+    cudaFree(gt_counts_d);
+    cudaFree(idx_d);
 }
 
 // -----------------------------------------------------------------------------
@@ -772,7 +794,10 @@ static __global__ void k_derive_ends_from_scores(const float * __restrict__ scor
     // Stride from the end: each thread scans its own tail segment
     for (int i = N - 1 - threadIdx.x; i >= 0; i -= blockDim.x) {
         float v = col[i];
-        if (v > masked_thresh) { e_local = i + 1; break; }
+        if (v > masked_thresh) {
+            e_local = i + 1;
+            break;
+        }
     }
     // Reduce max e_local across threads
     extern __shared__ int smax[]; // sized by blockDim.x when launching with dynamic smem=0 -> use static array instead
@@ -1004,7 +1029,8 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
     int * tmp_alloc_starts = nullptr;
     int * tmp_alloc_ends   = nullptr;
     // Optionally fill device windows from scores (default: enabled)
-    bool fill_win = true; if (const char *e = getenv("LLAMA_SPARSE_TOPK_WINDOWS_DEVICE")) fill_win = atoi(e) != 0;
+    bool fill_win = true;
+    if (const char *e = getenv("LLAMA_SPARSE_TOPK_WINDOWS_DEVICE")) fill_win = atoi(e) != 0;
     if (d_starts == nullptr) {
         CUDA_CHECK(cudaMalloc(&tmp_alloc_starts, sizeof(int) * (size_t)T));
         d_starts = tmp_alloc_starts;
@@ -1080,7 +1106,10 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
                 for (int b = 255; b >= 0; --b) S[b] = S[b+1] + hist[b];
                 int thr0 = 0;
                 for (int b = 255; b >= 0; --b) {
-                    if (S[b] > (unsigned)k && S[b+1] <= (unsigned)k) { thr0 = b; break; }
+                    if (S[b] > (unsigned)k && S[b+1] <= (unsigned)k) {
+                        thr0 = b;
+                        break;
+                    }
                 }
                 unsigned int sgt0 = S[thr0+1];
                 if (SEL_DEBUG) fprintf(stderr, "[TL_HOST_DBG] thr0=%d sgt0=%u\n", thr0, sgt0);
@@ -1092,15 +1121,30 @@ void ggml_cuda_topk_tilelang_port_device(ggml_backend_cuda_context & ctx,
                 float thresh = sorted[k-1];
                 // compute MSB threshold bin for host check
                 int thr_bin = host_convert_to_uint16_bin(thresh);
-                int below = 0; int bad_idx = -1; float bad_v = 0.0f; int bad_bin = -1;
+                int below = 0;
+                int bad_idx = -1;
+                float bad_v = 0.0f;
+                int bad_bin = -1;
                 std::vector<char> seen(N, 0);
                 for (int i = 0; i < k; ++i) {
                     int ix = idx0[i];
-                    if (ix < 0 || ix >= N) { below++; bad_idx = ix; bad_v = NAN; bad_bin = -1; break; }
+                    if (ix < 0 || ix >= N) {
+                        below++;
+                        bad_idx = ix;
+                        bad_v = NAN;
+                        bad_bin = -1;
+                        break;
+                    }
                     if (!seen[ix]) seen[ix] = 1;
                     float v = col0[ix];
                     int vb = host_convert_to_uint16_bin(v);
-                    if (!(v >= thresh)) { below++; bad_idx = ix; bad_v = v; bad_bin = vb; break; }
+                    if (!(v >= thresh)) {
+                        below++;
+                        bad_idx = ix;
+                        bad_v = v;
+                        bad_bin = vb;
+                        break;
+                    }
                 }
                 if (SEL_DEBUG) fprintf(stderr, "[TL_DEBUG] t=0 thresh=%.6f (bin=%d) below=%d bad_idx=%d bad_v=%g bad_bin=%d\n", thresh, thr_bin, below, bad_idx, bad_v, bad_bin);
             }

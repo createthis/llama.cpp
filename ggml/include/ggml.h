@@ -753,13 +753,13 @@ extern "C" {
             int                   k);
 
 
-        // Variant that accepts optional per-column windows [start,end)
-        GGML_API struct ggml_tensor * ggml_sparse_topk_radix_ex(
-                struct ggml_context * ctx,
-                struct ggml_tensor  * scores,
-                int                   k,
-                struct ggml_tensor  * starts,
-                struct ggml_tensor  * ends);
+    // Variant that accepts optional per-column windows [start,end)
+    GGML_API struct ggml_tensor * ggml_sparse_topk_radix_ex(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * scores,
+            int                   k,
+            struct ggml_tensor  * starts,
+            struct ggml_tensor  * ends);
 
     // fused lightning-indexer logits: inputs Q[D, Tc*H], K[D, kv_end], W[H, Tc], k_scale[kv_end] => out [kv_end, Tc]
     GGML_API struct ggml_tensor * ggml_indexer_logits_fused(
