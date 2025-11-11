@@ -1150,6 +1150,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     // Optional: TL port path in device wrapper
     if (const char *s = getenv("LLAMA_INDEXER_TL_PORT"); s && atoi(s) != 0) {
 
+          auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
           int *dKS_i = nullptr, *dKE_i = nullptr;
           cudaMalloc(&dKS_i, sizeof(int) * (size_t)Tc);
           cudaMalloc(&dKE_i, sizeof(int) * (size_t)Tc);
@@ -1211,7 +1212,9 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           cudaEventSynchronize(__e1);
           float __ms_tl = 0.0f; cudaEventElapsedTime(&__ms_tl, __e0, __e1);
           cudaEventDestroy(__e0); cudaEventDestroy(__e1);
-          if (sparse_debug_on()) fprintf(stderr, "[PROFILE_TL_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d ms=%.3f shmem=%zu\n", D, H, Tc, kv_end, __ms_tl, (size_t)shmem_bytes);
+          if (__prof_each_env && *__prof_each_env) {
+            fprintf(stderr, "[PROFILE_TL_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d ms=%.3f shmem=%zu\n", D, H, Tc, kv_end, __ms_tl, (size_t)shmem_bytes);
+          }
           CUDA_CHECK(cudaGetLastError());
           cudaFree(dQrm); cudaFree(dKrm); cudaFree(dWrm);
           dim3 tblock(32, 8);
