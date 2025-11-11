@@ -7,10 +7,13 @@
 using namespace nvcuda;
 
 #include <cuda_runtime.h>
+#include <cuda/pipeline>
+#include <cuda_pipeline_primitives.h>
 #include <stdint.h>
 #include <stdio.h>
 #include "../../include/ggml-cuda-indexer.h"
 #ifndef SEL_DEBUG
+#define SEL_DEBUG 0
 #endif
 
 #if __CUDA_ARCH__ >= 800 && defined(LLAMA_ENABLE_CP_ASYNC)
@@ -271,7 +274,33 @@ __global__ void k_indexer_logits_tiled_f32(
 // - The original TileLang kernel uses FP8 inputs and shared fragments; this CUDA
 //   port keeps the exact control flow and comments, using float math for build-only
 //   purposes. It is not yet wired into the runtime.
+// - Uses cp.async (SM80+) in 16B chunks with uniform commit/wait; falls back if
+//   alignment/size conditions are not met.
 // -----------------------------------------------------------------------------
+
+static __device__ __forceinline__ size_t align16_elems(size_t off_elems) {
+  // shared is float* (4B). 16B alignment == multiple of 4 floats.
+  return (off_elems + 3u) & ~size_t(3u);
+}
+
+#if __CUDA_ARCH__ >= 800
+// uniform 16B-chunk async copy; all threads participate; dst/src must be 16B aligned
+static __device__ __forceinline__
+void cp_async_16B_all(void* __restrict__ dst, const void* __restrict__ src, size_t bytes) {
+  const size_t n16 = bytes & ~size_t(15);
+  const char* csrc = (const char*)src;
+  char*       cdst = (char*)dst;
+  // grid-stride in 16B units across the block
+  for (size_t i = (size_t)threadIdx.x * 16; i < n16; i += (size_t)blockDim.x * 16) {
+    __pipeline_memcpy_async(cdst + i, csrc + i, 16);
+  }
+  __pipeline_commit();
+  __pipeline_wait_prior(0);
+  __syncthreads(); // make visible to all threads
+  // tail (<16B) must be handled separately by regular loads
+}
+#endif
+
 __global__ void k_tl_mqa_attn_return_logits_port(
         // IndexQ: T.Tensor(index_q_shape, dtype)  # type: ignore
         // IndexK: T.Tensor(index_k_shape, dtype)  # type: ignore
@@ -309,21 +338,36 @@ __global__ void k_tl_mqa_attn_return_logits_port(
     // weights = T.alloc_fragment([block_Q, heads], accum_dtype)
     extern __shared__ float smem[];
     size_t off = 0;
-    const size_t sz_index_q_shared        = (size_t)block_Q * (size_t)heads * (size_t)index_dim;
-    const size_t sz_index_k_shared        = (size_t)block_N * (size_t)index_dim;
-    const size_t sz_index_k_scale_fragment= (size_t)block_N;
-    const size_t sz_s                     = (size_t)block_N * (size_t)block_Q * (size_t)heads;
-    const size_t sz_s_reshaped            = (size_t)block_N * (size_t)block_Q * (size_t)heads;
-    const size_t sz_logits                = (size_t)block_N * (size_t)block_Q;
-    const size_t sz_weights               = (size_t)block_Q * (size_t)heads;
 
-    float* index_q_shared         = smem + off; off += sz_index_q_shared;         // [block_Q*heads, index_dim]
-    float* index_k_shared         = smem + off; off += sz_index_k_shared;         // [block_N, index_dim]
-    float* index_k_scale_fragment = smem + off; off += sz_index_k_scale_fragment; // [block_N]
-    float* s                      = smem + off; off += sz_s;                      // [block_N, block_Q*heads] (flat)
-    float* s_reshaped             = smem + off; off += sz_s_reshaped;             // [block_N, block_Q, heads] (flat)
-    float* logits                 = smem + off; off += sz_logits;                 // [block_N, block_Q] (flat)
-    float* weights                = smem + off; off += sz_weights;                // [block_Q, heads] (flat)
+    const size_t sz_index_q_shared         = (size_t)block_Q * (size_t)heads * (size_t)index_dim;
+    const size_t sz_index_k_shared         = (size_t)block_N * (size_t)index_dim;
+    const size_t sz_index_k_scale_fragment = (size_t)block_N;
+    const size_t sz_s                      = (size_t)block_N * (size_t)block_Q * (size_t)heads;
+    const size_t sz_s_reshaped             = (size_t)block_N * (size_t)block_Q * (size_t)heads;
+    const size_t sz_logits                 = (size_t)block_N * (size_t)block_Q;
+    const size_t sz_weights                = (size_t)block_Q * (size_t)heads;
+
+    // 16B-align each slice (off is in float elements)
+    off = align16_elems(off);
+    float* index_q_shared = smem + off; off += sz_index_q_shared;
+
+    off = align16_elems(off);
+    float* index_k_shared = smem + off; off += sz_index_k_shared;
+
+    off = align16_elems(off);
+    float* index_k_scale_fragment = smem + off; off += sz_index_k_scale_fragment;
+
+    off = align16_elems(off);
+    float* s = smem + off; off += sz_s;
+
+    off = align16_elems(off);
+    float* s_reshaped = smem + off; off += sz_s_reshaped;
+
+    off = align16_elems(off);
+    float* logits = smem + off; off += sz_logits;
+
+    off = align16_elems(off);
+    float* weights = smem + off; off += sz_weights;
 
     // seq_len_i = bx * block_Q
     int seq_len_i = bx * block_Q;
@@ -371,38 +415,76 @@ __global__ void k_tl_mqa_attn_return_logits_port(
     // T.copy(IndexQ[seq_len_i * heads, 0], index_q_shared)
     // T.copy(Weights[seq_len_i, 0], weights)
     {
-        size_t total = sz_index_q_shared;
-        for (size_t t = threadIdx.x; t < total; t += blockDim.x) {
-            size_t row = t / (size_t)index_dim;               // 0..(block_Q*heads-1)
-            size_t col = t % (size_t)index_dim;               // 0..index_dim-1
+        const size_t bytes_Q = sz_index_q_shared * sizeof(float);
+        const size_t bytes_W = sz_weights * sizeof(float);
+
+        bool okQ =
+#if __CUDA_ARCH__ >= 800
+          (((uintptr_t)index_q_shared & 0xF) == 0) &&
+          (((uintptr_t)(IndexQ + (size_t)seq_len_i * (size_t)heads * (size_t)index_dim) & 0xF) == 0);
+#else
+          false;
+#endif
+        bool okW =
+#if __CUDA_ARCH__ >= 800
+          (((uintptr_t)weights & 0xF) == 0) &&
+          (((uintptr_t)(Weights + (size_t)seq_len_i * (size_t)heads) & 0xF) == 0);
+#else
+          false;
+#endif
+
+#if __CUDA_ARCH__ >= 800
+        if (okQ && (bytes_Q >= 16)) {
+          const float* srcQ = IndexQ + (size_t)seq_len_i * (size_t)heads * (size_t)index_dim;
+          cp_async_16B_all(index_q_shared, srcQ, bytes_Q);
+        } else
+#endif
+        {
+          // fallback threaded copy
+          size_t total = sz_index_q_shared;
+          for (size_t t = threadIdx.x; t < total; t += blockDim.x) {
+            size_t row = t / (size_t)index_dim;
+            size_t col = t % (size_t)index_dim;
             int bq_i = (int)(row / (size_t)heads);
             int h_i  = (int)(row % (size_t)heads);
             int tok  = seq_len_i + bq_i;
             float val = 0.f;
             if (tok < seq_len) {
-                val = IndexQ[(size_t)(tok * heads + h_i) * (size_t)index_dim + col];
+              val = IndexQ[(size_t)(tok * heads + h_i) * (size_t)index_dim + col];
             }
             index_q_shared[t] = val;
+          }
+          __syncthreads();
         }
-        size_t total_w = sz_weights;
-        for (size_t t = threadIdx.x; t < total_w; t += blockDim.x) {
+
+#if __CUDA_ARCH__ >= 800
+        if (okW && (bytes_W >= 16)) {
+          const float* srcW = Weights + (size_t)seq_len_i * (size_t)heads;
+          cp_async_16B_all(weights, srcW, bytes_W);
+        } else
+#endif
+        {
+          size_t total_w = sz_weights;
+          for (size_t t = threadIdx.x; t < total_w; t += blockDim.x) {
             int bq_i = (int)(t / (size_t)heads);
             int h_i  = (int)(t % (size_t)heads);
             int tok  = seq_len_i + bq_i;
             float val = 0.f;
             if (tok < seq_len) {
-                val = Weights[(size_t)tok * (size_t)heads + h_i];
+              val = Weights[(size_t)tok * (size_t)heads + h_i];
             }
             weights[t] = val;
+          }
+          __syncthreads();
         }
     }
-    __syncthreads();
 
     // for nbn_i in T.Pipelined(
     //         T.ceildiv(cu_k_e_max[0] - cu_k_s_min[0], block_N), num_stages=num_stages):
     int total_k = cu_k_e_max - cu_k_s_min;
     if (total_k < 0) total_k = 0;
     int iters_nb = (total_k + block_N - 1) / block_N;
+
     for (int nbn_i = 0; nbn_i < iters_nb; ++nbn_i) {
 
         // T.copy(IndexK[cu_k_s_min[0] + nbn_i * block_N, 0], index_k_shared)
@@ -412,42 +494,66 @@ __global__ void k_tl_mqa_attn_return_logits_port(
         if (k_start + cur_N > cu_k_e_max) cur_N = cu_k_e_max - k_start;
 
         {
+          const size_t bytesK  = (size_t)cur_N * (size_t)index_dim * sizeof(float);
+          const size_t bytesKs = (size_t)cur_N * sizeof(float);
+
+          bool okK =
+#if __CUDA_ARCH__ >= 800
+            (((uintptr_t)index_k_shared & 0xF) == 0) &&
+            (((uintptr_t)(IndexK + (size_t)k_start * (size_t)index_dim) & 0xF) == 0);
+#else
+            false;
+#endif
+          bool okKs =
+#if __CUDA_ARCH__ >= 800
+            (((uintptr_t)index_k_scale_fragment & 0xF) == 0) &&
+            (((uintptr_t)(IndexKScale + (size_t)k_start) & 0xF) == 0);
+#else
+            false;
+#endif
+
+#if __CUDA_ARCH__ >= 800
+          if (okK && (bytesK >= 16)) {
+            const float* srcK = IndexK + (size_t)k_start * (size_t)index_dim;
+            cp_async_16B_all(index_k_shared, srcK, bytesK);
+          } else
+#endif
+          {
             size_t totalK = (size_t)block_N * (size_t)index_dim;
             for (size_t t = threadIdx.x; t < totalK; t += blockDim.x) {
-                size_t row = t / (size_t)index_dim;   // 0..block_N-1
-                size_t col = t % (size_t)index_dim;   // 0..index_dim-1
-                int krow = k_start + (int)row;
-                float v = 0.f;
-                if ((int)row < cur_N && krow < seq_len_kv) {
-                    v = IndexK[(size_t)krow * (size_t)index_dim + col];
-                }
-                index_k_shared[t] = v;
+              size_t row = t / (size_t)index_dim;
+              size_t col = t % (size_t)index_dim;
+              int krow = k_start + (int)row;
+              float v = 0.f;
+              if ((int)row < cur_N && krow < seq_len_kv) {
+                v = IndexK[(size_t)krow * (size_t)index_dim + col];
+              }
+              index_k_shared[t] = v;
             }
-            for (size_t t = threadIdx.x; t < (size_t)block_N; t += blockDim.x) {
-                int krow = k_start + (int)t;
-                float v = 0.f;
-                if ((int)t < cur_N && krow < seq_len_kv) {
-                    v = IndexKScale[krow];
-                }
-                index_k_scale_fragment[t] = v;
-            }
-        }
-        __syncthreads();
+            __syncthreads();
+          }
 
-        // T.gemm(
-        //     index_k_shared,
-        //     index_q_shared,
-        //     s,
-        //     transpose_B=True,
-        //     clear_accum=True,
-        //     policy=T.GemmWarpPolicy.FullCol,
-        // )
-        {
-            // clear s
-            size_t totalS = (size_t)block_N * (size_t)block_Q * (size_t)heads;
-            for (size_t t = threadIdx.x; t < totalS; t += blockDim.x) {
-                s[t] = 0.f;
+#if __CUDA_ARCH__ >= 800
+          if (okKs && (bytesKs >= 16)) {
+            const float* srcKs = IndexKScale + (size_t)k_start;
+            cp_async_16B_all(index_k_scale_fragment, srcKs, bytesKs);
+          } else
+#endif
+          {
+            for (size_t t = threadIdx.x; t < (size_t)block_N; t += blockDim.x) {
+              int krow = k_start + (int)t;
+              float v = 0.f;
+              if ((int)t < cur_N && krow < seq_len_kv) v = IndexKScale[krow];
+              index_k_scale_fragment[t] = v;
             }
+            __syncthreads();
+          }
+        }
+
+        // T.gemm( index_k_shared, index_q_shared, s, transpose_B=True, clear_accum=True, policy=T.GemmWarpPolicy.FullCol )
+        {
+            size_t totalS = (size_t)block_N * (size_t)block_Q * (size_t)heads;
+            for (size_t t = threadIdx.x; t < totalS; t += blockDim.x) s[t] = 0.f;
             __syncthreads();
 
             size_t total = (size_t)block_N * (size_t)block_Q * (size_t)heads;
@@ -462,19 +568,15 @@ __global__ void k_tl_mqa_attn_return_logits_port(
                 const float* Qrow = index_q_shared + (size_t)(bq_i * heads + h_i) * (size_t)index_dim;
                 float dot = 0.f;
                 #pragma unroll 1
-                for (int d = 0; d < index_dim; ++d) {
-                    dot += Krow[d] * Qrow[d];
-                }
-                s[(size_t)bn_i * ((size_t)block_Q * (size_t)heads) +
-                  (size_t)(bq_i * heads + h_i)] = dot;
+                for (int d = 0; d < index_dim; ++d) dot += Krow[d] * Qrow[d];
+
+                s[(size_t)bn_i * ((size_t)block_Q * (size_t)heads) + (size_t)(bq_i * heads + h_i)] = dot;
             }
             __syncthreads();
         }
 
         // for bn_i, bq_i, h_i in T.Parallel(block_N, block_Q, heads):
-        //     s_reshaped[bn_i, bq_i,
-        //                h_i] = (T.max(s[bn_i, bq_i * heads + h_i], 0) *
-        //                        weights[bq_i, h_i]) * index_k_scale_fragment[bn_i]
+        //     s_reshaped[...] = (ReLU(s) * weights) * index_k_scale_fragment[bn_i]
         {
             size_t total = (size_t)block_N * (size_t)block_Q * (size_t)heads;
             for (size_t t = threadIdx.x; t < total; t += blockDim.x) {
@@ -486,15 +588,13 @@ __global__ void k_tl_mqa_attn_return_logits_port(
                 int tok = seq_len_i + bq_i;
                 if (tok >= seq_len) continue;
 
-                float val = s[(size_t)bn_i * ((size_t)block_Q * (size_t)heads) +
-                              (size_t)(bq_i * heads + h_i)];
+                float val = s[(size_t)bn_i * ((size_t)block_Q * (size_t)heads) + (size_t)(bq_i * heads + h_i)];
                 if (val < 0.f) val = 0.f;
                 float w  = weights[(size_t)bq_i * (size_t)heads + (size_t)h_i];
                 float ks = index_k_scale_fragment[(size_t)bn_i];
                 float outv = val * w * ks;
 
-                s_reshaped[(((size_t)bn_i * (size_t)block_Q) + (size_t)bq_i) * (size_t)heads +
-                           (size_t)h_i] = outv;
+                s_reshaped[(((size_t)bn_i * (size_t)block_Q) + (size_t)bq_i) * (size_t)heads + (size_t)h_i] = outv;
             }
             __syncthreads();
         }
@@ -512,8 +612,7 @@ __global__ void k_tl_mqa_attn_return_logits_port(
                 float acc = 0.f;
                 #pragma unroll 1
                 for (int h_i = 0; h_i < heads; ++h_i) {
-                    acc += s_reshaped[(((size_t)bn_i * (size_t)block_Q) + (size_t)bq_i) * (size_t)heads +
-                                      (size_t)h_i];
+                    acc += s_reshaped[(((size_t)bn_i * (size_t)block_Q) + (size_t)bq_i) * (size_t)heads + (size_t)h_i];
                 }
                 logits[(size_t)bn_i * (size_t)block_Q + (size_t)bq_i] = acc;
             }
@@ -521,8 +620,7 @@ __global__ void k_tl_mqa_attn_return_logits_port(
         }
 
         // for bq_i, bn_i in T.Parallel(block_Q, block_N):
-        //     Logits[seq_len_i + bq_i, cu_k_s_min[0] + nbn_i * block_N + bn_i] = (
-        //         logits[bn_i, bq_i])
+        //     Logits[seq_len_i + bq_i, cu_k_s_min[0] + nbn_i * block_N + bn_i] = (logits[bn_i, bq_i])
         {
             size_t total = (size_t)block_Q * (size_t)block_N;
             for (size_t t = threadIdx.x; t < total; t += blockDim.x) {
@@ -1150,6 +1248,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     // Optional: TL port path in device wrapper
     if (const char *s = getenv("LLAMA_INDEXER_TL_PORT"); s && atoi(s) != 0) {
 
+        const char * __prof_env = getenv("LLAMA_SPARSE_PROF");
           auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
           int *dKS_i = nullptr, *dKE_i = nullptr;
           cudaMalloc(&dKS_i, sizeof(int) * (size_t)Tc);
@@ -1203,17 +1302,30 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           k_colmajor_DN_to_rowmajor_ND<<<gdW, tbT, 0, stream>>>(dW, H, Tc, dWrm);
           CUDA_CHECK(cudaGetLastError());
           if (sparse_debug_on()) printf("[TL_PORT_DEVICE] launch grid=(%d) threads=%d block_Q=%d block_N=%d stages=%d D=%d H=%d Tc=%d kv=%d shmem=%zu limit=%zu\n", gridTL.x, threads, block_Q, block_N, num_stages, D, H, Tc, kv_end, (size_t)shmem_bytes, (size_t)max_shmem);
-          cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
-          cudaEventRecord(__e0, stream);
-          k_tl_mqa_attn_return_logits_port<<<gridTL, threads, shmem_bytes, stream>>>(
-              dQrm, dKrm, dKS, dLogits, dWrm, dKS_i, dKE_i,
-              Tc, kv_end, H, D, block_N, num_stages, threads, block_Q);
-          cudaEventRecord(__e1, stream);
-          cudaEventSynchronize(__e1);
-          float __ms_tl = 0.0f; cudaEventElapsedTime(&__ms_tl, __e0, __e1);
-          cudaEventDestroy(__e0); cudaEventDestroy(__e1);
-          if (__prof_each_env && *__prof_each_env) {
-            fprintf(stderr, "[PROFILE_TL_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d ms=%.3f shmem=%zu\n", D, H, Tc, kv_end, __ms_tl, (size_t)shmem_bytes);
+          if (__prof_env && *__prof_env) {
+              cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
+              cudaEventRecord(__e0, stream);
+              k_tl_mqa_attn_return_logits_port<<<gridTL, threads, shmem_bytes, stream>>>(
+                      dQrm, dKrm, dKS, dLogits, dWrm, dKS_i, dKE_i,
+                      Tc, kv_end, H, D, block_N, num_stages, threads, block_Q);
+              cudaEventRecord(__e1, stream);
+              cudaEventSynchronize(__e1);
+              float __ms_tl = 0.0f; cudaEventElapsedTime(&__ms_tl, __e0, __e1);
+              cudaEventDestroy(__e0); cudaEventDestroy(__e1);
+              static int __cnt_idx_cuda = 0;
+              static double __sum_idx_cuda = 0.0;
+              __sum_idx_cuda += __ms_tl;
+              __cnt_idx_cuda++;
+              if (__prof_each_env && *__prof_each_env) {
+                  fprintf(stderr, "[PROFILE_TL_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d shmem=%zu ms=%.3f\n",
+                          D, H, Tc, kv_end, (size_t)shmem_bytes, __ms_tl);
+              } else {
+                  if (__cnt_idx_cuda % 50 == 0) {
+                      fprintf(stderr, "[PROFILE_TL_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d shmem=%zu avg_ms=%.3f over 50 calls\n",
+                              D, H, Tc, kv_end, (size_t)shmem_bytes, (float)(__sum_idx_cuda/50.0));
+                      __sum_idx_cuda = 0.0;
+                  }
+              }
           }
           CUDA_CHECK(cudaGetLastError());
           cudaFree(dQrm); cudaFree(dKrm); cudaFree(dWrm);
