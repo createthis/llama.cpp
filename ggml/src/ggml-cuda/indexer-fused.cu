@@ -13,7 +13,6 @@ using namespace nvcuda;
 #include <stdio.h>
 #include "../../include/ggml-cuda-indexer.h"
 #ifndef SEL_DEBUG
-#define SEL_DEBUG 0
 #endif
 
 #if __CUDA_ARCH__ >= 800 && defined(LLAMA_ENABLE_CP_ASYNC)
