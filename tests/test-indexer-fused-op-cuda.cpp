@@ -8,7 +8,79 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+
 #include <chrono>
+// Helpers to simulate CUDA half rounding (round-to-nearest-even) on CPU
+static inline uint16_t float_to_half_bits_rtne(float f) {
+    uint32_t x; std::memcpy(&x, &f, sizeof(x));
+    uint32_t sign = (x >> 16) & 0x8000u;
+    int32_t  exp  = (int32_t)((x >> 23) & 0xFFu) - 127 + 15;
+    uint32_t mant = x & 0x007FFFFFu;
+    if (exp <= 0) {
+        if (exp < -10) return (uint16_t)sign;
+        mant |= 0x00800000u;
+        uint32_t sub = mant >> (1 - exp);
+        if (sub & 0x00001000u) sub += 0x00002000u; // round to nearest even
+        return (uint16_t)(sign | (sub >> 13));
+    } else if (exp >= 31) {
+        if (mant == 0) return (uint16_t)(sign | 0x7C00u);
+        mant >>= 13; return (uint16_t)(sign | 0x7C00u | mant | (mant == 0));
+    } else {
+        if (mant & 0x00001000u) { mant += 0x00002000u; if (mant & 0x00800000u) { mant = 0; exp += 1; if (exp >= 31) return (uint16_t)(sign | 0x7C00u); } }
+        return (uint16_t)(sign | ((uint32_t)exp << 10) | (mant >> 13));
+    }
+}
+static inline float half_bits_to_float(uint16_t h) {
+    uint32_t sign = (h & 0x8000u) << 16;
+    uint32_t exp  = (h & 0x7C00u) >> 10;
+    uint32_t mant = (h & 0x03FFu);
+    uint32_t out;
+    if (exp == 0) {
+        if (mant == 0) { out = sign; }
+        else {
+            // subnormal
+            exp = 127 - 15 + 1;
+            while ((mant & 0x0400u) == 0) { mant <<= 1; exp--; }
+            mant &= 0x03FFu;
+            out = sign | (exp << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1F) {
+        out = sign | 0x7F800000u | (mant << 13);
+    } else {
+        uint32_t exp_f = exp - 15 + 127;
+        out = sign | (exp_f << 23) | (mant << 13);
+    }
+    float f; std::memcpy(&f, &out, sizeof(f));
+    return f;
+}
+static inline float f32_to_f16_to_f32(float x) {
+    return half_bits_to_float(float_to_half_bits_rtne(x));
+}
+
+static void cpu_indexer_logits_f16like(const float *Q, const float *K, const float *W, const float *k_scale,
+                                       int D, int H, int Tc, int kv, std::vector<float> &out) {
+    out.assign((size_t)kv*Tc, 0.0f);
+    for (int tc=0; tc<Tc; ++tc) {
+        for (int i=0; i<kv; ++i) {
+            float acc = 0.0f;
+            for (int h=0; h<H; ++h) {
+                const float *qv = Q + (size_t)D*(tc*H + h);
+                const float *kvp= K + (size_t)D*i;
+                float dot=0.0f; 
+                for (int d=0; d<D; ++d) {
+                    float qh = f32_to_f16_to_f32(qv[d]);
+                    float kh = f32_to_f16_to_f32(kvp[d]);
+                    dot += qh*kh;
+                }
+                if (dot < 0.0f) dot = 0.0f; // ReLU
+                acc += dot * W[h + (size_t)H*tc];
+            }
+            out[i + (size_t)kv*tc] = acc * k_scale[i];
+        }
+    }
+}
+
 
 static void cpu_indexer_logits(const float *Q, const float *K, const float *W, const float *k_scale,
                                int D, int H, int Tc, int kv, std::vector<float> &out) {
@@ -49,7 +121,12 @@ int main() {
     if (!ctx) { printf("ctx init failed\n"); return 1; }
 
     ggml_tensor * q2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D, Tc*H);
+    // Build CPU reference that matches the math path (FP16 in TL kernel)
+
     ggml_tensor * k2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D, kv);
+    const char *tl = std::getenv("LLAMA_INDEXER_TL_PORT");
+    bool use_tl = tl && std::atoi(tl) != 0;
+
     ggml_tensor * w2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, Tc);
     ggml_tensor * ks  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, kv);
 
@@ -66,8 +143,19 @@ int main() {
             if (ggml_backend_dev_type(d) == GGML_BACKEND_DEVICE_TYPE_GPU) { cuda_dev = d; break; }
         }
     }
+
+      // Continue test setup
+
     ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
     if (!cpu_dev) { printf("no CPU device found\n"); ggml_free(ctx); return 1; }
+
+      std::vector<float> O_cpu;
+      if (use_tl) {
+          cpu_indexer_logits_f16like(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
+      } else {
+          cpu_indexer_logits(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
+      }
+
 
     ggml_backend_t cuda = cuda_dev ? ggml_backend_dev_init(cuda_dev, nullptr) : nullptr;
     ggml_backend_t cpu  = ggml_backend_dev_init(cpu_dev, nullptr);
@@ -121,9 +209,7 @@ int main() {
 
     std::vector<float> O_gpu((size_t)kv*Tc, 0.0f);
     ggml_backend_tensor_get(out, O_gpu.data(), 0, ggml_nbytes(out));
-
-    std::vector<float> O_cpu;
-    cpu_indexer_logits(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
+    // already computed O_cpu above matching math path
     printf("D=%d H=%d Tc=%d kv=%d\n", D,H,Tc,kv);
     int tt = Tc < 2 ? Tc : 2;
     int kk = kv < 8 ? kv : 8;
