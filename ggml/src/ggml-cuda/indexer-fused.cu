@@ -1297,10 +1297,58 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         dim3 grid((Tc + tokens_per_tile - 1) / tokens_per_tile, (kv_end + 15) / 16, 1);
         if (H % 16 == 0) {
             if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma_hgrp grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
-            k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+            if (__prof_env && *__prof_env) {
+                cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
+                cudaEventRecord(__e0, stream);
+                k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+                cudaEventRecord(__e1, stream);
+                cudaEventSynchronize(__e1);
+                float __ms_tl = 0.0f; cudaEventElapsedTime(&__ms_tl, __e0, __e1);
+                cudaEventDestroy(__e0); cudaEventDestroy(__e1);
+                static int __cnt_idx_cuda = 0;
+                static double __sum_idx_cuda = 0.0;
+                __sum_idx_cuda += __ms_tl;
+                __cnt_idx_cuda++;
+                if (__prof_each_env && *__prof_each_env) {
+                    fprintf(stderr, "[PROFILE_WMMA_HGRP_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d ms=%.3f\n",
+                            D, H, Tc, kv_end, __ms_tl);
+                } else {
+                    if (__cnt_idx_cuda % 50 == 0) {
+                        fprintf(stderr, "[PROFILE_WMMA_HGRP_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n",
+                                D, H, Tc, kv_end, (float)(__sum_idx_cuda/50.0));
+                        __sum_idx_cuda = 0.0;
+                    }
+                }
+            } else {
+                k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+            }
         } else if (H <= 16 && (16 % H) == 0) {
             if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
-            k_indexer_logits_wmma16_f32<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+            if (__prof_env && *__prof_env) {
+                cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
+                cudaEventRecord(__e0, stream);
+                k_indexer_logits_wmma16_f32<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+                cudaEventRecord(__e1, stream);
+                cudaEventSynchronize(__e1);
+                float __ms_tl = 0.0f; cudaEventElapsedTime(&__ms_tl, __e0, __e1);
+                cudaEventDestroy(__e0); cudaEventDestroy(__e1);
+                static int __cnt_idx_cuda = 0;
+                static double __sum_idx_cuda = 0.0;
+                __sum_idx_cuda += __ms_tl;
+                __cnt_idx_cuda++;
+                if (__prof_each_env && *__prof_each_env) {
+                    fprintf(stderr, "[PROFILE_WMMA_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d ms=%.3f\n",
+                            D, H, Tc, kv_end, __ms_tl);
+                } else {
+                    if (__cnt_idx_cuda % 50 == 0) {
+                        fprintf(stderr, "[PROFILE_WMMA_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n",
+                                D, H, Tc, kv_end, (float)(__sum_idx_cuda/50.0));
+                        __sum_idx_cuda = 0.0;
+                    }
+                }
+            } else {
+                k_indexer_logits_wmma16_f32<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+            }
         } else {
             // not WMMA-friendly; fallback to tiled below
             int HEAD_CHUNK = getenv_int_("LLAMA_INDEXER_HEAD_CHUNK", 32);

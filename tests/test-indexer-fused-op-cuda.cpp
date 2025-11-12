@@ -105,7 +105,7 @@ int main() {
     printf("CUDA not enabled; skipping fused indexer op test\n");
     return 0;
 #else
-    const int D=64, H=4, Tc=3, kv=256;
+    const int D=128, H=4, Tc=3, kv=4096;
 
     std::mt19937 rng(123);
     std::uniform_real_distribution<float> dist(-1.0f,1.0f);
