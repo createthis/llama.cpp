@@ -1385,11 +1385,11 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                 __sum_idx_cuda += __ms_tl;
                 __cnt_idx_cuda++;
                 if (__prof_each_env && *__prof_each_env) {
-                    fprintf(stderr, "[PROFILE_TILED_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d ms=%.3f\n",
+                    fprintf(stderr, "[PROFILE_TILED_ONLY_1] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d ms=%.3f\n",
                             D, H, Tc, kv_end, __ms_tl);
                 } else {
                     if (__cnt_idx_cuda % 50 == 0) {
-                        fprintf(stderr, "[PROFILE_TILED_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n",
+                        fprintf(stderr, "[PROFILE_TILED_ONLY_1] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n",
                                 D, H, Tc, kv_end, (float)(__sum_idx_cuda/50.0));
                         __sum_idx_cuda = 0.0;
                     }
@@ -1464,11 +1464,11 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
             __sum_idx_cuda += __ms_tl;
             __cnt_idx_cuda++;
             if (__prof_each_env && *__prof_each_env) {
-                fprintf(stderr, "[PROFILE_TILED_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d ms=%.3f\n",
+                fprintf(stderr, "[PROFILE_TILED_ONLY_2] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d ms=%.3f\n",
                         D, H, Tc, kv_end, __ms_tl);
             } else {
                 if (__cnt_idx_cuda % 50 == 0) {
-                    fprintf(stderr, "[PROFILE_TILED_ONLY] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n",
+                    fprintf(stderr, "[PROFILE_TILED_ONLY_2] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n",
                             D, H, Tc, kv_end, (float)(__sum_idx_cuda/50.0));
                     __sum_idx_cuda = 0.0;
                 }
