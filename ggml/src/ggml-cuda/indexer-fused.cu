@@ -687,31 +687,19 @@ __global__ void k_indexer_logits_wmma16_f32(
 
     int smin_blk = 0, smax_blk = kv;
     if (starts != nullptr && ends != nullptr) {
-        smin_blk = kv; smax_blk = 0;
-        for (int tl = 0; tl < tokens_per_tile; ++tl) {
-            int tok = t0 + tl;
-            if (tok < Tc) {
-                int s0 = starts[tok]; int e0 = ends[tok];
-                if (s0 < 0) s0 = 0; if (s0 > kv) s0 = kv;
-                if (e0 < 0) e0 = 0; if (e0 > kv) e0 = kv;
-                if (s0 < smin_blk) smin_blk = s0;
-                if (e0 > smax_blk) smax_blk = e0;
-            }
-        }
-        if (smin_blk > smax_blk) smin_blk = smax_blk;
-    }
-    int curN_all = kv - k0; if (curN_all < 0) curN_all = 0; int curN = curN_all < 16 ? curN_all : 16;
-    if (starts != nullptr && ends != nullptr) {
+        int s0 = starts[t0];
+        int e0 = ends[t0];
+        if (s0 < 0) s0 = 0;
+        if (s0 > kv) s0 = kv;
+        if (e0 < 0) e0 = 0;
+        if (e0 > kv) e0 = kv;
+        smin_blk = s0;
+        smax_blk = e0;
         if (k0 >= smax_blk || (k0 + 16) <= smin_blk) {
-            int lane = threadIdx.x & 31;
-            for (int idx = lane; idx < curN * tokens_per_tile; idx += 32) {
-                int mi = idx / tokens_per_tile; int tl = idx % tokens_per_tile; int kv_idx = k0 + mi; int tok = t0 + tl;
-                if (tok < Tc && kv_idx < kv) Out[(size_t)kv_idx + (size_t)kv * tok] = 0.0f;
-            }
+            // fully out of window: no work, no stores
             return;
         }
     }
-
 
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
     wmma::fill_fragment(c_frag, 0.0f);
@@ -896,6 +884,8 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
     const float * __restrict__ W, // [H, Tc]
     const float * __restrict__ k_scale, // [kv]
     int D, int H, int Tc, int kv,
+    const int * __restrict__ starts,
+    const int * __restrict__ ends,
     float * __restrict__ Out) {
 #if __CUDA_ARCH__ >= 700
     const int tokens_per_tile = 1;
@@ -968,7 +958,7 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
         int kv_idx = k0 + mi;
         if (kv_idx < kv && t0 < Tc) {
             float srow = S_acc[mi] * k_scale[kv_idx];
-            Out[kv_idx + (size_t)kv * t0] = srow;
+            if (starts!=nullptr && ends!=nullptr) { int s0=starts[t0]; int e0=ends[t0]; if (s0<0) s0=0; if (s0>kv) s0=kv; if (e0<0) e0=0; if (e0>kv) e0=kv; Out[kv_idx + (size_t)kv * t0] = (kv_idx>=s0 && kv_idx<e0) ? srow : 0.0f; } else { Out[kv_idx + (size_t)kv * t0] = srow; }
         }
     }
 #endif
@@ -1428,7 +1418,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
             if (__prof_env && *__prof_env) {
                 cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
                 cudaEventRecord(__e0, stream);
-                k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+                k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, dOut);
                 cudaEventRecord(__e1, stream);
                 cudaEventSynchronize(__e1);
                 float __ms_tl = 0.0f; cudaEventElapsedTime(&__ms_tl, __e0, __e1);
@@ -1448,7 +1438,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                     }
                 }
             } else {
-                k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
+                k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, dOut);
             }
         } else if (H <= 16 && (16 % H) == 0) {
             if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
