@@ -69,6 +69,45 @@ static inline float f32_to_f16_to_f32(float x) {
     return half_bits_to_float(float_to_half_bits_rtne(x));
 }
 
+
+static inline uint16_t float_to_bf16_bits_rtne(float f) {
+    uint32_t x; std::memcpy(&x, &f, sizeof(x));
+    uint32_t l = x & 0x0000FFFFu;
+    uint32_t u = x >> 16;
+    uint32_t round = (l > 0x8000u) || (l == 0x8000u && (u & 1));
+    return (uint16_t)(u + round);
+}
+static inline float bf16_bits_to_float(uint16_t h) {
+    uint32_t u = ((uint32_t)h) << 16;
+    float f; std::memcpy(&f, &u, sizeof(f));
+    return f;
+}
+static inline float f32_to_bf16_to_f32(float x) {
+    return bf16_bits_to_float(float_to_bf16_bits_rtne(x));
+}
+static void cpu_indexer_logits_bf16like(const float *Q, const float *K, const float *W, const float *k_scale,
+                                       int D, int H, int Tc, int kv, std::vector<float> &out) {
+    out.assign((size_t)kv*Tc, 0.0f);
+    for (int tc=0; tc<Tc; ++tc) {
+        for (int i=0; i<kv; ++i) {
+            float acc = 0.0f;
+            for (int h=0; h<H; ++h) {
+                const float *qv = Q + (size_t)D*(tc*H + h);
+                const float *kvp= K + (size_t)D*i;
+                float dot=0.0f;
+                for (int d=0; d<D; ++d) {
+                    float qh = f32_to_bf16_to_f32(qv[d]);
+                    float kh = f32_to_bf16_to_f32(kvp[d]);
+                    dot += qh*kh;
+                }
+                if (dot < 0.0f) dot = 0.0f; // ReLU
+                acc += dot * W[h + (size_t)H*tc];
+            }
+            out[i + (size_t)kv*tc] = acc * k_scale[i];
+        }
+    }
+}
+
 static void cpu_indexer_logits_f16like(const float *Q, const float *K, const float *W, const float *k_scale,
                                        int D, int H, int Tc, int kv, std::vector<float> &out) {
     out.assign((size_t)kv*Tc, 0.0f);
@@ -143,7 +182,8 @@ int main() {
     ggml_tensor * k2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D, kv);
     const char *tl = std::getenv("LLAMA_INDEXER_TL_PORT");
     const char *wmma_env = std::getenv("LLAMA_INDEXER_USE_WMMA");
-    bool use_fp16_ref = (tl && std::atoi(tl) != 0) || (wmma_env && std::atoi(wmma_env) != 0);
+    bool use_bf16_ref = (wmma_env && std::atoi(wmma_env) != 0 && H < 16);
+    bool use_fp16_ref = (!use_bf16_ref) && ((tl && std::atoi(tl) != 0) || (wmma_env && std::atoi(wmma_env) != 0));
 
     ggml_tensor * w2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, Tc);
     ggml_tensor * ks  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, kv);
@@ -182,7 +222,9 @@ int main() {
     }
 
     std::vector<float> O_cpu;
-    if (use_fp16_ref) {
+    if (use_bf16_ref) {
+        cpu_indexer_logits_bf16like(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
+    } else if (use_fp16_ref) {
         cpu_indexer_logits_f16like(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
     } else {
         cpu_indexer_logits(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
