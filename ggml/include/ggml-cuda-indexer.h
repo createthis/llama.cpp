@@ -13,14 +13,6 @@ void ggml_cuda_mask_window_ends_device(struct ggml_backend_cuda_context & ctx,
                                        const float * dMask, int N_kv, int T,
                                        int * dEnds);
 
-// Fused lightning-indexer logits kernel (scaffold): host wrapper copies inputs to device and back
-void ggml_cuda_indexer_logits_fused_host(const float * Q,
-                                         const float * K,
-                                         const float * W,
-                                         const float * k_scale,
-                                         int D, int H, int Tc, int kv_end,
-                                         float * out);
-
 // Device-resident entry: takes device pointers and current CUDA context
 void ggml_cuda_indexer_logits_fused_device(struct ggml_backend_cuda_context & ctx,
                                            const float * dQ,

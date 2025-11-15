@@ -60,8 +60,6 @@ static inline int getenv_int_(const char * name, int def) {
 
 // Simple baseline fused kernel: compute K^T * Q -> ReLU, then per-head weighted sum, multiply k_scale.
 // This is a placeholder for a fully-optimized version. It assumes row-major contiguous inputs.
-
-// forward declare custom warp-row kernel
 static inline bool sparse_debug_on(){ const char *d=getenv("LLAMA_SPARSE_DEBUG_INDEXER"); return d && *d && atoi(d)!=0; }
 
 
@@ -1007,153 +1005,9 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
 
 
 
-__global__ void k_indexer_logits_warp_row(
-    const float * __restrict__ Q, // [D, Tc*H]
-    const float * __restrict__ K, // [D, kv]
-    const float * __restrict__ W, // [H, Tc]
-    const float * __restrict__ k_scale, // [kv]
-    int D, int H, int Tc, int kv,
-    float * __restrict__ out) {   // [kv, Tc]
-    const int lane = threadIdx.x & 31;
-    const int warp = threadIdx.x >> 5; // warp id in block
-    const int warps_per_block = blockDim.x >> 5;
-    const int kv_idx = blockIdx.x * warps_per_block + warp;
-    if (kv_idx >= kv) return;
-
-    // Limit total accumulators
-    const int HT = 128; // upper bound
-    int ht = H * Tc;
-    // Guard: if too large, fall back doing subset (rare for indexer)
-    if (ht > HT) ht = HT;
-
-    float acc[128];
-    #pragma unroll
-    for (int i = 0; i < 128; ++i) acc[i] = 0.0f;
-
-    // Iterate d with warp-stride
-    for (int d0 = lane; d0 < D; d0 += 32) {
-        float kval = K[(size_t)d0 + (size_t)D * kv_idx];
-        // For each token and head, accumulate kval * qval
-        for (int t = 0; t < Tc; ++t) {
-            size_t t_base = (size_t)t * H;
-            const float * q_base = Q + (size_t)D * t_base;
-            #pragma unroll 1
-            for (int h = 0; h < H; ++h) {
-                float qval = q_base[(size_t)d0 + (size_t)D * h];
-                int idx = (int)(t_base + h);
-                acc[idx] = fmaf(kval, qval, acc[idx]);
-            }
-        }
-    }
-
-    // Warp reduce all accumulators
-    unsigned mask = 0xffffffffu;
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        #pragma unroll 1
-        for (int i = 0; i < 128; ++i) {
-            acc[i] += __shfl_down_sync(mask, acc[i], offset);
-        }
-    }
-
-    if (lane == 0) {
-        float ks = k_scale[kv_idx];
-        for (int t = 0; t < Tc; ++t) {
-            float s = 0.0f;
-            for (int h = 0; h < H; ++h) {
-                float v = acc[t*H + h];
-                if (v < 0.0f) v = 0.0f;
-                float w = W[h + (size_t)H * t];
-                s += v * w;
-            }
-            out[kv_idx + (size_t)kv * t] = s * ks;
-        }
-    }
-}
-
-__global__ void k_indexer_logits_fused(const float * __restrict__ Q, // [D, Tc*H]
-                                       const float * __restrict__ K, // [D, kv]
-                                       const float * __restrict__ W, // [H, Tc]
-                                       const float * __restrict__ k_scale, // [kv]
-                                       int D, int H, int Tc, int kv,
-                                       float * __restrict__ out) {   // [kv, Tc]
-    int tc = blockIdx.x * blockDim.x + threadIdx.x; // token col [0..Tc)
-    int kv_idx = blockIdx.y * blockDim.y + threadIdx.y; // kv row [0..kv)
-    if (tc >= Tc || kv_idx >= kv) return;
-
-#ifdef SEL_DEBUG
-    if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
-        printf("[fused] D=%d H=%d Tc=%d kv=%d\n", D, H, Tc, kv);
-    }
-#endif
-
-    // For each head, compute dot(K[:,kv_idx], Q[:,tc*H + h])
-    float acc_logits = 0.0f;
-    for (int h = 0; h < H; ++h) {
-        const float * qv = Q + (size_t)D * (tc*H + h);
-        const float * kvp = K + (size_t)D * kv_idx;
-        float dot = 0.0f;
-        // naive dot
-        for (int d = 0; d < D; ++d) dot += qv[d] * kvp[d];
-        if (dot < 0.0f) dot = 0.0f; // ReLU
-        float w = W[h + (size_t)H * tc];
-
-#ifdef SEL_DEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tc < 2 && kv_idx < 2 && threadIdx.x == 0 && threadIdx.y == 0) {
-            // full-precision raw over D
-            float raw2 = 0.0f;
-            for (int dd = 0; dd < D; ++dd) raw2 += qv[dd] * kvp[dd];
-            float rel2 = raw2 < 0.0f ? 0.0f : raw2;
-            printf("[fused] step tc=%d kv=%d h=%d raw=%.6e rel=%.6e w=%.6e acc_pre=%.6e\n",
-                   tc, kv_idx, h, raw2, rel2, w, acc_logits);
-        }
-#endif
-        acc_logits += dot * w;
-#ifdef SEL_DEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tc < 2 && kv_idx < 2 && threadIdx.x == 0 && threadIdx.y == 0) {
-            printf("[fused] step tc=%d kv=%d h=%d acc_post=%.6e\n",
-                   tc, kv_idx, h, acc_logits);
-        }
-#endif
-
-    }
-    float ks = k_scale[kv_idx];
-
-#ifdef SEL_DEBUG
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tc < 2 && kv_idx < 2 && threadIdx.x == 0 && threadIdx.y == 0) {
-        printf("[fused] final tc=%d kv=%d acc=%.6e ks=%.6e out=%.6e\n",
-               tc, kv_idx, acc_logits, ks, acc_logits*ks);
-
-// Optimized fused kernel computing all heads' dot-products in a single pass over K
 
 
-    }
-#endif
-    out[kv_idx + (size_t)kv * tc] = acc_logits * ks;
 
-
-#ifdef SEL_DEBUG
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tc < 2 && kv_idx < 2 && threadIdx.x == 0 && threadIdx.y == 0) {
-        // dump for h=0..min(H,2)
-        for (int hh = 0; hh < (H < 2 ? H : 2); ++hh) {
-            int col = tc*H + hh; // current mapping used in kernel
-            const float * qv0 = Q + (size_t)D * col;
-            const float * kvp0 = K + (size_t)D * kv_idx;
-            printf("[fused] tc=%d kv=%d h=%d col=%d W=%.6e k_scale=%.6e\n", 
-                tc, kv_idx, hh, col, W[hh + (size_t)H * tc], k_scale[kv_idx]);
-            for (int dd = 0; dd < (D < 8 ? D : 8); ++dd) {
-                printf("  q[%d]=%.6e k[%d]=%.6e\n", 
-                dd, qv0[dd], dd, kvp0[dd]);
-            }
-        }
-        if (!isfinite(acc_logits)) printf("[fused] acc_logits non-finite at tc=%d kv=%d\n",
-            tc, kv_idx);
-        float vtest = acc_logits * k_scale[kv_idx];
-        if (!isfinite(vtest)) printf("[fused] scaled out non-finite at tc=%d kv=%d\n",
-            tc, kv_idx);
-    }
-#endif
-
-}
 
 __global__ void k_indexer_logits_fused_vec4(const float * __restrict__ Q, // [D, Tc*H]
                                             const float * __restrict__ K, // [D, kv]
@@ -1212,47 +1066,6 @@ __global__ void k_indexer_logits_fused_vec4(const float * __restrict__ Q, // [D,
     out[kv_idx + (size_t)kv * tc] = s;
 }
 
-
-
-extern "C" void ggml_cuda_indexer_logits_fused_host(const float * Q,
-                                                     const float * K,
-                                                     const float * W,
-                                                     const float * k_scale,
-                                                     int D, int H, int Tc, int kv_end,
-                                                     float * out) {
-    ggml_backend_cuda_context ctx(0);
-    cudaStream_t stream = ctx.stream();
-    size_t qsz = (size_t)D * Tc * H;
-    size_t ksz = (size_t)D * kv_end;
-    size_t wsz = (size_t)H * Tc;
-    size_t osz = (size_t)kv_end * Tc;
-    float *dQ=nullptr, *dK=nullptr, *dW=nullptr, *dKS=nullptr, *dO=nullptr;
-    cudaMalloc(&dQ, qsz*sizeof(float));
-    cudaMalloc(&dK, ksz*sizeof(float));
-    cudaMalloc(&dW, wsz*sizeof(float));
-    cudaMalloc(&dKS, kv_end*sizeof(float));
-    cudaMalloc(&dO, osz*sizeof(float));
-    cudaMemcpyAsync(dQ, Q, qsz*sizeof(float), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dK, K, ksz*sizeof(float), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dW, W, wsz*sizeof(float), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dKS, k_scale, kv_end*sizeof(float), cudaMemcpyHostToDevice, stream);
-
-    int bx = min(8, Tc); if (bx < 1) bx = 1;
-    int by = min(32, kv_end); if (by < 1) by = 1;
-    dim3 block(bx, by);
-    dim3 grid((Tc + bx - 1)/bx, (kv_end + by - 1)/by);
-    if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=naive grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
-        k_indexer_logits_fused<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dO);
-
-    cudaMemcpyAsync(out, dO, osz*sizeof(float), cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-    cudaFree(dQ);
-    cudaFree(dK);
-    cudaFree(dW);
-    cudaFree(dKS);
-    cudaFree(dO);
-}
-
 extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context & ctx,
                                                        const float * dQ,
                                                        const float * dK,
@@ -1288,8 +1101,6 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         if (e && *e && atoi(e)!=0) exact_flag = 1;
     }
     // Select kernel based on env; default to tiled
-    bool use_naive = false;
-    if (const char *s = getenv("LLAMA_INDEXER_USE_NAIVE"); s && atoi(s) != 0) use_naive = true;
     bool use_wmma = false;
     bool do_not_use_wmma = false;
     {
@@ -1297,10 +1108,8 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         if (s && atoi(s) != 0) use_wmma = true;
         if (s && atoi(s) == 0) do_not_use_wmma = true;
     }
-    bool use_warp_row = false;
-    if (const char *s = getenv("LLAMA_INDEXER_USE_WARP_ROW"); s && atoi(s) != 0) use_warp_row = true;
-    // Heuristics:
-    if (!use_naive && !use_warp_row && !use_wmma) {
+        // Heuristics:
+    if (!use_wmma) {
         size_t work = (size_t)Tc * (size_t)kv_end;
         // prefer WMMA when legal: standard (H<=16) or head-grouped (H%16==0)
         if (D % 16 == 0 && ((((H <= 16) && ((16 % H) == 0)) || ((H % 16) == 0))) && work >= 16384 && !do_not_use_wmma) {
@@ -1308,7 +1117,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         }
     }
 
-    if (sparse_debug_on()) printf("[INDEXER_DISPATCH] use_naive=%d use_wmma=%d use_warp_row=%d D=%d H=%d Tc=%d kv=%d BLOCK_Q=%d BLOCK_N=%d D_TILE=%d\n", (int)use_naive, (int)use_wmma, (int)use_warp_row, D, H, Tc, kv_end, BLOCK_Q, BLOCK_N, D_TILE);
+    if (sparse_debug_on()) printf("[INDEXER_DISPATCH] use_wmma=%d D=%d H=%d Tc=%d kv=%d BLOCK_Q=%d BLOCK_N=%d D_TILE=%d\n", (int)use_wmma, D, H, Tc, kv_end, BLOCK_Q, BLOCK_N, D_TILE);
     // Optional: TL port path in device wrapper
     const char * __prof_env = getenv("LLAMA_SPARSE_PROF");
     auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
@@ -1440,21 +1249,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           return;
 
     }
-
-    if (use_naive) {
-        dim3 block(32, 4);
-        dim3 grid((Tc + block.x - 1)/block.x, (kv_end + block.y - 1)/block.y);
-        if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=naive grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
-        k_indexer_logits_fused<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
-    } else if (use_warp_row) {
-        // Each block has 8 warps -> 256 threads
-        dim3 block(256,1,1);
-        int warps_per_block = block.x / 32;
-        dim3 grid((kv_end + warps_per_block - 1) / warps_per_block, 1, 1);
-        if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=warp_row grid=(%d,%d) block=(%d)\n", grid.x, grid.y, block.x);
-        k_indexer_logits_warp_row<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dOut);
-        CUDA_CHECK(cudaGetLastError());
-    } else if (use_wmma && D % 16 == 0 && (size_t)Tc * kv_end > 4096) {
+    if (use_wmma && D % 16 == 0 && (size_t)Tc * kv_end > 4096) {
         dim3 block(32,1,1);
         const int tokens_per_tile = max(1, 16 / min(H,16));
         dim3 grid((Tc + tokens_per_tile - 1) / tokens_per_tile, (kv_end + 15) / 16, 1);
