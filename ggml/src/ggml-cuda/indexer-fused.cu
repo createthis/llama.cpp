@@ -1176,7 +1176,11 @@ extern "C" void ggml_cuda_indexer_logits_fused_host(const float * Q,
 
     cudaMemcpyAsync(out, dO, osz*sizeof(float), cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
-    cudaFree(dQ); cudaFree(dK); cudaFree(dW); cudaFree(dKS); cudaFree(dO);
+    cudaFree(dQ);
+    cudaFree(dK);
+    cudaFree(dW);
+    cudaFree(dKS);
+    cudaFree(dO);
 }
 
 extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context & ctx,
@@ -1188,6 +1192,18 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                                                        int D, int H, int Tc, int kv_end,
                                                        float * dOut) {
     cudaStream_t stream = ctx.stream();
+    // Ensure starts/ends are device-resident copies (handles host or device sources)
+    const int * dStarts_dev = dStarts;
+    const int * dEnds_dev   = dEnds;
+    int * dStarts_tmp = nullptr;
+    int * dEnds_tmp   = nullptr;
+    if (dStarts) {
+        dStarts_dev = dStarts;
+    }
+    if (dEnds)   {
+        dEnds_dev   = dEnds;
+    }
+
     // env knobs for tile sizes with heuristics when unset
     const char *env_bq = getenv("LLAMA_INDEXER_BLOCK_Q");
     int BLOCK_Q = env_bq ? max(1, atoi(env_bq)) : 2; // safe default; larger can explode memory
@@ -1196,7 +1212,11 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     const char *env_dt = getenv("LLAMA_INDEXER_D_TILE");
     int D_TILE = env_dt ? max(16, atoi(env_dt)) : 32;
     size_t work_elems = (size_t)Tc * (size_t)kv_end;
-    int exact_flag = (work_elems <= 4096) ? 1 : 0; { const char *e = getenv("LLAMA_INDEXER_EXACT"); if (e && *e && atoi(e)!=0) exact_flag = 1; }
+    int exact_flag = (work_elems <= 4096) ? 1 : 0;
+    {
+        const char *e = getenv("LLAMA_INDEXER_EXACT");
+        if (e && *e && atoi(e)!=0) exact_flag = 1;
+    }
     // Select kernel based on env; default to tiled
     bool use_naive = false;
     if (const char *s = getenv("LLAMA_INDEXER_USE_NAIVE"); s && atoi(s) != 0) use_naive = true;
@@ -1306,7 +1326,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           if (__prof_env && *__prof_env) {
               cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
               cudaEventRecord(__e0, stream);
-              if (dStarts != nullptr && dEnds != nullptr) {
+              if (dStarts_dev != nullptr && dEnds_dev != nullptr) {
               CUDA_CHECK(cudaMemcpyAsync(dKS_i, dStarts, sizeof(int)*(size_t)Tc, cudaMemcpyDeviceToDevice, stream));
               CUDA_CHECK(cudaMemcpyAsync(dKE_i, dEnds,   sizeof(int)*(size_t)Tc, cudaMemcpyDeviceToDevice, stream));
           }
@@ -1339,6 +1359,9 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           k_transpose_TcKv_to_KvTc<<<tgrid, tblock, 0, stream>>>(dLogits, Tc, kv_end, dOut);
           CUDA_CHECK(cudaGetLastError());
           cudaFree(dLogits); cudaFree(dKS_i); cudaFree(dKE_i);
+          cudaStreamSynchronize(stream);
+          if (dStarts_tmp) cudaFree(dStarts_tmp);
+          if (dEnds_tmp) cudaFree(dEnds_tmp);
           return;
 
     }
@@ -1440,7 +1463,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
             if (__prof_env && *__prof_env) {
                 cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
                 cudaEventRecord(__e0, stream);
-                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts, dEnds, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
                 cudaEventRecord(__e1, stream);
                 cudaEventSynchronize(__e1);
                 float __ms_tl = 0.0f; cudaEventElapsedTime(&__ms_tl, __e0, __e1);
@@ -1460,9 +1483,12 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                     }
                 }
             } else {
-                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts, dEnds, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
             }
 
+            cudaStreamSynchronize(stream);
+            if (dStarts_tmp) cudaFree(dStarts_tmp);
+            if (dEnds_tmp) cudaFree(dEnds_tmp);
             return;
         }
         {
@@ -1489,7 +1515,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                              + (size_t)HEAD_CHUNK * BLOCK_Q * sizeof(float);
                 CUDA_SET_SHARED_MEMORY_LIMIT(k_indexer_logits_tiled_f32, (int)shmem);
                 if (sparse_debug_on()) printf("[INDEXER_DISPATCH] fallback tiled grid=(%d,%d) block=(%d,%d) shmem=%zu Hc=%d stages=%d\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem, HEAD_CHUNK, PIPE_STAGES);
-                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts, dEnds, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
             }
         }
     } else {
@@ -1519,7 +1545,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         if (__prof_env && *__prof_env) {
             cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
             cudaEventRecord(__e0, stream);
-            k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts, dEnds, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+            k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
             cudaEventRecord(__e1, stream);
             cudaEventSynchronize(__e1);
             float __ms_tl = 0.0f; cudaEventElapsedTime(&__ms_tl, __e0, __e1);
@@ -1539,8 +1565,10 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                 }
             }
         } else {
-            k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts, dEnds, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+            k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
         }
     }
-}
 
+    if (dStarts_tmp) cudaFree(dStarts_tmp);
+    if (dEnds_tmp)   cudaFree(dEnds_tmp);
+}

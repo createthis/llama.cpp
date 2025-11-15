@@ -25,9 +25,17 @@ static inline uint16_t float_to_half_bits_rtne(float f) {
         return (uint16_t)(sign | (sub >> 13));
     } else if (exp >= 31) {
         if (mant == 0) return (uint16_t)(sign | 0x7C00u);
-        mant >>= 13; return (uint16_t)(sign | 0x7C00u | mant | (mant == 0));
+        mant >>= 13;
+        return (uint16_t)(sign | 0x7C00u | mant | (mant == 0));
     } else {
-        if (mant & 0x00001000u) { mant += 0x00002000u; if (mant & 0x00800000u) { mant = 0; exp += 1; if (exp >= 31) return (uint16_t)(sign | 0x7C00u); } }
+        if (mant & 0x00001000u) {
+            mant += 0x00002000u;
+            if (mant & 0x00800000u) {
+                mant = 0;
+                exp += 1;
+                if (exp >= 31) return (uint16_t)(sign | 0x7C00u);
+            }
+        }
         return (uint16_t)(sign | ((uint32_t)exp << 10) | (mant >> 13));
     }
 }
@@ -37,11 +45,14 @@ static inline float half_bits_to_float(uint16_t h) {
     uint32_t mant = (h & 0x03FFu);
     uint32_t out;
     if (exp == 0) {
-        if (mant == 0) { out = sign; }
+        if (mant == 0) out = sign;
         else {
             // subnormal
             exp = 127 - 15 + 1;
-            while ((mant & 0x0400u) == 0) { mant <<= 1; exp--; }
+            while ((mant & 0x0400u) == 0) {
+                mant <<= 1;
+                exp--;
+            }
             mant &= 0x03FFu;
             out = sign | (exp << 23) | (mant << 13);
         }
@@ -91,7 +102,8 @@ static void cpu_indexer_logits(const float *Q, const float *K, const float *W, c
             for (int h=0; h<H; ++h) {
                 const float *qv = Q + (size_t)D*(tc*H + h);
                 const float *kvp= K + (size_t)D*i;
-                float dot=0.0f; for (int d=0; d<D; ++d) dot += qv[d]*kvp[d];
+                float dot=0.0f;
+                for (int d=0; d<D; ++d) dot += qv[d]*kvp[d];
                 if (dot < 0.0f) dot = 0.0f; // ReLU
                 acc += dot * W[h + (size_t)H*tc];
             }
@@ -105,7 +117,7 @@ int main() {
     printf("CUDA not enabled; skipping fused indexer op test\n");
     return 0;
 #else
-    const int D=128, H=4, Tc=3, kv=4096;
+    const int D=128, H=4, Tc=3, kv=4096, end=kv/4;
 
     std::mt19937 rng(123);
     std::uniform_real_distribution<float> dist(-1.0f,1.0f);
@@ -116,9 +128,14 @@ int main() {
     for (auto &v:W)  v=dist(rng);
     for (auto &v:KS) v=std::max(0.1f, std::abs(dist(rng)));
 
-    ggml_init_params ip{}; ip.mem_size = 64ull*1024*1024; ip.no_alloc = true;
+    ggml_init_params ip{};
+    ip.mem_size = 64ull*1024*1024;
+    ip.no_alloc = true;
     ggml_context * ctx = ggml_init(ip);
-    if (!ctx) { printf("ctx init failed\n"); return 1; }
+    if (!ctx) {
+        printf("ctx init failed\n");
+        return 1;
+    }
 
     ggml_tensor * q2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D, Tc*H);
     // Build CPU reference that matches the math path (FP16 in TL kernel)
@@ -130,7 +147,14 @@ int main() {
     ggml_tensor * w2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, Tc);
     ggml_tensor * ks  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, kv);
 
-    ggml_tensor * out = ggml_indexer_logits_fused(ctx, q2d, k2d, w2d, ks);
+    // Build simple per-token KV windows for performance test
+    std::vector<int32_t> starts_h(Tc, 0);
+    std::vector<int32_t> ends_h(Tc, end);
+    // Create GGML tensors for starts/ends
+    ggml_tensor * starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, Tc);
+    ggml_tensor * ends   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, Tc);
+    // Use ex variant to pass windows
+    ggml_tensor * out = ggml_indexer_logits_fused_ex(ctx, q2d, k2d, w2d, ks, starts, ends);
 
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, out);
@@ -140,33 +164,71 @@ int main() {
         // fallback: pick any CUDA-like device if name lookup fails
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
             ggml_backend_dev_t d = ggml_backend_dev_get(i);
-            if (ggml_backend_dev_type(d) == GGML_BACKEND_DEVICE_TYPE_GPU) { cuda_dev = d; break; }
+            if (ggml_backend_dev_type(d) == GGML_BACKEND_DEVICE_TYPE_GPU) {
+                cuda_dev = d;
+                break;
+            }
         }
     }
 
-      // Continue test setup
+    // Continue test setup
 
     ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
-    if (!cpu_dev) { printf("no CPU device found\n"); ggml_free(ctx); return 1; }
+    if (!cpu_dev) {
+        printf("no CPU device found\n");
+        ggml_free(ctx);
+        return 1;
+    }
 
-      std::vector<float> O_cpu;
-      if (use_tl) {
-          cpu_indexer_logits_f16like(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
-      } else {
-          cpu_indexer_logits(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
-      }
+    std::vector<float> O_cpu;
+    if (use_tl) {
+        cpu_indexer_logits_f16like(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
+    } else {
+        cpu_indexer_logits(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
+    }
+    // Zero CPU reference outside window to align with GPU windowing for this test
+    for (int tc=0; tc<Tc; ++tc) {
+        int end_tc = ends_h[tc];
+        for (int i=end_tc; i<kv; ++i) O_cpu[i + (size_t)kv*tc] = 0.0f;
+    }
+
 
 
     ggml_backend_t cuda = cuda_dev ? ggml_backend_dev_init(cuda_dev, nullptr) : nullptr;
     ggml_backend_t cpu  = ggml_backend_dev_init(cpu_dev, nullptr);
-    if (!cpu || (!cuda && cuda_dev)) { printf("backend init failed\n"); if (cuda) ggml_backend_free(cuda); if (cpu) ggml_backend_free(cpu); ggml_free(ctx); return 1; }
+    if (!cpu || (!cuda && cuda_dev)) {
+        printf("backend init failed\n");
+        if (cuda) ggml_backend_free(cuda);
+        if (cpu) ggml_backend_free(cpu);
+        ggml_free(ctx);
+        return 1;
+    }
 
     ggml_backend_t backs_arr[2] = { cuda, cpu };
     int n_backs = cuda ? 2 : 1;
     ggml_backend_sched_t sched = ggml_backend_sched_new(backs_arr, nullptr, n_backs, GGML_DEFAULT_GRAPH_SIZE, false, true);
-    if (!sched) { printf("sched init failed\n"); if (cuda) ggml_backend_free(cuda); ggml_backend_free(cpu); ggml_free(ctx); return 1; }
+    if (!sched) {
+        printf("sched init failed\n");
+        if (cuda) ggml_backend_free(cuda);
+        ggml_backend_free(cpu);
+        ggml_free(ctx);
+        return 1;
+    }
 
     ggml_backend_sched_reset(sched);
+    // Place all inputs and output on CUDA so fused op runs on GPU
+    if (cuda) {
+        ggml_backend_sched_set_tensor_backend(sched, q2d, cuda);
+        ggml_backend_sched_set_tensor_backend(sched, k2d, cuda);
+        ggml_backend_sched_set_tensor_backend(sched, w2d, cuda);
+        ggml_backend_sched_set_tensor_backend(sched, ks,  cuda);
+        ggml_backend_sched_set_tensor_backend(sched, starts, cuda);
+        ggml_backend_sched_set_tensor_backend(sched, ends,   cuda);
+        ggml_backend_sched_set_tensor_backend(sched, out,    cuda);
+    }
+    
+    // Place fused op on CUDA backend explicitly so inputs get device buffers
+    if (cuda) ggml_backend_sched_set_tensor_backend(sched, out, cuda);
     // Reserve exact buffer sizes to avoid reallocation warnings during alloc_graph
     ggml_backend_sched_reserve(sched, gf);
     ggml_backend_sched_alloc_graph(sched, gf);
@@ -192,6 +254,9 @@ int main() {
     ggml_backend_tensor_set(k2d, K.data(), 0, ggml_nbytes(k2d));
     ggml_backend_tensor_set(w2d, W.data(), 0, ggml_nbytes(w2d));
     ggml_backend_tensor_set(ks,  KS.data(),0, ggml_nbytes(ks));
+    // ensure starts/ends are uploaded to device
+    ggml_backend_tensor_set(starts, starts_h.data(), 0, sizeof(int32_t)*(size_t)Tc);
+    ggml_backend_tensor_set(ends,   ends_h.data(),   0, sizeof(int32_t)*(size_t)Tc);
 
     printf("starting compute\n");
     ggml_status st = ggml_backend_sched_graph_compute(sched, gf);
@@ -231,7 +296,8 @@ int main() {
     for (int i=0; i<(kv<8?kv:8); ++i) printf(" % .6f", KS[i]);
     printf("\n");
 
-    int mism=0; float max_abs=0.0f;
+    int mism=0;
+    float max_abs=0.0f;
     for (size_t i=0;i<O_cpu.size();++i){
         float da = std::abs(O_cpu[i]-O_gpu[i]);
         if (da>max_abs) max_abs=da;
@@ -255,9 +321,11 @@ int main() {
         int BK = std::getenv("LLAMA_INDEXER_BENCH_KV") ? std::atoi(std::getenv("LLAMA_INDEXER_BENCH_KV")) : 32768;
         int iters = std::getenv("LLAMA_INDEXER_BENCH_ITERS") ? std::atoi(std::getenv("LLAMA_INDEXER_BENCH_ITERS")) : 10;
         printf("[BENCH] running prefill-scale bench D=%d H=%d Tc=%d kv=%d iters=%d\n", BD, BH, BT, BK, iters);
-        ggml_init_params ip2{}; ip2.mem_size = 256ull*1024*1024; ip2.no_alloc = true;
+        ggml_init_params ip2{};
+        ip2.mem_size = 256ull*1024*1024;
+        ip2.no_alloc = true;
         ggml_context * ctx2 = ggml_init(ip2);
-        if (!ctx2) { printf("ctx2 init failed\n"); }
+        if (!ctx2) printf("ctx2 init failed\n");
         else {
             std::mt19937 rng2(2025);
             std::uniform_real_distribution<float> dist2(-1.0f,1.0f);
@@ -274,7 +342,10 @@ int main() {
             if (!cuda_dev2) {
                 for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
                     ggml_backend_dev_t d = ggml_backend_dev_get(i);
-                    if (ggml_backend_dev_type(d) == GGML_BACKEND_DEVICE_TYPE_GPU) { cuda_dev2 = d; break; }
+                    if (ggml_backend_dev_type(d) == GGML_BACKEND_DEVICE_TYPE_GPU) {
+                        cuda_dev2 = d;
+                        break;
+                    }
                 }
             }
             ggml_backend_dev_t cpu_dev2 = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
