@@ -779,7 +779,17 @@ __global__ void k_indexer_logits_wmma16_f32(
                 s += v * w;
             }
             s *= k_scale[kv_idx];
-            Out[kv_idx + (size_t)kv * tok] = s;
+            if (starts != nullptr && ends != nullptr) {
+                int s0 = starts[tok];
+                int e0 = ends[tok];
+                if (s0 < 0) s0 = 0;
+                if (s0 > kv) s0 = kv;
+                if (e0 < 0) e0 = 0;
+                if (e0 > kv) e0 = kv;
+                Out[kv_idx + (size_t)kv * tok] = (kv_idx >= s0 && kv_idx < e0) ? s : 0.0f;
+            } else {
+                Out[kv_idx + (size_t)kv * tok] = s;
+            }
         }
     }
 #endif
