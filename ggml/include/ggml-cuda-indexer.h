@@ -27,6 +27,7 @@ void ggml_cuda_indexer_logits_fused_device(struct ggml_backend_cuda_context & ct
                                            const float * dK,
                                            const float * dW,
                                            const float * dKS,
+                                           const int * dStarts, const int * dEnds,
                                            int D, int H, int Tc, int kv_end,
                                            float * dOut);
 

@@ -7280,6 +7280,41 @@ GGML_API struct ggml_tensor * ggml_indexer_logits_fused(
     return out;
 }
 
+// ggml_indexer_logits_fused_ex
+GGML_API struct ggml_tensor * ggml_indexer_logits_fused_ex(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q2d,
+        struct ggml_tensor  * k2d,
+        struct ggml_tensor  * w2d,
+        struct ggml_tensor  * k_scale,
+        struct ggml_tensor  * starts,
+        struct ggml_tensor  * ends) {
+    GGML_ASSERT(q2d->type == GGML_TYPE_F32 || q2d->type == GGML_TYPE_F16 || q2d->type == GGML_TYPE_BF16);
+    GGML_ASSERT(k2d->type == GGML_TYPE_F32 || k2d->type == GGML_TYPE_F16 || k2d->type == GGML_TYPE_BF16);
+    GGML_ASSERT(w2d->type == GGML_TYPE_F32);
+    GGML_ASSERT(k_scale->type == GGML_TYPE_F32);
+    // Shapes: q2d:[D, Tc*H], k2d:[D, kv], w2d:[H, Tc], k_scale:[kv,1] or [kv]
+    GGML_ASSERT(q2d->ne[0] == k2d->ne[0]);
+    const int64_t D   = q2d->ne[0];
+    const int64_t TcH = q2d->ne[1];
+    const int64_t kv  = k2d->ne[1];
+    const int64_t Tc  = w2d->ne[1];
+    const int64_t H   = w2d->ne[0];
+    GGML_ASSERT(TcH == Tc*H);
+
+    struct ggml_tensor * out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, kv, Tc);
+    out->op      = GGML_OP_INDEXER_FUSED;
+    out->src[0]  = q2d;
+    out->src[1]  = k2d;
+    out->src[2]  = w2d;
+    out->src[3]  = k_scale;
+    out->src[4]  = starts;
+    out->src[5]  = ends;
+    (void)D;
+    return out;
+}
+
+
 
 // ggml_sparse_mla_decode_fused
 GGML_API struct ggml_tensor * ggml_sparse_mla_decode_fused(

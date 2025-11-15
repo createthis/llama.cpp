@@ -2584,3 +2584,12 @@ extern "C" {
 #ifdef  __cplusplus
 }
 #endif
+
+GGML_API struct ggml_tensor * ggml_indexer_logits_fused_ex(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q2d,
+        struct ggml_tensor  * k2d,
+        struct ggml_tensor  * w2d,
+        struct ggml_tensor  * k_scale,
+        struct ggml_tensor  * starts,    // optional [Tc] I32
+        struct ggml_tensor  * ends);     // optional [Tc] I32

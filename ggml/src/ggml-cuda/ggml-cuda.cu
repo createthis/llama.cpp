@@ -2656,7 +2656,12 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 ggml_tensor * k2d_c = k2d;
                 ggml_tensor * w2d_c = w2d;
                 ggml_tensor * ks_c  = ks;
-                // Optional profiling for fused indexer
+                // Optional starts/ends (per-token windows)
+                const int * dStarts = nullptr;
+                const int * dEnds   = nullptr;
+                if (dst->src[4] && dst->src[4]->type == GGML_TYPE_I32) dStarts = (const int *)dst->src[4]->data;
+                if (dst->src[5] && dst->src[5]->type == GGML_TYPE_I32) dEnds   = (const int *)dst->src[5]->data;
+// Optional profiling for fused indexer
                 auto * __prof_env2 = getenv("LLAMA_SPARSE_PROF");
                 auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
                 cudaEvent_t __i0, __i1;
@@ -2694,7 +2699,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 printf("[GGML_OP_INDEXER_FUSED] ptrs dQ=%p dK=%p dW=%p dKS=%p dOut=%p\n", (void*)qf.get(), (void*)kf.get(), w2d_c->data, ks_c->data, dst->data);
                 fflush(stdout);
 #endif
-                ggml_cuda_indexer_logits_fused_device(ctx, (const float *)qf.get(), (const float *)kf.get(), (const float *)w2d_c->data, (const float *)ks_c->data, D, H, Tc, kv, (float *)dst->data);
+                ggml_cuda_indexer_logits_fused_device(ctx, (const float *)qf.get(), (const float *)kf.get(), (const float *)w2d_c->data, (const float *)ks_c->data, dStarts, dEnds, D, H, Tc, kv, (float *)dst->data);
                 CUDA_CHECK(cudaGetLastError());
                 if (__do_prof2) {
                     cudaEventRecord(__i1, ctx.stream());

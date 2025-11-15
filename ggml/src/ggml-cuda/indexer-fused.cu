@@ -1127,6 +1127,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                                                        const float * dK,
                                                        const float * dW,
                                                        const float * dKS,
+                                                       const int * dStarts, const int * dEnds,
                                                        int D, int H, int Tc, int kv_end,
                                                        float * dOut) {
     cudaStream_t stream = ctx.stream();
@@ -1160,7 +1161,10 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     const char * __prof_env = getenv("LLAMA_SPARSE_PROF");
     auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
     if (const char *s = getenv("LLAMA_INDEXER_TL_PORT"); s && atoi(s) != 0) {
+          // Prepare starts/ends (CuSeqLenKS/KE). If provided by caller via GGML op src[4]/src[5],
+          // use them; otherwise synthesize [0, kv_end) per token.
           int *dKS_i = nullptr, *dKE_i = nullptr;
+          // Default: fill 0..kv_end
           cudaMalloc(&dKS_i, sizeof(int) * (size_t)Tc);
           cudaMalloc(&dKE_i, sizeof(int) * (size_t)Tc);
           int tblocks = (Tc + 255) / 256;
@@ -1245,7 +1249,11 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           if (__prof_env && *__prof_env) {
               cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
               cudaEventRecord(__e0, stream);
-              k_tl_mqa_attn_return_logits_port<<<gridTL, threads, shmem_bytes, stream>>>(
+              if (dStarts != nullptr && dEnds != nullptr) {
+              CUDA_CHECK(cudaMemcpyAsync(dKS_i, dStarts, sizeof(int)*(size_t)Tc, cudaMemcpyDeviceToDevice, stream));
+              CUDA_CHECK(cudaMemcpyAsync(dKE_i, dEnds,   sizeof(int)*(size_t)Tc, cudaMemcpyDeviceToDevice, stream));
+          }
+          k_tl_mqa_attn_return_logits_port<<<gridTL, threads, shmem_bytes, stream>>>(
                       dQrm, dKrm, dKS, dLogits, dWrm, dKS_i, dKE_i,
                       Tc, kv_end, H, D, block_N, num_stages, threads, block_Q);
               cudaEventRecord(__e1, stream);
