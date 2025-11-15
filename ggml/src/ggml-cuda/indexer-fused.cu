@@ -73,10 +73,15 @@ __global__ void k_indexer_logits_tiled_f32(
     const float * __restrict__ W,
     const float * __restrict__ k_scale,
     int D, int H, int Tc, int kv,
+    const int * __restrict__ starts,
+    const int * __restrict__ ends,
     int D_TILE, int BLOCK_Q, int BLOCK_N, int exact_flag,
     int HEAD_CHUNK_ARG,
     int PIPE_STAGES_ARG,
     float * __restrict__ Out) {
+    __shared__ int s_min_blk;
+    __shared__ int s_max_blk;
+
     // Dynamic select exact vs optimized based on workload or env
     bool exact = (exact_flag != 0);
     /* env read on host */
@@ -89,6 +94,35 @@ __global__ void k_indexer_logits_tiled_f32(
         int k0 = blockIdx.y * BLOCK_N;
         int token = t0 + t_local;
         int kv_idx = k0 + k_local;
+        // Compute union window for this block
+        if (threadIdx.x == 0 && threadIdx.y == 0) {
+            int smin = 0; int smax = kv;
+            if (starts != nullptr && ends != nullptr) {
+                smin = kv; smax = 0;
+                for (int q = 0; q < BLOCK_Q; ++q) {
+                    int tok = t0 + q;
+                    if (tok < Tc) {
+                        int s0 = starts[tok]; int e0 = ends[tok];
+                        if (s0 < 0) s0 = 0; if (s0 > kv) s0 = kv;
+                        if (e0 < 0) e0 = 0; if (e0 > kv) e0 = kv;
+                        if (s0 < smin) smin = s0;
+                        if (e0 > smax) smax = e0;
+                    }
+                }
+                if (smin > smax) smin = smax;
+            }
+            s_min_blk = smin; s_max_blk = smax;
+        }
+        __syncthreads();
+        int smin_blk = s_min_blk; int smax_blk = s_max_blk;
+        if (kv_idx < smin_blk || kv_idx >= smax_blk) { Out[kv_idx + (size_t)kv * token] = 0.0f; return; }
+        if (starts != nullptr && ends != nullptr) {
+            int s0 = starts[token]; int e0 = ends[token];
+            if (s0 < 0) s0 = 0; if (s0 > kv) s0 = kv;
+            if (e0 < 0) e0 = 0; if (e0 > kv) e0 = kv;
+            if (kv_idx < s0 || kv_idx >= e0) { Out[kv_idx + (size_t)kv * token] = 0.0f; return; }
+        }
+
         if (t_local >= BLOCK_Q || k_local >= BLOCK_N) return;
         if (token >= Tc || kv_idx >= kv) return;
         float acc = 0.0f;
@@ -102,7 +136,7 @@ __global__ void k_indexer_logits_tiled_f32(
             acc += dot * W[h + (size_t)H * token];
         }
         acc *= k_scale[kv_idx];
-        Out[kv_idx + (size_t)kv * token] = acc;
+        Out[kv_idx + (size_t)kv * token] = (starts && ends) ? ((kv_idx >= starts[token] && kv_idx < ends[token]) ? acc : 0.0f) : acc;
         return;
     }
     // Optimized shared-memory tiled path with head-chunked reduction
@@ -112,6 +146,29 @@ __global__ void k_indexer_logits_tiled_f32(
     int k0 = blockIdx.y * BLOCK_N;
     int token = t0 + t_local;
     int kv_idx = k0 + k_local;
+    // Compute union window for this block
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        int smin = 0; int smax = kv;
+        if (starts != nullptr && ends != nullptr) {
+            smin = kv; smax = 0;
+            for (int q = 0; q < BLOCK_Q; ++q) {
+                int tok = t0 + q;
+                if (tok < Tc) {
+                    int s0 = starts[tok]; int e0 = ends[tok];
+                    if (s0 < 0) s0 = 0; if (s0 > kv) s0 = kv;
+                    if (e0 < 0) e0 = 0; if (e0 > kv) e0 = kv;
+                    if (s0 < smin) smin = s0;
+                    if (e0 > smax) smax = e0;
+                }
+            }
+            if (smin > smax) smin = smax;
+        }
+        s_min_blk = smin; s_max_blk = smax;
+    }
+    __syncthreads();
+    int smin_blk = s_min_blk; int smax_blk = s_max_blk;
+    if (kv_idx < smin_blk || kv_idx >= smax_blk) { Out[kv_idx + (size_t)kv * token] = 0.0f; return; }
+
     if (t_local >= BLOCK_Q || k_local >= BLOCK_N) return;
     if (token >= Tc || kv_idx >= kv) return;
 
@@ -270,7 +327,7 @@ __global__ void k_indexer_logits_tiled_f32(
 
     // Apply k_scale
     acc *= k_scale[kv_idx];
-    Out[kv_idx + (size_t)kv * token] = acc;
+    Out[kv_idx + (size_t)kv * token] = (starts && ends) ? ((kv_idx >= starts[token] && kv_idx < ends[token]) ? acc : 0.0f) : acc;
 }
 
 // mqa_attn_return_logits_kernel_port.cu
@@ -1383,7 +1440,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
             if (__prof_env && *__prof_env) {
                 cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
                 cudaEventRecord(__e0, stream);
-                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts, dEnds, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
                 cudaEventRecord(__e1, stream);
                 cudaEventSynchronize(__e1);
                 float __ms_tl = 0.0f; cudaEventElapsedTime(&__ms_tl, __e0, __e1);
@@ -1403,7 +1460,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                     }
                 }
             } else {
-                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts, dEnds, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
             }
 
             return;
@@ -1432,7 +1489,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                              + (size_t)HEAD_CHUNK * BLOCK_Q * sizeof(float);
                 CUDA_SET_SHARED_MEMORY_LIMIT(k_indexer_logits_tiled_f32, (int)shmem);
                 if (sparse_debug_on()) printf("[INDEXER_DISPATCH] fallback tiled grid=(%d,%d) block=(%d,%d) shmem=%zu Hc=%d stages=%d\n", gridT.x, gridT.y, blockT.x, blockT.y, (size_t)shmem, HEAD_CHUNK, PIPE_STAGES);
-                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+                k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts, dEnds, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
             }
         }
     } else {
@@ -1462,7 +1519,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         if (__prof_env && *__prof_env) {
             cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1);
             cudaEventRecord(__e0, stream);
-            k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+            k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts, dEnds, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
             cudaEventRecord(__e1, stream);
             cudaEventSynchronize(__e1);
             float __ms_tl = 0.0f; cudaEventElapsedTime(&__ms_tl, __e0, __e1);
@@ -1482,7 +1539,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                 }
             }
         } else {
-            k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
+            k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts, dEnds, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
         }
     }
 }
