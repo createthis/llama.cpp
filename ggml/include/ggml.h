@@ -769,6 +769,15 @@ extern "C" {
             struct ggml_tensor  * w2d,
             struct ggml_tensor  * k_scale);
 
+    GGML_API struct ggml_tensor * ggml_indexer_logits_fused_ex(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q2d,
+            struct ggml_tensor  * k2d,
+            struct ggml_tensor  * w2d,
+            struct ggml_tensor  * k_scale,
+            struct ggml_tensor  * starts,
+            struct ggml_tensor  * ends);
+
     GGML_API bool ggml_is_contiguous_1(const struct ggml_tensor * tensor); // contiguous for dims >= 1
     GGML_API bool ggml_is_contiguous_2(const struct ggml_tensor * tensor); // contiguous for dims >= 2
 
@@ -2585,11 +2594,4 @@ extern "C" {
 }
 #endif
 
-GGML_API struct ggml_tensor * ggml_indexer_logits_fused_ex(
-        struct ggml_context * ctx,
-        struct ggml_tensor  * q2d,
-        struct ggml_tensor  * k2d,
-        struct ggml_tensor  * w2d,
-        struct ggml_tensor  * k_scale,
-        struct ggml_tensor  * starts,    // optional [Tc] I32
-        struct ggml_tensor  * ends);     // optional [Tc] I32
+     // optional [Tc] I32

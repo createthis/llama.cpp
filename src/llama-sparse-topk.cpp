@@ -210,6 +210,35 @@ static void fused_indexer_custom(ggml_tensor * /*dst*/, int /*ith*/, int /*nth*/
     // no-op custom CPU fallback; all real work happens in CUDA backend path
 }
 
+
+
+static ggml_tensor * build_indexer_fused_logits_ex(
+    ggml_context * ctx,
+    ggml_tensor * q_tile2d,
+    ggml_tensor * k_slice,
+    ggml_tensor * w_slice,
+    ggml_tensor * ks_head,
+    bool have_windows,
+    ggml_tensor * win_starts,
+    ggml_tensor * win_ends,
+    int64_t t0,
+    int64_t Tc) {
+    ggml_tensor * starts_tile = nullptr;
+    ggml_tensor * ends_tile   = nullptr;
+    if (have_windows && win_ends) {
+        if (win_starts) {
+            size_t off_s = (size_t)t0 * win_starts->nb[0];
+            starts_tile = ggml_view_1d(ctx, win_starts, Tc, off_s);
+            starts_tile = ggml_cont(ctx, starts_tile);
+        }
+        if (win_ends) {
+            size_t off_e = (size_t)t0 * win_ends->nb[0];
+            ends_tile = ggml_view_1d(ctx, win_ends, Tc, off_e);
+            ends_tile = ggml_cont(ctx, ends_tile);
+        }
+    }
+    return ggml_indexer_logits_fused_ex(ctx, q_tile2d, k_slice, w_slice, ks_head, starts_tile, ends_tile);
+}
 static ggml_tensor * build_indexer_fused_logits(
     ggml_context * ctx,
     ggml_tensor * q2d, // [D, Tc*H]
@@ -529,9 +558,11 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                     printf("[idxkv] fused_device=%d\n", (int)use_fused_device);
                     fflush(stdout);
                 }
-                scores_tc = use_fused_device ?
-                    ggml_indexer_logits_fused(ctx, q_tile2d, k_slice, w_slice, ks_head) :
-                    build_indexer_fused_logits(ctx, q_tile2d, k_slice, w_slice, ks_head);
+                if (use_fused_device) {
+                    scores_tc = build_indexer_fused_logits_ex(ctx, q_tile2d, k_slice, w_slice, ks_head, have_windows, win_starts, win_ends, t0, Tc);
+                } else {
+                    scores_tc = build_indexer_fused_logits(ctx, q_tile2d, k_slice, w_slice, ks_head);
+                }
 
                 if (dbg && t0 == 0) {
                     ggml_tensor * ref_scores = idx_compute_scores_tile(ctx, q3d, k_indexer_f16, weights, k_scale_2d, D, H, Tc, kv_end, t0, use_fp16);
