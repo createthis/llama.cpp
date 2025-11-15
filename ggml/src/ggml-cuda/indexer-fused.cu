@@ -115,28 +115,31 @@ __global__ void k_indexer_logits_tiled_f32(
         }
         __syncthreads();
         int smin_blk = s_min_blk; int smax_blk = s_max_blk;
-        if (kv_idx < smin_blk || kv_idx >= smax_blk) { Out[kv_idx + (size_t)kv * token] = 0.0f; return; }
-        if (starts != nullptr && ends != nullptr) {
-            int s0 = starts[token]; int e0 = ends[token];
-            if (s0 < 0) s0 = 0; if (s0 > kv) s0 = kv;
-            if (e0 < 0) e0 = 0; if (e0 > kv) e0 = kv;
-            if (kv_idx < s0 || kv_idx >= e0) { Out[kv_idx + (size_t)kv * token] = 0.0f; return; }
-        }
+        bool in_bounds = (t_local < BLOCK_Q) && (k_local < BLOCK_N) && (token < Tc) && (kv_idx < kv);
+        bool in_union  = (kv_idx >= smin_blk && kv_idx < smax_blk);
 
-        if (t_local >= BLOCK_Q || k_local >= BLOCK_N) return;
-        if (token >= Tc || kv_idx >= kv) return;
         float acc = 0.0f;
-        for (int h = 0; h < H; ++h) {
-            const float *qv = Q + (size_t)D * (token*H + h);
-            const float *kvp= K + (size_t)D * kv_idx;
-            float dot = 0.0f;
-            #pragma unroll 1
-            for (int d = 0; d < D; ++d) dot += qv[d] * kvp[d];
-            if (dot < 0.0f) dot = 0.0f;
-            acc += dot * W[h + (size_t)H * token];
+        if (in_bounds && in_union) {
+            for (int h = 0; h < H; ++h) {
+                const float *qv = Q + (size_t)D * (token*H + h);
+                const float *kvp= K + (size_t)D * kv_idx;
+                float dot = 0.0f;
+                #pragma unroll 1
+                for (int d = 0; d < D; ++d) dot += qv[d] * kvp[d];
+                if (dot < 0.0f) dot = 0.0f;
+                acc += dot * W[h + (size_t)H * token];
+            }
+            acc *= k_scale[kv_idx];
+            if (starts != nullptr && ends != nullptr) {
+                int s0 = starts[token]; int e0 = ends[token];
+                if (s0 < 0) s0 = 0; if (s0 > kv) s0 = kv;
+                if (e0 < 0) e0 = 0; if (e0 > kv) e0 = kv;
+                if (kv_idx < s0 || kv_idx >= e0) acc = 0.0f;
+            }
         }
-        acc *= k_scale[kv_idx];
-        Out[kv_idx + (size_t)kv * token] = (starts && ends) ? ((kv_idx >= starts[token] && kv_idx < ends[token]) ? acc : 0.0f) : acc;
+        if (in_bounds) {
+            Out[kv_idx + (size_t)kv * token] = acc;
+        }
         return;
     }
     // Optimized shared-memory tiled path with head-chunked reduction
@@ -167,10 +170,7 @@ __global__ void k_indexer_logits_tiled_f32(
     }
     __syncthreads();
     int smin_blk = s_min_blk; int smax_blk = s_max_blk;
-    if (kv_idx < smin_blk || kv_idx >= smax_blk) { Out[kv_idx + (size_t)kv * token] = 0.0f; return; }
-
-    if (t_local >= BLOCK_Q || k_local >= BLOCK_N) return;
-    if (token >= Tc || kv_idx >= kv) return;
+    bool in_union  = (kv_idx >= smin_blk && kv_idx < smax_blk);
 
     // Head-chunk size
     int Hc = HEAD_CHUNK_ARG > 0 ? HEAD_CHUNK_ARG : 16;
@@ -1251,14 +1251,19 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     bool use_naive = false;
     if (const char *s = getenv("LLAMA_INDEXER_USE_NAIVE"); s && atoi(s) != 0) use_naive = true;
     bool use_wmma = false;
-    if (const char *s = getenv("LLAMA_INDEXER_USE_WMMA"); s && atoi(s) != 0) use_wmma = true;
+    bool do_not_use_wmma = false;
+    {
+        const char *s = getenv("LLAMA_INDEXER_USE_WMMA");
+        if (s && atoi(s) != 0) use_wmma = true;
+        if (s && atoi(s) == 0) do_not_use_wmma = true;
+    }
     bool use_warp_row = false;
     if (const char *s = getenv("LLAMA_INDEXER_USE_WARP_ROW"); s && atoi(s) != 0) use_warp_row = true;
     // Heuristics:
     if (!use_naive && !use_warp_row && !use_wmma) {
         size_t work = (size_t)Tc * (size_t)kv_end;
         // prefer WMMA when legal: standard (H<=16) or head-grouped (H%16==0)
-        if (D % 16 == 0 && ((((H <= 16) && ((16 % H) == 0)) || ((H % 16) == 0))) && work >= 16384) {
+        if (D % 16 == 0 && ((((H <= 16) && ((16 % H) == 0)) || ((H % 16) == 0))) && work >= 16384 && !do_not_use_wmma) {
             use_wmma = 1;
         }
     }
