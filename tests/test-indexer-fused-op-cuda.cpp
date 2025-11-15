@@ -142,7 +142,8 @@ int main() {
 
     ggml_tensor * k2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D, kv);
     const char *tl = std::getenv("LLAMA_INDEXER_TL_PORT");
-    bool use_tl = tl && std::atoi(tl) != 0;
+    const char *wmma_env = std::getenv("LLAMA_INDEXER_USE_WMMA");
+    bool use_fp16_ref = (tl && std::atoi(tl) != 0) || (wmma_env && std::atoi(wmma_env) != 0);
 
     ggml_tensor * w2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, Tc);
     ggml_tensor * ks  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, kv);
@@ -181,7 +182,7 @@ int main() {
     }
 
     std::vector<float> O_cpu;
-    if (use_tl) {
+    if (use_fp16_ref) {
         cpu_indexer_logits_f16like(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
     } else {
         cpu_indexer_logits(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
