@@ -7,6 +7,8 @@
 using namespace nvcuda;
 
 #include <cuda_runtime.h>
+#include <cuda.h>
+
 #include <cuda_pipeline_primitives.h>
 #include <mma.h>
 #include <stdint.h>
@@ -74,6 +76,51 @@ __global__ void k_transpose_TcKv_to_KvTc(const float *in, int Tc, int kv, float 
     int k = blockIdx.y * blockDim.y + threadIdx.y;
     if (t < Tc && k < kv) out[k + (size_t)kv * t] = in[(size_t)t * kv + k];
 }
+__global__ void k_rowmajor_f32_to_f16(const float *src, int rows, int cols, __half *dst) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)rows * (size_t)cols;
+    if (idx < total) dst[idx] = __float2half(src[idx]);
+}
+
+// Row-major float32 -> FP8 E4M3 stub packer (placeholder)
+__global__ void k_rowmajor_f32_to_fp8_e4m3(const float *src, int rows, int cols, unsigned char *dst) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)rows * (size_t)cols;
+    if (idx < total) dst[idx] = 0u; // not used yet
+}
+
+// TMA+FP8 stub kernel (placeholder, not used yet)
+// helper: encode 2D tiled TMA descriptor (row-major layout)
+static inline CUresult ggml_cuda_encode_tma_desc_2d(CUtensorMap *desc,
+                                                    CUtensorMapDataType dtype,
+                                                    void *base,
+                                                    cuuint64_t dim0, cuuint64_t dim1,
+                                                    cuuint32_t box0, cuuint32_t box1) {
+    cuuint64_t dims[2]    = { dim0, dim1 };
+    cuuint64_t strides[2] = { 1ULL, dim0 };
+    cuuint32_t box[2]     = { box0, box1 };
+    cuuint32_t estr[2]    = { 1u, 1u };
+    return cuTensorMapEncodeTiled(desc, dtype, 2, base, dims, strides, box, estr,
+                                  CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                  CU_TENSOR_MAP_SWIZZLE_32B,
+                                  CU_TENSOR_MAP_L2_PROMOTION_L2_64B,
+                                  CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+}
+
+__global__ void k_tl_mqa_attn_return_logits_tma_fp8(
+    const unsigned char * __restrict__ IndexQ_fp8,
+    const unsigned char * __restrict__ IndexK_fp8,
+    const float * __restrict__ IndexKScale,
+    float * __restrict__ Logits,
+    const float * __restrict__ Weights,
+    const int   * __restrict__ CuSeqLenKS,
+    const int   * __restrict__ CuSeqLenKE,
+    int seq_len, int seq_len_kv, int heads, int index_dim,
+    int block_N, int num_stages, int threads, int block_Q) {
+    (void)IndexQ_fp8; (void)IndexK_fp8; (void)IndexKScale; (void)Logits; (void)Weights; (void)CuSeqLenKS; (void)CuSeqLenKE;
+    (void)seq_len; (void)seq_len_kv; (void)heads; (void)index_dim; (void)block_N; (void)num_stages; (void)threads; (void)block_Q;
+}
+
 
 // helpers to read env
 static inline int getenv_int_(const char * name, int def) {
@@ -326,6 +373,178 @@ __global__ void k_indexer_logits_tiled_f32(
             // Compute partial dot across cur for this (kv_idx, token), accumulating per head
             float * Kcomp = Kbuf;
             for (int di = 0; di < cur; ++di) {
+
+#if 0
+// Variant that reads Q/K from global half and stages f16 directly into shared
+__global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_port_f16global(
+  const __half * __restrict__ IndexQh,   // [seq_len*heads, index_dim] (row-major)
+  const __half * __restrict__ IndexKh,   // [seq_len_kv,    index_dim] (row-major)
+  const float * __restrict__ IndexKScale,// [seq_len_kv]
+  float * __restrict__ Logits,           // [seq_len, seq_len_kv]
+  const float * __restrict__ Weights,    // [seq_len, heads]
+  const int   * __restrict__ CuSeqLenKS, // [seq_len]
+  const int   * __restrict__ CuSeqLenKE, // [seq_len]
+  int seq_len, int seq_len_kv, int heads, int index_dim,
+  int block_N, int /*num_stages*/, int threads, int block_Q)
+{
+  const int bx = blockIdx.x;
+  const int seq_len_i = bx * block_Q;
+
+  extern __shared__ unsigned char sm[];
+  size_t off = 0;
+  const int WM=16, WN=16;
+  const int warps = blockDim.x >> 5;
+
+  const size_t Q_rows = (size_t)block_Q * (size_t)heads;
+  const size_t K_rows_max = (size_t)block_N;
+
+  // Half slabs in shared
+  __half *K0_f16 = (__half*)(sm + off); off += (size_t)K_rows_max * (size_t)index_dim * sizeof(__half);
+  __half *K1_f16 = (__half*)(sm + off); off += (size_t)K_rows_max * (size_t)index_dim * sizeof(__half);
+  __half *Qs_f16 = (__half*)(sm + off); off += (size_t)Q_rows     * (size_t)index_dim * sizeof(__half);
+  float  *ks0    = (float *)(sm + off); off += (size_t)K_rows_max * sizeof(float);
+  float  *ks1    = (float *)(sm + off); off += (size_t)K_rows_max * sizeof(float);
+  float  *logits_blk = (float *)(sm + off); off += (size_t)K_rows_max * (size_t)block_Q * sizeof(float);
+  float  *Csh    = (float *)(sm + off); off += (size_t)warps * (WM*WN) * sizeof(float);
+
+  __shared__ int cu_k_s_min_s, cu_k_e_max_s;
+  if(threadIdx.x==0){
+    int smin= 2147483647, emax= -2147483648;
+    for(int bq=0;bq<block_Q;++bq){ int t=seq_len_i+bq; int v=(t<seq_len)? CuSeqLenKS[t]:0; if(v>seq_len_kv) v=seq_len_kv; if(v<smin) smin=v; }
+    for(int bq=0;bq<block_Q;++bq){ int t=seq_len_i+bq; int v=(t<seq_len)? CuSeqLenKE[t]:0; if(v>seq_len_kv) v=seq_len_kv; if(v>emax) emax=v; }
+    cu_k_s_min_s = smin; cu_k_e_max_s = emax;
+  }
+  __syncthreads();
+  int cu_k_s_min = cu_k_s_min_s, cu_k_e_max = cu_k_e_max_s;
+
+  // zero logits scratch
+  for (size_t t = threadIdx.x; t < (size_t)block_N*(size_t)block_Q; t += blockDim.x) logits_blk[t]=0.f;
+  __syncthreads();
+
+  int iters = max(0, (cu_k_e_max - cu_k_s_min + block_N - 1)/block_N);
+  int warp_id = threadIdx.x>>5, lane = threadIdx.x & 31;
+  int Nq_all = (int)Q_rows;
+  int tiles_n = (Nq_all + WN - 1)/WN;
+
+  // Preload first K and ks into buffer 0
+  int curN0 = min(block_N, max(0, cu_k_e_max - cu_k_s_min));
+  for (size_t t = threadIdx.x; t < (size_t)curN0*(size_t)index_dim; t += blockDim.x) {
+    size_t r = t / (size_t)index_dim, c = t % (size_t)index_dim;
+    K0_f16[t] = IndexKh[(size_t)(cu_k_s_min + (int)r)*(size_t)index_dim + c];
+  }
+  for (size_t t = threadIdx.x; t < (size_t)curN0; t += blockDim.x) ks0[t] = IndexKScale[cu_k_s_min + (int)t];
+  __syncthreads();
+
+  for (int it = 0; it < iters; ++it) {
+    int k_start_next = cu_k_s_min + (it+1)*block_N;
+    int curN1 = 0;
+    if (it+1 < iters) {
+      curN1 = min(block_N, cu_k_e_max - k_start_next);
+      for (size_t t = threadIdx.x; t < (size_t)curN1*(size_t)index_dim; t += blockDim.x) {
+        size_t r = t / (size_t)index_dim, c = t % (size_t)index_dim;
+        K1_f16[t] = IndexKh[(size_t)(k_start_next + (int)r)*(size_t)index_dim + c];
+      }
+      for (size_t t = threadIdx.x; t < (size_t)curN1; t += blockDim.x) ks1[t] = IndexKScale[k_start_next + (int)t];
+      __syncthreads();
+    }
+
+    int k_start_cur = cu_k_s_min + it*block_N;
+    int curN0_it    = min(block_N, cu_k_e_max - k_start_cur);
+
+    // Stage Q (row-major [Tc*H,D]) into Qs_f16 (col-major blocks per WMMA, but we load with wmma::col_major below)
+    for (size_t t = threadIdx.x; t < (size_t)Q_rows*(size_t)index_dim; t += blockDim.x) {
+      size_t r = t / (size_t)index_dim, c = t % (size_t)index_dim;
+      int bq = (int)(r / (size_t)heads);
+      int h  = (int)(r % (size_t)heads);
+      int tok = seq_len_i + bq;
+      __half v = __float2half(0.0f);
+      if (tok < seq_len) v = IndexQh[(size_t)(tok*heads + h)*(size_t)index_dim + c];
+      Qs_f16[r*(size_t)index_dim + c] = v;
+    }
+    __syncthreads();
+
+    int tiles_m = (curN0_it + WM - 1)/WM;
+    for (int tile_lin = warp_id; tile_lin < tiles_m*tiles_n; tile_lin += (blockDim.x>>5)) {
+      int tile_m = tile_lin / tiles_n;
+      int tile_n = tile_lin % tiles_n;
+
+      wmma::fragment<wmma::accumulator, WM, WN, 16, float> c;
+      wmma::fill_fragment(c, 0.0f);
+
+      for (int kk = 0; kk < index_dim; kk += 16) {
+        const __half* Ap = K0_f16 + (size_t)tile_m*WM*(size_t)index_dim + kk;
+        const __half* Bp = Qs_f16 + (size_t)tile_n*WN*(size_t)index_dim + kk;
+        wmma::fragment<wmma::matrix_a, WM, WN, 16, __half, wmma::row_major> a;
+        wmma::fragment<wmma::matrix_b, WM, WN, 16, __half, wmma::col_major> b;
+        wmma::load_matrix_sync(a, Ap, index_dim);
+        wmma::load_matrix_sync(b, Bp, index_dim);
+        wmma::mma_sync(c, a, b, c);
+      }
+      float* cptr = Csh + (size_t)warp_id*(WM*WN);
+      wmma::store_matrix_sync(cptr, c, WN, wmma::mem_row_major);
+      __syncwarp();
+
+      const int base_bq = (tile_n*WN) / heads;
+      const int max_cols = min(WN, (int)Q_rows - tile_n*WN);
+      const int groups = max(0, (max_cols + heads - 1) / heads);
+      for (int mi = lane; mi < WM; mi += 32) {
+        int bn = tile_m*WM + mi;
+        if (bn >= curN0_it) continue;
+        float ks = ks0[bn];
+        float acc_g[16];
+        #pragma unroll
+        for (int u = 0; u < 16; ++u) acc_g[u] = 0.0f;
+        #pragma unroll
+        for (int cj = 0; cj < WN; ++cj) {
+          int ncol = tile_n*WN + cj;
+          if (cj >= max_cols || ncol >= (int)Q_rows) break;
+          float val = cptr[mi*WN + cj];
+          if (val < 0.f) val = 0.f;
+          int bq_abs = ncol / heads;
+          int h  = ncol % heads;
+          int tok = seq_len_i + bq_abs;
+          float w = 0.0f;
+          if (tok < seq_len) w = Weights[(size_t)tok*(size_t)heads + h];
+          int u = bq_abs - base_bq;
+          if (u >= 0 && u < 16) acc_g[u] += val * w;
+        }
+        #pragma unroll
+        for (int u = 0; u < 16; ++u) {
+          if (u >= groups) break;
+          int bq_abs = base_bq + u;
+          int tok = seq_len_i + bq_abs;
+          if (bq_abs < block_Q && tok < seq_len) {
+            atomicAdd(&logits_blk[(size_t)bn*(size_t)block_Q + (size_t)bq_abs], acc_g[u] * ks);
+          }
+        }
+      }
+      __syncwarp();
+    }
+    __syncthreads();
+
+    for (size_t t = threadIdx.x; t < (size_t)curN0_it*(size_t)block_Q; t += blockDim.x) {
+      int bn = (int)(t / (size_t)block_Q);
+      int bq = (int)(t % (size_t)block_Q);
+      int tok = seq_len_i + bq;
+      if (tok < seq_len) {
+        int kv_col = k_start_cur + bn;
+        if (kv_col < seq_len_kv)
+          Logits[(size_t)tok*(size_t)seq_len_kv + (size_t)kv_col] = logits_blk[(size_t)bn*(size_t)block_Q + (size_t)bq];
+      }
+    }
+    __syncthreads();
+    for (size_t t = threadIdx.x; t < (size_t)curN0_it*(size_t)block_Q; t += blockDim.x) logits_blk[t] = 0.f;
+    __syncthreads();
+
+    if (it+1 < iters) {
+      // swap
+      __half *th = K0_f16; K0_f16 = K1_f16; K1_f16 = th;
+      float *ts = ks0; ks0 = ks1; ks1 = ts;
+    }
+  }
+}
+#endif
+
                 float kval = Kcomp[di * BLOCK_N + k_local];
                 for (int hi = 0; hi < hc; ++hi) {
 #if __CUDA_ARCH__ >= 800 && defined(LLAMA_ENABLE_CP_ASYNC)
@@ -374,6 +593,19 @@ void cp_async_16B_all(void* __restrict__ dst, const void* __restrict__ src, size
   __pipeline_wait_prior(0);
   __syncthreads();
 }
+
+#if __CUDA_ARCH__ >= 800
+static __device__ __forceinline__
+void cp_async_16B_issue_all(void* __restrict__ dst, const void* __restrict__ src, size_t bytes){
+  const size_t n16 = bytes & ~size_t(15);
+  const char *s = (const char*)src; char *d = (char*)dst;
+  for(size_t i=(size_t)threadIdx.x*16;i<n16;i+= (size_t)blockDim.x*16){
+    __pipeline_memcpy_async(d+i, s+i, 16);
+  }
+  __pipeline_commit();
+}
+#endif
+
 #endif
 
 __global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_port(
@@ -1166,6 +1398,8 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     const char * __prof_env = getenv("LLAMA_SPARSE_PROF");
     auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
     if (const char *s = getenv("LLAMA_INDEXER_TL_PORT"); s && atoi(s) != 0) {
+          bool use_tma_fp8 = false;
+          if (const char *e = getenv("LLAMA_TL_TMA_FP8"); e && atoi(e) != 0) use_tma_fp8 = true;
           // Prepare starts/ends (CuSeqLenKS/KE). If provided by caller via GGML op src[4]/src[5],
           // use them; otherwise synthesize [0, kv_end) per token.
           int *dKS_i = nullptr, *dKE_i = nullptr;
@@ -1235,9 +1469,17 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           CUDA_SET_SHARED_MEMORY_LIMIT(k_tl_mqa_attn_return_logits_port, (int)shmem_bytes);
           // Convert Q [D, Tc*H] to row-major [Tc*H, D]; K [D, kv] to [kv, D]; W [H, Tc] to [Tc, H]
           float *dQrm = nullptr, *dKrm = nullptr, *dWrm = nullptr;
+          __half *dQh = nullptr, *dKh = nullptr; // optional half buffers (future TMA/F16 path)
+          unsigned char *dQfp8 = nullptr, *dKfp8 = nullptr; // optional fp8 buffers (future TMA/FP8 path)
           cudaMalloc(&dQrm, sizeof(float) * (size_t)(Tc*H) * (size_t)D);
           cudaMalloc(&dKrm, sizeof(float) * (size_t)kv_end * (size_t)D);
           cudaMalloc(&dWrm, sizeof(float) * (size_t)Tc * (size_t)H);
+          cudaMalloc(&dQh, sizeof(__half) * (size_t)(Tc*H) * (size_t)D);
+          cudaMalloc(&dKh, sizeof(__half) * (size_t)kv_end * (size_t)D);
+          if (use_tma_fp8) {
+              cudaMalloc(&dQfp8, (size_t)(Tc*H) * (size_t)D);
+              cudaMalloc(&dKfp8, (size_t)kv_end * (size_t)D);
+          }
           dim3 tbT(32, 8);
           dim3 gdQ((Tc*H + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
           k_colmajor_DN_to_rowmajor_ND<<<gdQ, tbT, 0, stream>>>(dQ, D, Tc*H, dQrm);
@@ -1245,6 +1487,20 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           k_colmajor_DN_to_rowmajor_ND<<<gdK, tbT, 0, stream>>>(dK, D, kv_end, dKrm);
           dim3 gdW((Tc + tbT.x - 1)/tbT.x, (H + tbT.y - 1)/tbT.y);
           k_colmajor_DN_to_rowmajor_ND<<<gdW, tbT, 0, stream>>>(dW, H, Tc, dWrm);
+          // also materialize half buffers for optional f16-global variant
+          {
+              size_t Qelts = (size_t)(Tc*H) * (size_t)D;
+              size_t Kelts = (size_t)kv_end * (size_t)D;
+              dim3 tbH(256);
+              dim3 gdHq((unsigned)((Qelts + tbH.x - 1)/tbH.x));
+              dim3 gdHk((unsigned)((Kelts + tbH.x - 1)/tbH.x));
+              k_rowmajor_f32_to_f16<<<gdHq, tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQh);
+              k_rowmajor_f32_to_f16<<<gdHk, tbH, 0, stream>>>(dKrm, kv_end, D, dKh);
+              if (use_tma_fp8) {
+                  k_rowmajor_f32_to_fp8_e4m3<<<gdHq, tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQfp8);
+                  k_rowmajor_f32_to_fp8_e4m3<<<gdHk, tbH, 0, stream>>>(dKrm, kv_end, D, dKfp8);
+              }
+          }
           CUDA_CHECK(cudaGetLastError());
           if (sparse_debug_on()) printf("[TL_PORT_DEVICE] launch grid=(%d) threads=%d block_Q=%d block_N=%d stages=%d D=%d H=%d Tc=%d kv=%d shmem=%zu limit=%zu\n", gridTL.x, threads, block_Q, block_N, num_stages, D, H, Tc, kv_end, (size_t)shmem_bytes, (size_t)max_shmem);
           if (__prof_env && *__prof_env) {
@@ -1254,9 +1510,21 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
               CUDA_CHECK(cudaMemcpyAsync(dKS_i, dStarts, sizeof(int)*(size_t)Tc, cudaMemcpyDeviceToDevice, stream));
               CUDA_CHECK(cudaMemcpyAsync(dKE_i, dEnds,   sizeof(int)*(size_t)Tc, cudaMemcpyDeviceToDevice, stream));
           }
-          k_tl_mqa_attn_return_logits_port<<<gridTL, threads, shmem_bytes, stream>>>(
+          if (use_tma_fp8) {
+              CUtensorMap descQ, descK;
+              ggml_cuda_encode_tma_desc_2d(&descQ, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, (void*)dQrm, (cuuint64_t)D, (cuuint64_t)(Tc*H), (cuuint32_t)D, (cuuint32_t)128);
+              ggml_cuda_encode_tma_desc_2d(&descK, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, (void*)dKrm, (cuuint64_t)D, (cuuint64_t)kv_end, (cuuint32_t)D, (cuuint32_t)256);
+          }
+          if (use_tma_fp8) {
+              // Placeholder: still using port kernel until full TMA/FP8 is implemented
+              k_tl_mqa_attn_return_logits_port<<<gridTL, threads, shmem_bytes, stream>>>(
                       dQrm, dKrm, dKS, dLogits, dWrm, dKS_i, dKE_i,
                       Tc, kv_end, H, D, block_N, num_stages, threads, block_Q);
+          } else {
+              k_tl_mqa_attn_return_logits_port<<<gridTL, threads, shmem_bytes, stream>>>(
+                      dQrm, dKrm, dKS, dLogits, dWrm, dKS_i, dKE_i,
+                      Tc, kv_end, H, D, block_N, num_stages, threads, block_Q);
+          }
               cudaEventRecord(__e1, stream);
               cudaEventSynchronize(__e1);
               float __ms_tl = 0.0f; cudaEventElapsedTime(&__ms_tl, __e0, __e1);
@@ -1277,7 +1545,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
               }
           }
           CUDA_CHECK(cudaGetLastError());
-          cudaFree(dQrm); cudaFree(dKrm); cudaFree(dWrm);
+          cudaFree(dQrm); cudaFree(dKrm); cudaFree(dWrm); cudaFree(dQh); cudaFree(dKh);
           dim3 tblock(32, 8);
           dim3 tgrid((Tc + tblock.x - 1)/tblock.x, (kv_end + tblock.y - 1)/tblock.y);
           k_transpose_TcKv_to_KvTc<<<tgrid, tblock, 0, stream>>>(dLogits, Tc, kv_end, dOut);
