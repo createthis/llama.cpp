@@ -454,7 +454,7 @@ void cp_async_16B_issue_all(void* __restrict__ dst, const void* __restrict__ src
 
 
 // --- SM90 TMA helpers (K-only) ---
-#if __CUDA_ARCH__ >= 900
+#if (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
 static __device__ __forceinline__ uint32_t smem_u32(const void *p){
   return static_cast<uint32_t>(__cvta_generic_to_shared(p));
 }
@@ -491,6 +491,24 @@ static __device__ __forceinline__ void tma_load_2d(const CUtensorMap *desc,
 }
 #endif
 
+#if (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
+static __device__ __forceinline__ int mbarrier_try_wait_b64(uint64_t *bar, int parity){
+  uint32_t sm = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+  uint32_t done;
+  asm volatile("{\n"
+               ".reg .pred P1;\n"
+               "mbarrier.try_wait.parity.shared.b64 P1, [%1], %2;\n"
+               "selp.b32 %0, 1, 0, P1;\n"
+               "}\n" : "=r"(done) : "r"(sm), "r"(parity));
+  return (int)done;
+}
+static __device__ __forceinline__ void mbarrier_wait_parity_simple(uint64_t *bar, int parity){
+  while (!mbarrier_try_wait_b64(bar, parity)) {
+    __nanosleep(50);
+  }
+}
+#endif
+
 // FP16-global baseline kernel: load Q/K halves directly from global into shared and run WMMA.
 // This mirrors k_tl_mqa_attn_return_logits_port but skips float staging and cp.async. It serves
 // as an intermediate correctness baseline before FP8/TMA integration.
@@ -520,7 +538,7 @@ __global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_port_f16gl
   // Half slabs in shared
   __half *K0_f16 = (__half*)(sm + off); off += (size_t)K_rows_max * (size_t)index_dim * sizeof(__half);
   __half *K1_f16 = (__half*)(sm + off); off += (size_t)K_rows_max * (size_t)index_dim * sizeof(__half);
-#if __CUDA_ARCH__ >= 900
+#if (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
   uint64_t *mbarK0 = (uint64_t*)(sm + off); off += sizeof(uint64_t);
   uint64_t *mbarK1 = (uint64_t*)(sm + off); off += sizeof(uint64_t);
   if (threadIdx.x == 0) { mbarrier_init_b64(mbarK0, 0); mbarrier_init_b64(mbarK1, 0); }
@@ -680,7 +698,8 @@ __global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_tma_f16_ko
   const int   * __restrict__ CuSeqLenKE, // [seq_len]
   int seq_len, int seq_len_kv, int heads, int index_dim,
   int block_N, int /*num_stages*/, int threads, int block_Q,
-  const CUtensorMap * __restrict__ descK_dev)
+  const CUtensorMap * __restrict__ descK_dev,
+  const CUtensorMap * __restrict__ descQ_dev)
 {
   const int bx = blockIdx.x;
   const int seq_len_i = bx * block_Q;
@@ -695,7 +714,7 @@ __global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_tma_f16_ko
 
   __half *K0_f16 = (__half*)(sm + off); off += (size_t)K_rows_max * (size_t)index_dim * sizeof(__half);
   __half *K1_f16 = (__half*)(sm + off); off += (size_t)K_rows_max * (size_t)index_dim * sizeof(__half);
-#if __CUDA_ARCH__ >= 900
+#if (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
   uint64_t *mbarK0 = (uint64_t*)(sm + off); off += sizeof(uint64_t);
   uint64_t *mbarK1 = (uint64_t*)(sm + off); off += sizeof(uint64_t);
   if (threadIdx.x == 0) { mbarrier_init_b64(mbarK0, 0); mbarrier_init_b64(mbarK1, 0); }
@@ -727,10 +746,13 @@ __global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_tma_f16_ko
 
   // Preload first K tile (TMA on SM90, otherwise cooperative)
   int curN0 = min(block_N, max(0, cu_k_e_max - cu_k_s_min));
-#if __CUDA_ARCH__ >= 900
-  for (size_t t = threadIdx.x; t < (size_t)curN0*(size_t)index_dim; t += blockDim.x) {
-    size_t r = t / (size_t)index_dim, c = t % (size_t)index_dim;
-    K0_f16[t] = IndexKh[(size_t)(cu_k_s_min + (int)r)*(size_t)index_dim + c];
+#if (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
+  if (curN0 > 0) {
+    size_t bytesK = (size_t)curN0*(size_t)index_dim*sizeof(__half);
+    if (threadIdx.x == 0) mbarrier_expect_tx_b64(mbarK0, (uint32_t)bytesK);
+    __syncthreads();
+    tma_load_2d(descK_dev, mbarK0, K0_f16, 0, cu_k_s_min);
+    mbarrier_wait_parity_simple(mbarK0, 0);
   }
 #else
   for (size_t t = threadIdx.x; t < (size_t)curN0*(size_t)index_dim; t += blockDim.x) {
@@ -757,6 +779,17 @@ __global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_tma_f16_ko
     int k_start_cur = cu_k_s_min + it*block_N;
     int curN0_it    = min(block_N, cu_k_e_max - k_start_cur);
 
+    #if (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
+    {
+      // TMA load Q slab: [D, Q_rows] at column offset seq_len_i*heads
+      size_t bytesQ = (size_t)Q_rows*(size_t)index_dim*sizeof(__half);
+      // reuse K barrier for simplicity or add a new one; here we reuse mbarK0 safely after first K wait
+      if (threadIdx.x == 0) mbarrier_expect_tx_b64(mbarK0, (uint32_t)bytesQ);
+      __syncthreads();
+      tma_load_2d(descQ_dev, mbarK0, Qs_f16, 0, seq_len_i*heads);
+      mbarrier_wait_parity_simple(mbarK0, 0);
+    }
+#else
     // Stage Q into shared (unchanged; still global -> shared)
     for (size_t t = threadIdx.x; t < (size_t)Q_rows*(size_t)index_dim; t += blockDim.x) {
       size_t r = t / (size_t)index_dim, c = t % (size_t)index_dim;
@@ -769,6 +802,7 @@ __global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_tma_f16_ko
     }
     __syncthreads();
 
+#endif
     int tiles_m = (curN0_it + WM - 1)/WM;
     for (int tile_lin = warp_id; tile_lin < tiles_m*tiles_n; tile_lin += (blockDim.x>>5)) {
       int tile_m = tile_lin / tiles_n;
@@ -1777,7 +1811,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                               k_tl_mqa_attn_return_logits_tma_f16_konly<<<gridTL, threads, shmem_bytes, stream>>>(
                                       dQh, dKh, dKS, dLogits, dWrm, dKS_i, dKE_i,
                                       Tc, kv_end, H, D, block_N, num_stages, threads, block_Q,
-                                      &descK);
+                                      &descK, &descQ);
                               })(), D, H, Tc, kv_end);
               } else {
                   LAUNCH_PROFILE_KERNEL("PROFILE_TL_ONLY", TL_ONLY, stream, ([&](){
