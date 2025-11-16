@@ -1517,39 +1517,10 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                         K_rows_max, K_rows_pad, (size_t)K_f16_alloc_bytes, (size_t)K_f16_needed_bytes, (ssize_t)K_f16_needed_bytes - (ssize_t)K_f16_alloc_bytes);
             }
 
-          auto compute_smem = [&](int bq, int bn) -> size_t {
-              // Mirror k_tl_mqa_attn_return_logits_port shared layout (float staging + f16)
-              const int WM = 16, WN = 16;
-              const int warps = max(1, threads/32);
-              size_t off = 0;
-              // Qs_f32
-              off = align16(off); off += (size_t)bq * (size_t)H * (size_t)D * sizeof(float);
-              // K0_f32, K1_f32
-              off = align16(off); off += (size_t)bn * (size_t)D * sizeof(float);
-              off = align16(off); off += (size_t)bn * (size_t)D * sizeof(float);
-              // ks0, ks1
-              off = align16(off); off += (size_t)bn * sizeof(float);
-              off = align16(off); off += (size_t)bn * sizeof(float);
-              // logits_blk
-              off = align16(off); off += (size_t)bn * (size_t)bq * sizeof(float);
-              // Qs_f16, K0_f16, K1_f16
-              off = align16(off); off += (size_t)bq * (size_t)H * (size_t)D * sizeof(__half);
-              off = align16(off); off += (size_t)bn * (size_t)D * sizeof(__half);
-              off = align16(off); off += (size_t)bn * (size_t)D * sizeof(__half);
-              // Csh per warp
-              off = align16(off); off += (size_t)warps * (WM*WN) * sizeof(float);
-              return off;
-          };
           int maxOpt = 0;
           cudaDeviceGetAttribute(&maxOpt, cudaDevAttrMaxSharedMemoryPerBlockOptin, ggml_cuda_get_device());
           size_t max_shmem = (size_t)(maxOpt > 0 ? maxOpt : 98304);
-          size_t shmem_bytes = compute_smem(block_Q, block_N);
-          while (shmem_bytes > max_shmem && (block_Q > 1 || block_N > 1)) {
-              if (block_N >= block_Q && block_N > 1) block_N = (block_N + 1) / 2; else if (block_Q > 1) block_Q = (block_Q + 1) / 2;
-              shmem_bytes = compute_smem(block_Q, block_N);
-          }
           dim3 gridTL((Tc + block_Q - 1) / block_Q);
-          CUDA_SET_SHARED_MEMORY_LIMIT(k_tl_mqa_attn_return_logits_port, (int)shmem_bytes);
           // Convert Q [D, Tc*H] to row-major [Tc*H, D]; K [D, kv] to [kv, D]; W [H, Tc] to [Tc, H]
           ggml_cuda_pool_alloc<float> __Qrm(__pool, (size_t)(Tc*H) * (size_t)D);
           ggml_cuda_pool_alloc<float> __Krm(__pool, (size_t)kv_end * (size_t)D);
@@ -1611,6 +1582,35 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                                   Tc, kv_end, H, D, block_N, num_stages, threads, block_Q);
                           })(), D, H, Tc, kv_end);
           } else {
+              auto compute_smem = [&](int bq, int bn) -> size_t {
+                  // Mirror k_tl_mqa_attn_return_logits_port shared layout (float staging + f16)
+                  const int WM = 16, WN = 16;
+                  const int warps = max(1, threads/32);
+                  size_t off = 0;
+                  // Qs_f32
+                  off = align16(off); off += (size_t)bq * (size_t)H * (size_t)D * sizeof(float);
+                  // K0_f32, K1_f32
+                  off = align16(off); off += (size_t)bn * (size_t)D * sizeof(float);
+                  off = align16(off); off += (size_t)bn * (size_t)D * sizeof(float);
+                  // ks0, ks1
+                  off = align16(off); off += (size_t)bn * sizeof(float);
+                  off = align16(off); off += (size_t)bn * sizeof(float);
+                  // logits_blk
+                  off = align16(off); off += (size_t)bn * (size_t)bq * sizeof(float);
+                  // Qs_f16, K0_f16, K1_f16
+                  off = align16(off); off += (size_t)bq * (size_t)H * (size_t)D * sizeof(__half);
+                  off = align16(off); off += (size_t)bn * (size_t)D * sizeof(__half);
+                  off = align16(off); off += (size_t)bn * (size_t)D * sizeof(__half);
+                  // Csh per warp
+                  off = align16(off); off += (size_t)warps * (WM*WN) * sizeof(float);
+                  return off;
+              };
+              size_t shmem_bytes = compute_smem(block_Q, block_N);
+              while (shmem_bytes > max_shmem && (block_Q > 1 || block_N > 1)) {
+                  if (block_N >= block_Q && block_N > 1) block_N = (block_N + 1) / 2; else if (block_Q > 1) block_Q = (block_Q + 1) / 2;
+                  shmem_bytes = compute_smem(block_Q, block_N);
+              }
+              CUDA_SET_SHARED_MEMORY_LIMIT(k_tl_mqa_attn_return_logits_port, (int)shmem_bytes);
               LAUNCH_PROFILE_KERNEL("PROFILE_TL_ONLY", TL_ONLY, stream, ([&](){
                           k_tl_mqa_attn_return_logits_port<<<gridTL, threads, shmem_bytes, stream>>>(
                                   dQrm, dKrm, dKS, dLogits, dWrm, dKS_i, dKE_i,
@@ -1618,8 +1618,6 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                           })(), D, H, Tc, kv_end);
           }
           CUDA_CHECK(cudaGetLastError());
-          if (sparse_debug_on()) printf("[TL_PORT_DEVICE] launch grid=(%d) threads=%d block_Q=%d block_N=%d stages=%d D=%d H=%d Tc=%d kv=%d shmem=%zu limit=%zu\n", gridTL.x, threads, block_Q, block_N, num_stages, D, H, Tc, kv_end, (size_t)shmem_bytes, (size_t)max_shmem);
-          
           cudaStreamSynchronize(stream);
           if (dStarts_tmp) cudaFree(dStarts_tmp);
           if (dEnds_tmp) cudaFree(dEnds_tmp);
