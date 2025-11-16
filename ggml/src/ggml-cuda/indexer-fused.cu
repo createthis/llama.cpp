@@ -83,11 +83,26 @@ __global__ void k_rowmajor_f32_to_f16(const float *src, int rows, int cols, __ha
     if (idx < total) dst[idx] = __float2half(src[idx]);
 }
 
-// Row-major float32 -> FP8 E4M3 stub packer (placeholder)
+// Row-major float32 -> FP8 E4M3 packer (no per-row scaling)
 __global__ void k_rowmajor_f32_to_fp8_e4m3(const float *src, int rows, int cols, unsigned char *dst) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     size_t total = (size_t)rows * (size_t)cols;
-    if (idx < total) dst[idx] = 0u; // not used yet
+    if (idx < total) {
+        float x = src[idx];
+        __nv_fp8_storage_t v = __nv_cvt_float_to_fp8(x, __NV_SATFINITE, __NV_E4M3);
+        dst[idx] = (unsigned char) v;
+    }
+}
+
+// Row-major FP8 E4M3 -> half dequantizer
+__global__ void k_rowmajor_fp8_e4m3_to_f16(const unsigned char *src, int rows, int cols, __half *dst) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)rows * (size_t)cols;
+    if (idx < total) {
+        __nv_fp8_storage_t v = (__nv_fp8_storage_t)src[idx];
+        __half_raw hraw = __nv_cvt_fp8_to_halfraw(v, __NV_E4M3);
+        dst[idx] = *reinterpret_cast<__half*>(&hraw);
+    }
 }
 
 // TMA+FP8 stub kernel (placeholder, not used yet)
@@ -1685,11 +1700,15 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
               dim3 tbH(256);
               dim3 gdHq((unsigned)((Qelts + tbH.x - 1)/tbH.x));
               dim3 gdHk((unsigned)((Kelts + tbH.x - 1)/tbH.x));
-              k_rowmajor_f32_to_f16<<<gdHq, tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQh);
-              k_rowmajor_f32_to_f16<<<gdHk, tbH, 0, stream>>>(dKrm, kv_end, D, dKh);
               if (use_tma_fp8) {
+                  // Phase B: pack to FP8 then dequant to half buffers
                   k_rowmajor_f32_to_fp8_e4m3<<<gdHq, tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQfp8);
                   k_rowmajor_f32_to_fp8_e4m3<<<gdHk, tbH, 0, stream>>>(dKrm, kv_end, D, dKfp8);
+                  k_rowmajor_fp8_e4m3_to_f16<<<gdHq, tbH, 0, stream>>>(dQfp8, (int)(Tc*H), D, dQh);
+                  k_rowmajor_fp8_e4m3_to_f16<<<gdHk, tbH, 0, stream>>>(dKfp8, kv_end, D, dKh);
+              } else {
+                  k_rowmajor_f32_to_f16<<<gdHq, tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQh);
+                  k_rowmajor_f32_to_f16<<<gdHk, tbH, 0, stream>>>(dKrm, kv_end, D, dKh);
               }
           }
           CUDA_CHECK(cudaGetLastError());
