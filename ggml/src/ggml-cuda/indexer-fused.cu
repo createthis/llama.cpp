@@ -18,6 +18,17 @@ using namespace nvcuda;
 #include <cuda_fp8.h>
 #include "../../include/ggml-cuda-indexer.h"
 
+#ifndef __CUDA_ARCH__
+static inline bool stream_is_capturing(cudaStream_t stream) {
+#if CUDART_VERSION >= 10000
+  cudaStreamCaptureStatus status; unsigned long long id = 0ULL;
+  cudaError_t e = cudaStreamGetCaptureInfo_v2(stream, &status, &id);
+  return (e == cudaSuccess) && (status != cudaStreamCaptureStatusNone);
+#else
+  (void)stream; return false;
+#endif
+}
+#endif
 #ifndef SEL_DEBUG
 #endif
 
@@ -111,6 +122,20 @@ __global__ void k_rowmajor_fp8_e4m3_to_f16(const unsigned char *src, int rows, i
         __half_raw hraw = __nv_cvt_fp8_to_halfraw(v, __NV_E4M3);
         dst[idx] = *reinterpret_cast<__half*>(&hraw);
     }
+}
+
+__global__ void k_tl_mqa_attn_return_logits_tma_fp8(
+    const unsigned char * __restrict__ IndexQ_fp8,
+    const unsigned char * __restrict__ IndexK_fp8,
+    const float * __restrict__ IndexKScale,
+    float * __restrict__ Logits,
+    const float * __restrict__ Weights,
+    const int   * __restrict__ CuSeqLenKS,
+    const int   * __restrict__ CuSeqLenKE,
+    int seq_len, int seq_len_kv, int heads, int index_dim,
+    int block_N, int num_stages, int threads, int block_Q) {
+    (void)IndexQ_fp8; (void)IndexK_fp8; (void)IndexKScale; (void)Logits; (void)Weights; (void)CuSeqLenKS; (void)CuSeqLenKE;
+    (void)seq_len; (void)seq_len_kv; (void)heads; (void)index_dim; (void)block_N; (void)num_stages; (void)threads; (void)block_Q;
 }
 
 
@@ -1437,19 +1462,20 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     const char * __prof_env = getenv("LLAMA_SPARSE_PROF");
     auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
     if (const char *s = getenv("LLAMA_INDEXER_TL_PORT"); s && atoi(s) != 0) {
+        ggml_cuda_pool & __pool = ctx.pool(ggml_cuda_get_device());
           bool use_tma_fp8 = false;
           if (const char *e = getenv("LLAMA_TL_TMA_FP8"); e && atoi(e) != 0) use_tma_fp8 = true;
           // Prepare starts/ends (CuSeqLenKS/KE). If provided by caller via GGML op src[4]/src[5],
           // use them; otherwise synthesize [0, kv_end) per token.
-          int *dKS_i = nullptr, *dKE_i = nullptr;
+          ggml_cuda_pool_alloc<int> __KS_i(__pool, (size_t)Tc);
+          ggml_cuda_pool_alloc<int> __KE_i(__pool, (size_t)Tc);
+          int *dKS_i = __KS_i.get(), *dKE_i = __KE_i.get();
           // Default: fill 0..kv_end
-          cudaMalloc(&dKS_i, sizeof(int) * (size_t)Tc);
-          cudaMalloc(&dKE_i, sizeof(int) * (size_t)Tc);
           int tblocks = (Tc + 255) / 256;
           k_fill_int<<<tblocks, 256, 0, stream>>>(dKS_i, Tc, 0);
           k_fill_int<<<tblocks, 256, 0, stream>>>(dKE_i, Tc, kv_end);
-          float *dLogits = nullptr;
-          cudaMalloc(&dLogits, sizeof(float) * (size_t)Tc * (size_t)kv_end);
+          ggml_cuda_pool_alloc<float> __Logits(__pool, (size_t)Tc * (size_t)kv_end);
+          float *dLogits = __Logits.get();
           cudaMemsetAsync(dLogits, 0, sizeof(float) * (size_t)Tc * (size_t)kv_end, stream);
           int block_N = getenv_int_("LLAMA_TL_BLOCK_N", 256);
           int threads = getenv_int_("LLAMA_TL_THREADS", 640);
@@ -1478,12 +1504,13 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           size_t max_shmem = (size_t)(maxOpt > 0 ? maxOpt : 98304);
           dim3 gridTL((Tc + block_Q - 1) / block_Q);
           // Convert Q [D, Tc*H] to row-major [Tc*H, D]; K [D, kv] to [kv, D]; W [H, Tc] to [Tc, H]
-          float *dQrm = nullptr, *dKrm = nullptr, *dWrm = nullptr;
-          cudaMalloc(&dQrm, sizeof(float) * (size_t)(Tc*H) * (size_t)D);
-          cudaMalloc(&dKrm, sizeof(float) * (size_t)kv_end * (size_t)D);
-          cudaMalloc(&dWrm, sizeof(float) * (size_t)Tc * (size_t)H);
+          ggml_cuda_pool_alloc<float> __Qrm(__pool, (size_t)(Tc*H) * (size_t)D);
+          ggml_cuda_pool_alloc<float> __Krm(__pool, (size_t)kv_end * (size_t)D);
+          ggml_cuda_pool_alloc<float> __Wrm(__pool, (size_t)Tc * (size_t)H);
+          float *dQrm = __Qrm.get();
+          float *dKrm = __Krm.get();
+          float *dWrm = __Wrm.get();
           if (use_tma_fp8) {
-              ggml_cuda_pool & __pool = ctx.pool(ggml_cuda_get_device());
               ggml_cuda_pool_alloc<__half> __Qh(__pool, (size_t)(Tc*H) * (size_t)D);
               ggml_cuda_pool_alloc<__half> __Kh(__pool, (size_t)kv_end * (size_t)D);
               ggml_cuda_pool_alloc<unsigned char> __Qfp8(__pool, (size_t)(Tc*H) * (size_t)D);
@@ -1535,6 +1562,13 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                           })(), D, H, Tc, kv_end);
               CUDA_CHECK(cudaGetLastError());
           } else {
+              dim3 tbT(32, 8);
+              dim3 gdQ((Tc*H + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
+              k_colmajor_DN_to_rowmajor_ND<<<gdQ, tbT, 0, stream>>>(dQ, D, Tc*H, dQrm);
+              dim3 gdK((kv_end + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
+              k_colmajor_DN_to_rowmajor_ND<<<gdK, tbT, 0, stream>>>(dK, D, kv_end, dKrm);
+              dim3 gdW((Tc + tbT.x - 1)/tbT.x, (H + tbT.y - 1)/tbT.y);
+              k_colmajor_DN_to_rowmajor_ND<<<gdW, tbT, 0, stream>>>(dW, H, Tc, dWrm);
               auto compute_smem = [&](int bq, int bn) -> size_t {
                   // Mirror k_tl_mqa_attn_return_logits_port shared layout (float staging + f16)
                   const int WM = 16, WN = 16;
@@ -1564,14 +1598,6 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                   shmem_bytes = compute_smem(block_Q, block_N);
               }
               CUDA_SET_SHARED_MEMORY_LIMIT(k_tl_mqa_attn_return_logits_port, (int)shmem_bytes);
-              dim3 tbT(32, 8);
-              dim3 gdQ((Tc*H + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
-              k_colmajor_DN_to_rowmajor_ND<<<gdQ, tbT, 0, stream>>>(dQ, D, Tc*H, dQrm);
-              dim3 gdK((kv_end + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
-              k_colmajor_DN_to_rowmajor_ND<<<gdK, tbT, 0, stream>>>(dK, D, kv_end, dKrm);
-              dim3 gdW((Tc + tbT.x - 1)/tbT.x, (H + tbT.y - 1)/tbT.y);
-              k_colmajor_DN_to_rowmajor_ND<<<gdW, tbT, 0, stream>>>(dW, H, Tc, dWrm);
-              CUDA_CHECK(cudaGetLastError());
               LAUNCH_PROFILE_KERNEL("PROFILE_TL_ONLY", TL_ONLY, stream, ([&](){
                           k_tl_mqa_attn_return_logits_port<<<gridTL, threads, shmem_bytes, stream>>>(
                                   dQrm, dKrm, dKS, dLogits, dWrm, dKS_i, dKE_i,
@@ -1583,8 +1609,6 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
               k_transpose_TcKv_to_KvTc<<<tgrid, tblock, 0, stream>>>(dLogits, Tc, kv_end, dOut);
               CUDA_CHECK(cudaGetLastError());
           }
-          cudaFree(dQrm); cudaFree(dKrm); cudaFree(dWrm);
-          cudaFree(dLogits); cudaFree(dKS_i); cudaFree(dKE_i);
           cudaStreamSynchronize(stream);
           if (dStarts_tmp) cudaFree(dStarts_tmp);
           if (dEnds_tmp) cudaFree(dEnds_tmp);
