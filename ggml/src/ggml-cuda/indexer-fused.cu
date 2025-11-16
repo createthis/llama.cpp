@@ -744,7 +744,7 @@ __global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_tma_f16_ko
   int Nq_all = (int)Q_rows;
   int tiles_n = (Nq_all + WN - 1)/WN;
 
-  // Preload first K tile (TMA on SM90, otherwise cooperative)
+  // Preload first K tile (TMA on SM90, cp.async on SM100+, otherwise cooperative)
   int curN0 = min(block_N, max(0, cu_k_e_max - cu_k_s_min));
 #if (__CUDA_ARCH__ >= 900) && (__CUDA_ARCH__ < 1000)
   if (curN0 > 0) {
@@ -753,6 +753,11 @@ __global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_tma_f16_ko
     __syncthreads();
     tma_load_2d(descK_dev, mbarK0, K0_f16, 0, cu_k_s_min);
     mbarrier_wait_parity_simple(mbarK0, 0);
+  }
+#elif (__CUDA_ARCH__ >= 1000)
+  if (curN0 > 0) {
+    size_t bytesK = (size_t)curN0*(size_t)index_dim*sizeof(__half);
+    cp_async_16B_all(K0_f16, (const void*)(IndexKh + (size_t)cu_k_s_min*(size_t)index_dim), bytesK);
   }
 #else
   for (size_t t = threadIdx.x; t < (size_t)curN0*(size_t)index_dim; t += blockDim.x) {
