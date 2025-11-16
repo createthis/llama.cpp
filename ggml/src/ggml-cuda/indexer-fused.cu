@@ -806,7 +806,7 @@ __global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_tma_f16_ko
   const int   * __restrict__ CuSeqLenKE, // [seq_len]
   int seq_len, int seq_len_kv, int heads, int index_dim,
   int block_N, int /*num_stages*/, int threads, int block_Q,
-  CUtensorMap IndexK_desc)
+  const CUtensorMap * __restrict__ descK_dev)
 {
   const int bx = blockIdx.x;
   const int seq_len_i = bx * block_Q;
@@ -1897,7 +1897,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                               k_tl_mqa_attn_return_logits_tma_f16_konly<<<gridTL, threads, shmem_bytes, stream>>>(
                                       dQh, dKh, dKS, dLogits, dWrm, dKS_i, dKE_i,
                                       Tc, kv_end, H, D, block_N, num_stages, threads, block_Q,
-                                      descK);
+                                      &descK);
                               })(), D, H, Tc, kv_end);
               } else {
                   LAUNCH_PROFILE_KERNEL("PROFILE_TL_ONLY", TL_ONLY, stream, ([&](){
