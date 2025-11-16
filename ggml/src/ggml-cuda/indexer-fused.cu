@@ -1510,6 +1510,10 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           float *dQrm = __Qrm.get();
           float *dKrm = __Krm.get();
           float *dWrm = __Wrm.get();
+          if (dStarts_dev != nullptr && dEnds_dev != nullptr) {
+              CUDA_CHECK(cudaMemcpyAsync(dKS_i, dStarts, sizeof(int)*(size_t)Tc, cudaMemcpyDeviceToDevice, stream));
+              CUDA_CHECK(cudaMemcpyAsync(dKE_i, dEnds,   sizeof(int)*(size_t)Tc, cudaMemcpyDeviceToDevice, stream));
+          }
           if (use_tma_fp8) {
               ggml_cuda_pool_alloc<__half> __Qh(__pool, (size_t)(Tc*H) * (size_t)D);
               ggml_cuda_pool_alloc<__half> __Kh(__pool, (size_t)kv_end * (size_t)D);
