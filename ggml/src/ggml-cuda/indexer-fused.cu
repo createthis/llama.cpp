@@ -1867,16 +1867,9 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
               dim3 tbH(256);
               dim3 gdHq((unsigned)((Qelts + tbH.x - 1)/tbH.x));
               dim3 gdHk((unsigned)((Kelts + tbH.x - 1)/tbH.x));
-              if (use_tma_fp8) {
-                  // Phase B: pack to FP8 then dequant to half buffers
-                  k_rowmajor_f32_to_fp8_e4m3<<<gdHq, tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQfp8);
-                  k_rowmajor_f32_to_fp8_e4m3<<<gdHk, tbH, 0, stream>>>(dKrm, kv_end, D, dKfp8);
-                  k_rowmajor_fp8_e4m3_to_f16<<<gdHq, tbH, 0, stream>>>(dQfp8, (int)(Tc*H), D, dQh);
-                  k_rowmajor_fp8_e4m3_to_f16<<<gdHk, tbH, 0, stream>>>(dKfp8, kv_end, D, dKh);
-              } else {
-                  k_rowmajor_f32_to_f16<<<gdHq, tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQh);
-                  k_rowmajor_f32_to_f16<<<gdHk, tbH, 0, stream>>>(dKrm, kv_end, D, dKh);
-              }
+              // Phase C: keep FP16 in shared even when testing TMA path
+              k_rowmajor_f32_to_f16<<<gdHq, tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQh);
+              k_rowmajor_f32_to_f16<<<gdHk, tbH, 0, stream>>>(dKrm, kv_end, D, dKh);
           }
           CUDA_CHECK(cudaGetLastError());
           if (sparse_debug_on()) printf("[TL_PORT_DEVICE] launch grid=(%d) threads=%d block_Q=%d block_N=%d stages=%d D=%d H=%d Tc=%d kv=%d shmem=%zu limit=%zu\n", gridTL.x, threads, block_Q, block_N, num_stages, D, H, Tc, kv_end, (size_t)shmem_bytes, (size_t)max_shmem);
