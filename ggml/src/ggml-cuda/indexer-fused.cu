@@ -124,24 +124,6 @@ __global__ void k_rowmajor_fp8_e4m3_to_f16(const unsigned char *src, int rows, i
     }
 }
 
-// TMA+FP8 stub kernel (placeholder, not used yet)
-// helper: encode 2D tiled TMA descriptor (row-major layout)
-static inline CUresult ggml_cuda_encode_tma_desc_2d(CUtensorMap *desc,
-                                                    CUtensorMapDataType dtype,
-                                                    void *base,
-                                                    cuuint64_t dim0, cuuint64_t dim1,
-                                                    cuuint32_t box0, cuuint32_t box1) {
-    cuuint64_t dims[2]    = { dim0, dim1 };
-    cuuint64_t strides[2] = { 1ULL, dim0 };
-    cuuint32_t box[2]     = { box0, box1 };
-    cuuint32_t estr[2]    = { 1u, 1u };
-    return cuTensorMapEncodeTiled(desc, dtype, 2, base, dims, strides, box, estr,
-                                  CU_TENSOR_MAP_INTERLEAVE_NONE,
-                                  CU_TENSOR_MAP_SWIZZLE_32B,
-                                  CU_TENSOR_MAP_L2_PROMOTION_L2_64B,
-                                  CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-}
-
 __global__ void k_tl_mqa_attn_return_logits_tma_fp8(
     const unsigned char * __restrict__ IndexQ_fp8,
     const unsigned char * __restrict__ IndexK_fp8,
@@ -1433,7 +1415,6 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                                                        int D, int H, int Tc, int kv_end,
                                                        float * dOut) {
     cudaStream_t stream = ctx.stream();
-    ggml_cuda_pool & __pool = ctx.pool(ggml_cuda_get_device());
     // Ensure starts/ends are device-resident copies (handles host or device sources)
     const int * dStarts_dev = dStarts;
     const int * dEnds_dev   = dEnds;
@@ -1481,6 +1462,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     const char * __prof_env = getenv("LLAMA_SPARSE_PROF");
     auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
     if (const char *s = getenv("LLAMA_INDEXER_TL_PORT"); s && atoi(s) != 0) {
+        ggml_cuda_pool & __pool = ctx.pool(ggml_cuda_get_device());
           bool use_tma_fp8 = false;
           if (const char *e = getenv("LLAMA_TL_TMA_FP8"); e && atoi(e) != 0) use_tma_fp8 = true;
           // Prepare starts/ends (CuSeqLenKS/KE). If provided by caller via GGML op src[4]/src[5],
@@ -1500,22 +1482,22 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           int block_Q = getenv_int_("LLAMA_TL_BLOCK_Q", max(1, 128 / max(1, H)));
           int num_stages = getenv_int_("LLAMA_TL_NUM_STAGES", 3);
           auto align16 = [](size_t x) { return (x + 15u) & ~size_t(15u); };
-            if (sparse_debug_on()) {
-                int WM = 16, WN = 16;
-                int Q_rows = block_Q * H;
-                int Nq_pad = ((Q_rows + WN - 1) / WN) * WN;
-                size_t Qs_f16_alloc_bytes = (size_t)block_Q * (size_t)H * (size_t)D * sizeof(__half);
-                size_t Qs_f16_needed_bytes = (size_t)Nq_pad * (size_t)D * sizeof(__half);
-                int K_rows_max = block_N;
-                int K_rows_pad = ((K_rows_max + WM - 1) / WM) * WM;
-                size_t K_f16_alloc_bytes = (size_t)K_rows_max * (size_t)D * sizeof(__half);
-                size_t K_f16_needed_bytes = (size_t)K_rows_pad * (size_t)D * sizeof(__half);
-                fprintf(stderr,
-                        "[TL_PORT_DEBUG] Q_rows=%d Nq_pad=%d Qs_f16_alloc=%zu Qs_f16_needed=%zu (diff=%zd) | "
-                        "K_rows_max=%d K_rows_pad=%d K_f16_alloc=%zu K_f16_needed=%zu (diff=%zd)\n",
-                        Q_rows, Nq_pad, (size_t)Qs_f16_alloc_bytes, (size_t)Qs_f16_needed_bytes, (ssize_t)Qs_f16_needed_bytes - (ssize_t)Qs_f16_alloc_bytes,
-                        K_rows_max, K_rows_pad, (size_t)K_f16_alloc_bytes, (size_t)K_f16_needed_bytes, (ssize_t)K_f16_needed_bytes - (ssize_t)K_f16_alloc_bytes);
-            }
+          if (sparse_debug_on()) {
+              int WM = 16, WN = 16;
+              int Q_rows = block_Q * H;
+              int Nq_pad = ((Q_rows + WN - 1) / WN) * WN;
+              size_t Qs_f16_alloc_bytes = (size_t)block_Q * (size_t)H * (size_t)D * sizeof(__half);
+              size_t Qs_f16_needed_bytes = (size_t)Nq_pad * (size_t)D * sizeof(__half);
+              int K_rows_max = block_N;
+              int K_rows_pad = ((K_rows_max + WM - 1) / WM) * WM;
+              size_t K_f16_alloc_bytes = (size_t)K_rows_max * (size_t)D * sizeof(__half);
+              size_t K_f16_needed_bytes = (size_t)K_rows_pad * (size_t)D * sizeof(__half);
+              fprintf(stderr,
+                      "[TL_PORT_DEBUG] Q_rows=%d Nq_pad=%d Qs_f16_alloc=%zu Qs_f16_needed=%zu (diff=%zd) | "
+                      "K_rows_max=%d K_rows_pad=%d K_f16_alloc=%zu K_f16_needed=%zu (diff=%zd)\n",
+                      Q_rows, Nq_pad, (size_t)Qs_f16_alloc_bytes, (size_t)Qs_f16_needed_bytes, (ssize_t)Qs_f16_needed_bytes - (ssize_t)Qs_f16_alloc_bytes,
+                      K_rows_max, K_rows_pad, (size_t)K_f16_alloc_bytes, (size_t)K_f16_needed_bytes, (ssize_t)K_f16_needed_bytes - (ssize_t)K_f16_alloc_bytes);
+          }
 
           int maxOpt = 0;
           cudaDeviceGetAttribute(&maxOpt, cudaDevAttrMaxSharedMemoryPerBlockOptin, ggml_cuda_get_device());
@@ -1525,18 +1507,15 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           ggml_cuda_pool_alloc<float> __Qrm(__pool, (size_t)(Tc*H) * (size_t)D);
           ggml_cuda_pool_alloc<float> __Krm(__pool, (size_t)kv_end * (size_t)D);
           ggml_cuda_pool_alloc<float> __Wrm(__pool, (size_t)Tc * (size_t)H);
-          float *dQrm = __Qrm.get(); float *dKrm = __Krm.get(); float *dWrm = __Wrm.get();
-          ggml_cuda_pool_alloc<__half> __Qh(__pool, (size_t)(Tc*H) * (size_t)D);
-          ggml_cuda_pool_alloc<__half> __Kh(__pool, (size_t)kv_end * (size_t)D);
-          __half *dQh = __Qh.get(); __half *dKh = __Kh.get(); // optional half buffers (future TMA/F16 path)
-          ggml_cuda_pool_alloc<unsigned char> __Qfp8(__pool, (size_t)(Tc*H) * (size_t)D);
-          ggml_cuda_pool_alloc<unsigned char> __Kfp8(__pool, (size_t)kv_end * (size_t)D);
-          unsigned char *dQfp8 = __Qfp8.get(), *dKfp8 = __Kfp8.get(); // optional fp8 buffers (future TMA/FP8 path)
+          float *dQrm = __Qrm.get();
+          float *dKrm = __Krm.get();
+          float *dWrm = __Wrm.get();
           if (use_tma_fp8) {
-              // Prepare descriptors for completeness (not used by fp8 kernel)
-              CUtensorMap descQ, descK;
-              ggml_cuda_encode_tma_desc_2d(&descQ, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, (void*)dQh, (cuuint64_t)D, (cuuint64_t)(Tc*H), (cuuint32_t)D, (cuuint32_t)128);
-              ggml_cuda_encode_tma_desc_2d(&descK, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, (void*)dKh, (cuuint64_t)D, (cuuint64_t)kv_end, (cuuint32_t)D, (cuuint32_t)256);
+              ggml_cuda_pool_alloc<__half> __Qh(__pool, (size_t)(Tc*H) * (size_t)D);
+              ggml_cuda_pool_alloc<__half> __Kh(__pool, (size_t)kv_end * (size_t)D);
+              ggml_cuda_pool_alloc<unsigned char> __Qfp8(__pool, (size_t)(Tc*H) * (size_t)D);
+              ggml_cuda_pool_alloc<unsigned char> __Kfp8(__pool, (size_t)kv_end * (size_t)D);
+              unsigned char *dQfp8 = __Qfp8.get(), *dKfp8 = __Kfp8.get(); // optional fp8 buffers (future TMA/FP8 path)
               // Pack f32 -> fp8 for SM100+ fp8 path
               dim3 tbH(256);
               size_t Qelts = (size_t)(Tc*H) * (size_t)D;
@@ -1581,7 +1560,15 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                                   dQfp8, dKfp8, dKS, dLogits, dWrm, dKS_i, dKE_i,
                                   Tc, kv_end, H, D, block_N, num_stages, threads, block_Q);
                           })(), D, H, Tc, kv_end);
+              CUDA_CHECK(cudaGetLastError());
           } else {
+              dim3 tbT(32, 8);
+              dim3 gdQ((Tc*H + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
+              k_colmajor_DN_to_rowmajor_ND<<<gdQ, tbT, 0, stream>>>(dQ, D, Tc*H, dQrm);
+              dim3 gdK((kv_end + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
+              k_colmajor_DN_to_rowmajor_ND<<<gdK, tbT, 0, stream>>>(dK, D, kv_end, dKrm);
+              dim3 gdW((Tc + tbT.x - 1)/tbT.x, (H + tbT.y - 1)/tbT.y);
+              k_colmajor_DN_to_rowmajor_ND<<<gdW, tbT, 0, stream>>>(dW, H, Tc, dWrm);
               auto compute_smem = [&](int bq, int bn) -> size_t {
                   // Mirror k_tl_mqa_attn_return_logits_port shared layout (float staging + f16)
                   const int WM = 16, WN = 16;
@@ -1616,8 +1603,12 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                                   dQrm, dKrm, dKS, dLogits, dWrm, dKS_i, dKE_i,
                                   Tc, kv_end, H, D, block_N, num_stages, threads, block_Q);
                           })(), D, H, Tc, kv_end);
+              CUDA_CHECK(cudaGetLastError());
+              dim3 tblock(32, 8);
+              dim3 tgrid((Tc + tblock.x - 1)/tblock.x, (kv_end + tblock.y - 1)/tblock.y);
+              k_transpose_TcKv_to_KvTc<<<tgrid, tblock, 0, stream>>>(dLogits, Tc, kv_end, dOut);
+              CUDA_CHECK(cudaGetLastError());
           }
-          CUDA_CHECK(cudaGetLastError());
           cudaStreamSynchronize(stream);
           if (dStarts_tmp) cudaFree(dStarts_tmp);
           if (dEnds_tmp) cudaFree(dEnds_tmp);
@@ -1727,7 +1718,6 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         LAUNCH_PROFILE_KERNEL("PROFILE_TILED_ONLY_1", TILED_ONLY_1, stream, ([&]{
                     k_indexer_logits_tiled_f32<<<gridT, blockT, shmem, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, D_TILE, BLOCK_Q, BLOCK_N, exact_flag, HEAD_CHUNK, PIPE_STAGES, dOut);
                     })(), D, H, Tc, kv_end);
-
     }
 
     if (dStarts_tmp) cudaFree(dStarts_tmp);
