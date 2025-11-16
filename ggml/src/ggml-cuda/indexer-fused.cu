@@ -1889,8 +1889,8 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
               }
               if (use_tma_fp8) {
                   CUtensorMap descQ, descK;
-                  ggml_cuda_encode_tma_desc_2d(&descQ, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, (void*)dQrm, (cuuint64_t)D, (cuuint64_t)(Tc*H), (cuuint32_t)D, (cuuint32_t)128);
-                  ggml_cuda_encode_tma_desc_2d(&descK, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, (void*)dKrm, (cuuint64_t)D, (cuuint64_t)kv_end, (cuuint32_t)D, (cuuint32_t)256);
+                  ggml_cuda_encode_tma_desc_2d(&descQ, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, (void*)dQh, (cuuint64_t)D, (cuuint64_t)(Tc*H), (cuuint32_t)D, (cuuint32_t)128);
+                  ggml_cuda_encode_tma_desc_2d(&descK, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, (void*)dKh, (cuuint64_t)D, (cuuint64_t)kv_end, (cuuint32_t)D, (cuuint32_t)256);
                   // Phase C (step 1): launch K-only TMA skeleton (currently cooperative loads)
                   CUDA_SET_SHARED_MEMORY_LIMIT(k_tl_mqa_attn_return_logits_tma_f16_konly, (int)shmem_bytes);
                   LAUNCH_PROFILE_KERNEL("PROFILE_TL_TMA_FP8_KONLY", TL_ONLY, stream, ([&](){
