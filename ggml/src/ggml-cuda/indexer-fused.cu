@@ -376,7 +376,7 @@ void cp_async_16B_all(void* __restrict__ dst, const void* __restrict__ src, size
 }
 #endif
 
-__global__ void k_tl_mqa_attn_return_logits_port(
+__global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_port(
   const float * __restrict__ IndexQ,     // [seq_len*heads, index_dim]
   const float * __restrict__ IndexK,     // [seq_len_kv,    index_dim]
   const float * __restrict__ IndexKScale,// [seq_len_kv]
@@ -576,23 +576,41 @@ __global__ void k_tl_mqa_attn_return_logits_port(
       wmma::store_matrix_sync(cptr, c, WN, wmma::mem_row_major);
       __syncwarp();
 
-      // Post-process (ReLU * weight * k_scale) and reduce over heads into logits_blk
-      for(int mi = lane; mi<WM; mi+=32){
+      // Post-process (ReLU * weight * k_scale), reduce heads within warp, no atomics
+      const int base_bq = (tile_n*WN) / heads;
+      const int max_cols = min(WN, (int)Q_rows - tile_n*WN);
+      const int groups = max(0, (max_cols + heads - 1) / heads);
+      for (int mi = lane; mi < WM; mi += 32) {
         int bn = tile_m*WM + mi;
-        if(bn >= curN0_it) continue;
+        if (bn >= curN0_it) continue;
         float ks = ks0[bn];
-        for(int nj=0; nj<WN; ++nj){
-          int ncol = tile_n*WN + nj;         // = bq*heads + h
-          if(ncol >= (int)Q_rows) break;
-          float val = cptr[mi*WN + nj];
-          if(val < 0.f) val = 0.f;
-          int bq = ncol / heads;
-          int h  = ncol % heads;
-          int tok = seq_len_i + bq;
-          if(tok >= seq_len) continue;
-          float w = Weights[(size_t)tok*(size_t)heads + h];
-          float outv = val * w * ks;
-          atomicAdd(&logits_blk[(size_t)bn*(size_t)block_Q + (size_t)bq], outv);
+        float acc_g[16];
+        #pragma unroll
+        for (int u = 0; u < 16; ++u) acc_g[u] = 0.0f;
+        // accumulate contributions for all columns this tile covers
+        #pragma unroll
+        for (int cj = 0; cj < WN; ++cj) {
+          int ncol = tile_n*WN + cj; // = bq*heads + h
+          if (cj >= max_cols || ncol >= (int)Q_rows) break;
+          float val = cptr[mi*WN + cj];
+          if (val < 0.f) val = 0.f;
+          int bq_abs = ncol / heads;
+          int h = ncol % heads;
+          int tok = seq_len_i + bq_abs;
+          float w = 0.0f;
+          if (tok < seq_len) w = Weights[(size_t)tok*(size_t)heads + h];
+          int u = bq_abs - base_bq;
+          if (u >= 0 && u < 16) acc_g[u] += val * w;
+        }
+        // write partial sums to logits scratch (atomic to avoid inter-warp races across tile_n)
+        #pragma unroll
+        for (int u = 0; u < 16; ++u) {
+          if (u >= groups) break;
+          int bq_abs = base_bq + u;
+          int tok = seq_len_i + bq_abs;
+          if (bq_abs < block_Q && tok < seq_len) {
+            atomicAdd(&logits_blk[(size_t)bn*(size_t)block_Q + (size_t)bq_abs], acc_g[u] * ks);
+          }
         }
       }
       __syncwarp();
@@ -1161,11 +1179,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
           cudaMalloc(&dLogits, sizeof(float) * (size_t)Tc * (size_t)kv_end);
           cudaMemsetAsync(dLogits, 0, sizeof(float) * (size_t)Tc * (size_t)kv_end, stream);
           int block_N = getenv_int_("LLAMA_TL_BLOCK_N", 256);
-          int threads = getenv_int_("LLAMA_TL_THREADS", 32);
-          if (threads > 32) {
-              if (sparse_debug_on()) fprintf(stderr, "[TL_PORT_DEVICE] clamping threads from %d to 32 to avoid multi-warp shfl issues\n", threads);
-              threads = 32;
-          }
+          int threads = getenv_int_("LLAMA_TL_THREADS", 640);
           int block_Q = getenv_int_("LLAMA_TL_BLOCK_Q", max(1, 128 / max(1, H)));
           int num_stages = getenv_int_("LLAMA_TL_NUM_STAGES", 3);
           auto align16 = [](size_t x) { return (x + 15u) & ~size_t(15u); };
