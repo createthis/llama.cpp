@@ -1193,7 +1193,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     if (const char *s = getenv("LLAMA_INDEXER_TL_PORT"); s && atoi(s) != 0) {
         ggml_cuda_pool & __pool = ctx.pool(ggml_cuda_get_device());
           bool use_tma_fp8 = false;
-          if (const char *e = getenv("LLAMA_TL_TMA_FP8"); e && atoi(e) != 0) use_tma_fp8 = true;
+          if (const char *e = getenv("LLAMA_TL_FP8"); e && atoi(e) != 0) use_tma_fp8 = true;
           // Prepare starts/ends (CuSeqLenKS/KE). If provided by caller via GGML op src[4]/src[5],
           // use them; otherwise synthesize [0, kv_end) per token.
           ggml_cuda_pool_alloc<int> __KS_i(__pool, (size_t)Tc);
