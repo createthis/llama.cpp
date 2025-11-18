@@ -14,6 +14,12 @@ using namespace nvcuda;
 #include <stdio.h>
 #include "../../include/ggml-cuda-indexer.h"
 
+struct fp8_e4_t;
+extern "C" int call(fp8_e4_t* __restrict__ IndexQ, fp8_e4_t* __restrict__ IndexK, float* __restrict__ IndexKScale, float* __restrict__ Logits, float* __restrict__ Weights, int* __restrict__ CuSeqLenKS, int* __restrict__ CuSeqLenKE, int seq_len_kv, int seq_len, cudaStream_t stream);
+extern "C" int init();
+extern "C" const char* get_last_error();
+
+
 #ifndef SEL_DEBUG
 #endif
 
@@ -1244,55 +1250,49 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
               CUDA_CHECK(cudaMemcpyAsync(dKE_i, dEnds,   sizeof(int)*(size_t)Tc, cudaMemcpyDeviceToDevice, stream));
           }
           if (use_tma_fp8) {
+              static bool __tl_fp8_init_done = false;
+              static int  __tl_fp8_init_status = 0;
+              if (!__tl_fp8_init_done) {
+                  __tl_fp8_init_status = init();
+                  __tl_fp8_init_done = true;
+                  if (__tl_fp8_init_status != 0) {
+                      const char * __err = get_last_error();
+                      fprintf(stderr, "[TL_FP8] init() failed status=%d err=%s\n", __tl_fp8_init_status, __err ? __err : "<none>");
+                  }
+              }
               ggml_cuda_pool_alloc<__half> __Qh(__pool, (size_t)(Tc*H) * (size_t)D);
               ggml_cuda_pool_alloc<__half> __Kh(__pool, (size_t)kv_end * (size_t)D);
               ggml_cuda_pool_alloc<unsigned char> __Qfp8(__pool, (size_t)(Tc*H) * (size_t)D);
               ggml_cuda_pool_alloc<unsigned char> __Kfp8(__pool, (size_t)kv_end * (size_t)D);
-              unsigned char *dQfp8 = __Qfp8.get(), *dKfp8 = __Kfp8.get(); // optional fp8 buffers (future TMA/FP8 path)
-              // Pack f32 -> fp8 for SM100+ fp8 path
+              unsigned char *dQfp8 = __Qfp8.get(), *dKfp8 = __Kfp8.get();
               dim3 tbH(256);
-              size_t Qelts = (size_t)(Tc*H) * (size_t)D;
-              size_t Kelts = (size_t)kv_end * (size_t)D;
-              dim3 gdHq((unsigned)((Qelts + tbH.x - 1)/tbH.x));
-              dim3 gdHk((unsigned)((Kelts + tbH.x - 1)/tbH.x));
-              k_rowmajor_f32_to_fp8_e4m3<<<gdHq, tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQfp8);
+              dim3 tbT(32, 8);
+              dim3 gdQ((Tc*H + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
+              dim3 gdK((kv_end + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
+              dim3 gdW((Tc + tbT.x - 1)/tbT.x, (H + tbT.y - 1)/tbT.y);
+              k_colmajor_DN_to_rowmajor_ND<<<gdQ, tbT, 0, stream>>>(dQ, D, Tc*H, dQrm);
+              k_colmajor_DN_to_rowmajor_ND<<<gdK, tbT, 0, stream>>>(dK, D, kv_end, dKrm);
+              k_colmajor_DN_to_rowmajor_ND<<<gdW, tbT, 0, stream>>>(dW, H, Tc, dWrm);
+              k_rowmajor_f32_to_fp8_e4m3<<<(size_t)((Tc*H*D + tbH.x - 1)/tbH.x), tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQfp8);
               CUDA_CHECK(cudaGetLastError());
-              k_rowmajor_f32_to_fp8_e4m3<<<gdHk, tbH, 0, stream>>>(dKrm, kv_end, D, dKfp8);
+              k_rowmajor_f32_to_fp8_e4m3<<<(size_t)((kv_end*D + tbH.x - 1)/tbH.x), tbH, 0, stream>>>(dKrm, kv_end, D, dKfp8);
               CUDA_CHECK(cudaGetLastError());
-              // Compute shared memory size for fp8_full
-              auto compute_smem_fp8 = [&](int bq, int bn){
-                  const int WM=16, WN=16; int warps=max(1, threads/32); size_t off=0;
-                  auto A16=[&](size_t x){ return (x+15u)&~(size_t)15u; };
-                  off = A16(off); off += (size_t)bn*(size_t)D * sizeof(unsigned char); // K0_u8
-                  off = A16(off); off += (size_t)bn*(size_t)D * sizeof(unsigned char); // K1_u8
-                  off = A16(off); off += (size_t)bq*(size_t)H*(size_t)D * sizeof(unsigned char); // Q_u8
-                  off = A16(off); off += (size_t)bn*(size_t)D * sizeof(__half); // K0_f16
-                  off = A16(off); off += (size_t)bn*(size_t)D * sizeof(__half); // K1_f16
-                  off = A16(off); off += (size_t)bq*(size_t)H*(size_t)D * sizeof(__half); // Q_f16
-                  off = A16(off); off += (size_t)bn * sizeof(float); // ks0
-                  off = A16(off); off += (size_t)bn * sizeof(float); // ks1
-                  off = A16(off); off += (size_t)bn*(size_t)bq * sizeof(float); // logits
-                  off = A16(off); off += (size_t)warps*(WM*WN) * sizeof(float); // Csh
-                  return off;
-              };
-              size_t shmem_bytes = compute_smem_fp8(block_Q, block_N);
-              int optOpt=0, optDef=0;
-              cudaDeviceGetAttribute(&optOpt, cudaDevAttrMaxSharedMemoryPerBlockOptin, ggml_cuda_get_device());
-              cudaDeviceGetAttribute(&optDef, cudaDevAttrMaxSharedMemoryPerBlock, ggml_cuda_get_device());
-              cudaStreamCaptureStatus __cap_stat; unsigned long long __cap_id = 0ULL;
-              cudaError_t __cap_e = cudaStreamGetCaptureInfo_v2(stream, &__cap_stat, &__cap_id);
-              bool capturing = (__cap_e == cudaSuccess) && (__cap_stat != cudaStreamCaptureStatusNone);
-              size_t cap_limit = (size_t)(capturing ? (optDef > 0 ? optDef : 98304) : (optOpt > 0 ? optOpt : 98304));
-              while (shmem_bytes > cap_limit && (block_Q > 1 || block_N > 1)) {
-                  if (block_N >= block_Q && block_N > 1) block_N = (block_N + 1)/2; else if (block_Q > 1) block_Q = (block_Q + 1)/2;
-                  shmem_bytes = compute_smem_fp8(block_Q, block_N);
-              }
-              if (!capturing) { CUDA_SET_SHARED_MEMORY_LIMIT(k_tl_mqa_attn_return_logits_tma_fp8_full, (int)shmem_bytes); }
+              int __tl_call_status = 0;
               LAUNCH_PROFILE_KERNEL("PROFILE_TL_FP8_KONLY", TL_ONLY, stream, ([&](){
-                          k_tl_mqa_attn_return_logits_tma_fp8_full<<<gridTL, threads, shmem_bytes, stream>>>(
-                                  dQfp8, dKfp8, dKS, dLogits, dWrm, dKS_i, dKE_i,
-                                  Tc, kv_end, H, D, block_N, num_stages, threads, block_Q);
+                          __tl_call_status = call(reinterpret_cast<fp8_e4_t*>(dQfp8), reinterpret_cast<fp8_e4_t*>(dKfp8),
+                                                   (float *)dKS,
+                                                   dLogits, dWrm,
+                                                   dKS_i, dKE_i,
+                                                   kv_end, Tc, stream);
                           })(), D, H, Tc, kv_end);
+              if (__tl_call_status != 0) {
+                  const char * __err = get_last_error();
+                  fprintf(stderr, "[TL_FP8] call() failed status=%d err=%s\n", __tl_call_status, __err ? __err : "<none>");
+              }
+              CUDA_CHECK(cudaGetLastError());
+              dim3 tblock(32, 8);
+              dim3 tgrid((Tc + tblock.x - 1)/tblock.x, (kv_end + tblock.y - 1)/tblock.y);
+              k_transpose_TcKv_to_KvTc<<<tgrid, tblock, 0, stream>>>(dLogits, Tc, kv_end, dOut);
               CUDA_CHECK(cudaGetLastError());
           } else {
               dim3 tbT(32, 8);
