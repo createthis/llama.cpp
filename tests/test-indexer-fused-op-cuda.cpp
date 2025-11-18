@@ -85,6 +85,164 @@ static inline float bf16_bits_to_float(uint16_t h) {
 static inline float f32_to_bf16_to_f32(float x) {
     return bf16_bits_to_float(float_to_bf16_bits_rtne(x));
 }
+
+
+// Minimal E4M3 (FP8) emulation matching CUDA convert_float_to_fp8/convert_fp8_to_float
+struct fp8e4m3_cpu {
+    static constexpr bool   IS_E4M3                 = true;
+    static constexpr int    FP32_NUM_BITS          = 32;
+    static constexpr int    FP32_NUM_EXPONENT_BITS = 8;
+    static constexpr int    FP32_NUM_MANTISSA_BITS = 23;
+    static constexpr uint32_t FP32_NAN             = 0x7fffffffu;
+    static constexpr uint32_t FP32_INFINITY_MASK   = 0x7f800000u;
+    static constexpr int    FP32_MAX_EXPONENT      = 127;
+    static constexpr int    FP32_MIN_EXPONENT      = -126;
+    static constexpr int    FP32_EXPONENT_BIAS     = 127;
+
+    static constexpr int    FP8_NUM_BITS           = 8;
+    static constexpr int    FP8_NUM_EXPONENT_BITS  = 4;
+    static constexpr int    FP8_NUM_MANTISSA_BITS  = 3;
+    static constexpr uint8_t FP8_NAN               = 0x7fu;
+    static constexpr uint8_t FP8_INFINITY_MASK     = 0x78u;
+    static constexpr int    FP8_MAX_EXPONENT       = 7;
+    static constexpr int    FP8_MIN_EXPONENT       = -6;
+    static constexpr int    FP8_EXPONENT_BIAS      = 7;
+
+    static constexpr uint8_t FP8_EXPONENT_MASK     = (1u << FP8_NUM_EXPONENT_BITS) - 1u;
+    static constexpr uint8_t FP8_MANTISSA_MASK     = (1u << FP8_NUM_MANTISSA_BITS) - 1u;
+    static constexpr uint8_t FP8_MAX_FLT           = 0x7eu;
+
+    static inline bool isfinite(float flt) {
+        uint32_t s = reinterpret_cast<uint32_t const &>(flt);
+        return (s & 0x7f800000u) < 0x7f800000u;
+    }
+
+    static inline bool isnan(float flt) {
+        uint32_t s = reinterpret_cast<uint32_t const &>(flt);
+        return (s & 0x7fffffffu) > 0x7f800000u;
+    }
+
+    static inline bool isinf(float flt) {
+        uint32_t s = reinterpret_cast<uint32_t const &>(flt);
+        return (s == 0x7f800000u) || (s == 0xff800000u);
+    }
+
+    static inline uint8_t convert_float_to_fp8(float const &flt) {
+        uint32_t s = reinterpret_cast<uint32_t const &>(flt);
+        uint8_t sign = uint8_t((s >> 24) & 0x80u);
+        int32_t exp = int32_t((s >> FP32_NUM_MANTISSA_BITS) & 0xffu) - FP32_EXPONENT_BIAS;
+        int mantissa = int(s & 0x7fffffu);
+        uint8_t u = 0;
+        uint8_t const kF8_NaN = FP8_NAN;
+
+        if (isnan(flt)) {
+            return kF8_NaN;
+        }
+        if (isinf(flt)) {
+            return uint8_t(sign | FP8_MAX_FLT);
+        }
+        if (exp == -128) {
+            return uint8_t(sign | FP8_MAX_FLT);
+        }
+
+        int sticky_bit = 0;
+        bool skip_sign = false;
+        bool may_be_nan = false;
+
+        if (exp >= FP8_MIN_EXPONENT && exp <= FP8_MAX_EXPONENT) {
+            exp = exp + FP8_EXPONENT_BIAS;
+            u = uint8_t((uint32_t(exp) & FP8_EXPONENT_MASK) << FP8_NUM_MANTISSA_BITS);
+            u = uint8_t(u | (mantissa >> (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS)));
+        } else if (exp < FP8_MIN_EXPONENT) {
+            int rshift = (FP8_MIN_EXPONENT - exp);
+            if (rshift < FP32_NUM_BITS) {
+                mantissa |= (1 << FP32_NUM_MANTISSA_BITS);
+                sticky_bit = ((mantissa & ((1 << rshift) - 1)) != 0);
+                mantissa = (mantissa >> rshift);
+                u = uint8_t((mantissa >> (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS)) & FP8_MANTISSA_MASK);
+            } else {
+                mantissa = 0;
+                u = 0;
+            }
+        } else {
+            if (exp == (FP8_MAX_EXPONENT + 1)) {
+                uint8_t mantissa_tmp = uint8_t(mantissa >> (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS));
+                if (mantissa_tmp < FP8_MANTISSA_MASK) {
+                    exp = exp + FP8_EXPONENT_BIAS;
+                    u = uint8_t(uint32_t(exp) << FP8_NUM_MANTISSA_BITS) | mantissa_tmp;
+                    may_be_nan = (mantissa_tmp == (FP8_MANTISSA_MASK - 1));
+                } else {
+                    return uint8_t(sign | FP8_MAX_FLT);
+                }
+            } else {
+                return uint8_t(sign | FP8_MAX_FLT);
+            }
+        }
+
+        int NUM_BITS_SHIFT = FP32_NUM_MANTISSA_BITS - (FP8_NUM_MANTISSA_BITS + 1);
+        int round_bit = ((mantissa >> NUM_BITS_SHIFT) & 1);
+        sticky_bit |= ((mantissa & ((1 << NUM_BITS_SHIFT) - 1)) != 0);
+
+        if ((round_bit && sticky_bit) || (round_bit && (u & 1))) {
+            u = uint8_t(u + 1);
+            if (may_be_nan) {
+                skip_sign = true;
+            }
+        }
+
+        if (u > FP8_MAX_FLT) {
+            u = uint8_t(sign | FP8_MAX_FLT);
+        }
+        if (!skip_sign) {
+            u = uint8_t(u | sign);
+        }
+        return u;
+    }
+
+    static inline float convert_fp8_to_float(uint8_t const &x) {
+        uint32_t constexpr kF32_NaN = FP32_NAN;
+        uint8_t const &f8 = x;
+        uint32_t sign = (f8 >> (FP8_NUM_BITS - 1)) & 1u;
+        uint32_t exp = (f8 >> FP8_NUM_MANTISSA_BITS) & FP8_EXPONENT_MASK;
+        uint32_t mantissa = f8 & FP8_MANTISSA_MASK;
+        unsigned f = (sign << (FP32_NUM_BITS - 1));
+
+        if (IS_E4M3 && exp == 15 && mantissa == 0x7) {
+            f = kF32_NaN;
+        } else if (exp > 0 && (IS_E4M3 || exp < (FP8_MAX_EXPONENT + FP8_EXPONENT_BIAS + 1))) {
+            exp += (FP32_EXPONENT_BIAS - FP8_EXPONENT_BIAS);
+            f = f |
+                (exp << FP32_NUM_MANTISSA_BITS) |
+                (mantissa << (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS));
+        } else if (exp == 0) {
+            if (mantissa) {
+                exp += (FP32_EXPONENT_BIAS - FP8_EXPONENT_BIAS) + 1;
+                while ((mantissa & (1u << FP8_NUM_MANTISSA_BITS)) == 0u) {
+                    mantissa <<= 1;
+                    exp--;
+                }
+                mantissa &= FP8_MANTISSA_MASK;
+                f = f |
+                    (exp << FP32_NUM_MANTISSA_BITS) |
+                    (mantissa << (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS));
+            } else {
+                // zero
+            }
+        } else {
+            if (mantissa == 0) {
+                f = (f | 0x7f800000u);
+            } else {
+                f = kF32_NaN;
+            }
+        }
+        return reinterpret_cast<float const &>(f);
+    }
+};
+
+static inline float f32_to_fp8e4m3_to_f32(float x) {
+    uint8_t b = fp8e4m3_cpu::convert_float_to_fp8(x);
+    return fp8e4m3_cpu::convert_fp8_to_float(b);
+}
 static void cpu_indexer_logits_bf16like(const float *Q, const float *K, const float *W, const float *k_scale,
                                        int D, int H, int Tc, int kv, std::vector<float> &out) {
     out.assign((size_t)kv*Tc, 0.0f);
@@ -154,8 +312,15 @@ static void cpu_indexer_logits(const float *Q, const float *K, const float *W, c
 static void cpu_indexer_logits_fp8like(const float *Q, const float *K, const float *W, const float *k_scale,
                                           int D, int H, int Tc, int kv, std::vector<float> &out) {
     out.assign((size_t)kv*Tc, 0.0f);
-    // Per-row amax for K
+    // Host-side FP8-like reference for TL_FP8 path.
+    // We use the same E4M3 quantization math as the CUDA helper in llama.pp.cu
+    // (see float_e4m3_t::from_float / to_float), approximated here by
+    // fp8e4m3_cpu::convert_float_to_fp8 / convert_fp8_to_float acting on float.
+
+    // Per-row amax and scale for K: match device kernels k_rowmajor_f32_rowwise_absmax
+    // and k_fp8_compute_row_scales up to the FP8 dynamic range choice.
     std::vector<float> K_amax(kv, 0.0f);
+    std::vector<float> K_sf(kv, 0.0f);
     for (int i = 0; i < kv; ++i) {
         float maxv = 0.0f;
         const float *kvp = K + (size_t)D * i;
@@ -165,42 +330,34 @@ static void cpu_indexer_logits_fp8like(const float *Q, const float *K, const flo
         }
         if (maxv < 1e-4f) maxv = 1e-4f;
         K_amax[i] = maxv;
+        // DEVICE: s = amax/448; here we reuse the same 448 constant
+        K_sf[i]   = maxv / 448.0f;
     }
-    // Per-row FP8 scales sf = amax/448
-    std::vector<float> K_sf(kv);
-    for (int i = 0; i < kv; ++i) {
-        K_sf[i] = K_amax[i] / 448.0f;
-    }
-    auto fp8_round = [](float x) -> float {
-        const float vmax = 448.0f;
-        float v = x;
-        if (v >  vmax) v =  vmax;
-        if (v < -vmax) v = -vmax;
-        const float step = (2.0f * vmax) / 255.0f;
-        v = std::round(v / step) * step;
-        return v;
-    };
+
     for (int tc = 0; tc < Tc; ++tc) {
         for (int i = 0; i < kv; ++i) {
             float acc = 0.0f;
-            float sf = K_sf[i];
             const float *kvp = K + (size_t)D * i;
+            float sf_k = K_sf[i];
             for (int h = 0; h < H; ++h) {
                 const float *qv = Q + (size_t)D * (tc*H + h);
                 float dot = 0.0f;
                 for (int d = 0; d < D; ++d) {
-                    float qh = fp8_round(qv[d]);
-                    float kh = fp8_round(kvp[d] / sf);
+                    // Q: direct E4M3 quant/dequant
+                    float qh = f32_to_fp8e4m3_to_f32(qv[d]);
+                    // K: per-row scaled by sf_k before quantization, as in device path
+                    float kh = f32_to_fp8e4m3_to_f32(kvp[d] / sf_k);
                     dot += qh * kh;
                 }
-                if (dot < 0.0f) dot = 0.0f;
+                if (dot < 0.0f) dot = 0.0f; // ReLU
                 acc += dot * W[h + (size_t)H * tc];
             }
-            // Effective scale: k_scale (logical) times fp8 per-row scale
-            out[i + (size_t)kv * tc] = acc * k_scale[i] * sf;
+            // Effective scale absorbs both device-side fp8 K scale and IndexKScale
+            out[i + (size_t)kv * tc] = acc * k_scale[i] * sf_k;
         }
     }
 }
+
 
 int main() {
 #ifndef GGML_USE_CUDA
