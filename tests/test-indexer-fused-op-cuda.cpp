@@ -151,12 +151,63 @@ static void cpu_indexer_logits(const float *Q, const float *K, const float *W, c
     }
 }
 
+static void cpu_indexer_logits_fp8like(const float *Q, const float *K, const float *W, const float *k_scale,
+                                          int D, int H, int Tc, int kv, std::vector<float> &out) {
+    out.assign((size_t)kv*Tc, 0.0f);
+    // Per-row amax for K
+    std::vector<float> K_amax(kv, 0.0f);
+    for (int i = 0; i < kv; ++i) {
+        float maxv = 0.0f;
+        const float *kvp = K + (size_t)D * i;
+        for (int d = 0; d < D; ++d) {
+            float v = std::fabs(kvp[d]);
+            if (v > maxv) maxv = v;
+        }
+        if (maxv < 1e-4f) maxv = 1e-4f;
+        K_amax[i] = maxv;
+    }
+    // Per-row FP8 scales sf = amax/448
+    std::vector<float> K_sf(kv);
+    for (int i = 0; i < kv; ++i) {
+        K_sf[i] = K_amax[i] / 448.0f;
+    }
+    auto fp8_round = [](float x) -> float {
+        const float vmax = 448.0f;
+        float v = x;
+        if (v >  vmax) v =  vmax;
+        if (v < -vmax) v = -vmax;
+        const float step = (2.0f * vmax) / 255.0f;
+        v = std::round(v / step) * step;
+        return v;
+    };
+    for (int tc = 0; tc < Tc; ++tc) {
+        for (int i = 0; i < kv; ++i) {
+            float acc = 0.0f;
+            float sf = K_sf[i];
+            const float *kvp = K + (size_t)D * i;
+            for (int h = 0; h < H; ++h) {
+                const float *qv = Q + (size_t)D * (tc*H + h);
+                float dot = 0.0f;
+                for (int d = 0; d < D; ++d) {
+                    float qh = fp8_round(qv[d]);
+                    float kh = fp8_round(kvp[d] / sf);
+                    dot += qh * kh;
+                }
+                if (dot < 0.0f) dot = 0.0f;
+                acc += dot * W[h + (size_t)H * tc];
+            }
+            // Effective scale: k_scale (logical) times fp8 per-row scale
+            out[i + (size_t)kv * tc] = acc * k_scale[i] * sf;
+        }
+    }
+}
+
 int main() {
 #ifndef GGML_USE_CUDA
     printf("CUDA not enabled; skipping fused indexer op test\n");
     return 0;
 #else
-    const int D=128, H=64, Tc=3, kv=4096, end=kv/4;
+    const int D=64, H=4, Tc=32, kv=4096, end=kv/4;
 
     std::mt19937 rng(123);
     std::uniform_real_distribution<float> dist(-1.0f,1.0f);
@@ -222,7 +273,12 @@ int main() {
     }
 
     std::vector<float> O_cpu;
-    if (use_bf16_ref) {
+    const char *tl_fp8_env = std::getenv("LLAMA_TL_FP8");
+    bool use_fp8_ref = (tl_fp8_env && std::atoi(tl_fp8_env) != 0);
+    if (use_fp8_ref) {
+        // FP8-like reference: approximate TileLang fp8 pipeline in CPU (rough E4M3 emulation)
+        cpu_indexer_logits_fp8like(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
+    } else if (use_bf16_ref) {
         cpu_indexer_logits_bf16like(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
     } else if (use_fp16_ref) {
         cpu_indexer_logits_f16like(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);

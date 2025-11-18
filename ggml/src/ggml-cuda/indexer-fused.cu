@@ -99,6 +99,48 @@ __global__ void k_rowmajor_f32_to_fp8_e4m3(const float *src, int rows, int cols,
     }
 }
 
+// Row-major float32 -> per-row absolute max
+__global__ void k_rowmajor_f32_rowwise_absmax(const float *src, int rows, int cols, float *row_amax) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) return;
+    float maxv = 0.0f;
+    for (int c = 0; c < cols; ++c) {
+        float v = fabsf(src[(size_t)row * (size_t)cols + (size_t)c]);
+        if (v > maxv) maxv = v;
+    }
+    row_amax[row] = maxv;
+}
+
+// Compute per-row FP8 scales (amax/448) and their reciprocals
+__global__ void k_fp8_compute_row_scales(const float *row_amax, int rows, float *sf, float *inv_sf) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= rows) return;
+    float a = row_amax[i];
+    if (a < 1e-4f) a = 1e-4f;
+    float s = a / 448.0f;
+    sf[i] = s;
+    inv_sf[i] = 1.0f / s;
+}
+
+// Row-major float32 -> FP8 E4M3 with per-row scaling
+__global__ void k_rowmajor_f32_to_fp8_e4m3_rowwise_scaled(const float *src, int rows, int cols,
+                                                          const float *inv_sf, unsigned char *dst) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)rows * (size_t)cols;
+    if (idx >= total) return;
+    int row = (int)(idx / (size_t)cols);
+    float x = src[idx] * inv_sf[row];
+    __nv_fp8_storage_t v = __nv_cvt_float_to_fp8(x, __NV_SATFINITE, __NV_E4M3);
+    dst[idx] = (unsigned char) v;
+}
+
+// Elementwise product of two float vectors
+__global__ void k_elemwise_mul(const float *a, const float *b, float *out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = a[i] * b[i];
+}
+
 // helpers to read env
 static inline int getenv_int_(const char * name, int def) {
     const char * s = getenv(name);
@@ -1026,23 +1068,53 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
               ggml_cuda_pool_alloc<__half> __Kh(__pool, (size_t)kv_end * (size_t)D);
               ggml_cuda_pool_alloc<unsigned char> __Qfp8(__pool, (size_t)(Tc*H) * (size_t)D);
               ggml_cuda_pool_alloc<unsigned char> __Kfp8(__pool, (size_t)kv_end * (size_t)D);
+              ggml_cuda_pool_alloc<float> __Kamax(__pool, (size_t)kv_end);
+              ggml_cuda_pool_alloc<float> __Ksf(__pool, (size_t)kv_end);
+              ggml_cuda_pool_alloc<float> __KsfInv(__pool, (size_t)kv_end);
+              ggml_cuda_pool_alloc<float> __IdxKScale(__pool, (size_t)kv_end);
               unsigned char *dQfp8 = __Qfp8.get(), *dKfp8 = __Kfp8.get();
+              float *dKamax = __Kamax.get();
+              float *dKsf   = __Ksf.get();
+              float *dKsfInv= __KsfInv.get();
+              float *dIdxKScale = __IdxKScale.get();
               dim3 tbH(256);
               dim3 tbT(32, 8);
               dim3 gdQ((Tc*H + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
               dim3 gdK((kv_end + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
               dim3 gdW((Tc + tbT.x - 1)/tbT.x, (H + tbT.y - 1)/tbT.y);
+              // Convert GGML column-major to row-major layouts matching TileLang kernel
               k_colmajor_DN_to_rowmajor_ND<<<gdQ, tbT, 0, stream>>>(dQ, D, Tc*H, dQrm);
               k_colmajor_DN_to_rowmajor_ND<<<gdK, tbT, 0, stream>>>(dK, D, kv_end, dKrm);
               k_colmajor_DN_to_rowmajor_ND<<<gdW, tbT, 0, stream>>>(dW, H, Tc, dWrm);
-              k_rowmajor_f32_to_fp8_e4m3<<<(size_t)((Tc*H*D + tbH.x - 1)/tbH.x), tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQfp8);
-              CUDA_CHECK(cudaGetLastError());
-              k_rowmajor_f32_to_fp8_e4m3<<<(size_t)((kv_end*D + tbH.x - 1)/tbH.x), tbH, 0, stream>>>(dKrm, kv_end, D, dKfp8);
-              CUDA_CHECK(cudaGetLastError());
+              // Q: direct FP8 cast (no per-row scaling, as in TileLang test)
+              {
+                  size_t Qtotal = (size_t)(Tc*H) * (size_t)D;
+                  dim3 gdQfp8((unsigned)((Qtotal + tbH.x - 1)/tbH.x));
+                  k_rowmajor_f32_to_fp8_e4m3<<<gdQfp8, tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQfp8);
+                  CUDA_CHECK(cudaGetLastError());
+              }
+              // K: compute per-row amax, scales, and quantize with per-row scaling
+              {
+                  int rowsK = kv_end;
+                  int colsK = D;
+                  int threadsAmax = 256;
+                  int blocksAmax = (rowsK + threadsAmax - 1) / threadsAmax;
+                  k_rowmajor_f32_rowwise_absmax<<<blocksAmax, threadsAmax, 0, stream>>>(dKrm, rowsK, colsK, dKamax);
+                  CUDA_CHECK(cudaGetLastError());
+                  k_fp8_compute_row_scales<<<blocksAmax, threadsAmax, 0, stream>>>(dKamax, rowsK, dKsf, dKsfInv);
+                  CUDA_CHECK(cudaGetLastError());
+                  size_t Ktotal = (size_t)rowsK * (size_t)colsK;
+                  dim3 gdKfp8((unsigned)((Ktotal + tbH.x - 1)/tbH.x));
+                  k_rowmajor_f32_to_fp8_e4m3_rowwise_scaled<<<gdKfp8, tbH, 0, stream>>>(dKrm, rowsK, colsK, dKsfInv, dKfp8);
+                  CUDA_CHECK(cudaGetLastError());
+                  // Combine GGML k_scale (dKS) with FP8 per-row scale into effective IndexKScale
+                  k_elemwise_mul<<<blocksAmax, threadsAmax, 0, stream>>>(dKS, dKsf, dIdxKScale, rowsK);
+                  CUDA_CHECK(cudaGetLastError());
+              }
               int __tl_call_status = 0;
               LAUNCH_PROFILE_KERNEL("PROFILE_TL_FP8_KONLY", TL_ONLY, stream, ([&](){
                           __tl_call_status = call(reinterpret_cast<fp8_e4_t*>(dQfp8), reinterpret_cast<fp8_e4_t*>(dKfp8),
-                                                   (float *)dKS,
+                                                   dIdxKScale,
                                                    dLogits, dWrm,
                                                    dKS_i, dKE_i,
                                                    kv_end, Tc, stream);
