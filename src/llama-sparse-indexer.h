@@ -24,6 +24,17 @@ struct IndexerKVTriplet {
 
 // Lightning indexer helpers for DeepSeek V3.2
 struct sparse_attn_indexer {
+    static ggml_tensor * idx_compute_scores_tile(
+        ggml_context * ctx,
+        ggml_tensor * q3d,
+        ggml_tensor * a_k,
+        ggml_tensor * weights,
+        ggml_tensor * k_scale_2d,
+        int64_t D, int64_t H,
+        int64_t Tc, int64_t kv_end,
+        int64_t t0,
+        bool use_fp16);
+
     // Build KV-aware top-k token indices using the Lightning Indexer tensors.
     // If mctx is nullptr, uses freshly computed K_indexer directly without cache writes.
     static IndexerKVTriplet compute_indexer_triplet(

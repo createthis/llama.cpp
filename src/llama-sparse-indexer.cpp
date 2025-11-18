@@ -28,6 +28,66 @@ namespace llama {
 
 using std::function;
 
+ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
+    ggml_context * ctx,
+    ggml_tensor * q3d,
+    ggml_tensor * a_k,
+    ggml_tensor * weights,
+    ggml_tensor * k_scale_2d,
+    int64_t D, int64_t H,
+    int64_t Tc, int64_t kv_end,
+    int64_t t0,
+    bool use_fp16) {
+    ggml_tensor * scores_acc = nullptr;
+    long HEAD_CHUNK = H;
+    if (const char *env = getenv("LLAMA_SPARSE_TOPK_HEAD_CHUNK")) {
+        long v = strtol(env, nullptr, 10);
+        if (v > 0) HEAD_CHUNK = v;
+    }
+    if (HEAD_CHUNK > (long)H) HEAD_CHUNK = (long)H;
+    if (HEAD_CHUNK < 1) HEAD_CHUNK = 1;
+
+    ggml_tensor * w_slice = ggml_view_2d(ctx, weights, H, Tc, weights->nb[1], t0*weights->nb[1]);
+
+    for (int64_t h0 = 0; h0 < H; h0 += HEAD_CHUNK) {
+        int64_t ch = std::min<int64_t>(HEAD_CHUNK, H - h0);
+        size_t q_off_head = (size_t)t0 * q3d->nb[1] + (size_t)h0 * q3d->nb[2];
+        ggml_tensor * q_chunk_3d = ggml_view_3d(ctx, q3d, D, Tc, ch, q3d->nb[1], q3d->nb[2], q_off_head);
+        q_chunk_3d = ggml_cont(ctx, q_chunk_3d);
+        ggml_tensor * q_chunk_2d = ggml_reshape_2d(ctx, q_chunk_3d, D, Tc*ch);
+        ggml_tensor * b_q = q_chunk_2d;
+        if (use_fp16 && q_chunk_2d->type != GGML_TYPE_F16) {
+            b_q = ggml_cast(ctx, q_chunk_2d, GGML_TYPE_F16);
+            b_q = ggml_cont(ctx, b_q);
+        }
+        ggml_tensor * k_slice = ggml_view_2d(ctx, a_k, D, kv_end, a_k->nb[1], 0);
+        ggml_tensor * logits_chunk = ggml_mul_mat(ctx, k_slice, b_q); // [kv_end, Tc*ch]
+        logits_chunk = ggml_cont(ctx, logits_chunk);
+        ggml_tensor * logits_chunk_3d = ggml_reshape_3d(ctx, logits_chunk, kv_end, ch, Tc); // [kv_end, ch, Tc]
+        logits_chunk_3d = ggml_relu(ctx, logits_chunk_3d);
+        size_t w_off_chunk = (size_t)h0 * w_slice->nb[0];
+        ggml_tensor * w_sub_2d = ggml_view_2d(ctx, w_slice, ch, Tc, w_slice->nb[1], w_off_chunk); // [ch, Tc]
+        w_sub_2d = ggml_cont(ctx, w_sub_2d);
+        ggml_tensor * w_sub_3d = ggml_reshape_3d(ctx, w_sub_2d, ch, 1, Tc); // [ch,1,Tc]
+        ggml_tensor * log_p = ggml_permute(ctx, logits_chunk_3d, 1, 0, 2, 3); // [ch, N_kv, Tc]
+        log_p = ggml_cont(ctx, log_p);
+        ggml_tensor * w_bc  = ggml_repeat(ctx, w_sub_3d, log_p);             // [ch, N_kv, Tc]
+        w_bc = ggml_cont(ctx, w_bc);
+        ggml_tensor * prod  = ggml_mul(ctx, log_p, w_bc);                     // [ch, N_kv, Tc]
+        ggml_tensor * sum_ch= ggml_sum_rows(ctx, prod);                       // [1, N_kv, Tc]
+        ggml_tensor * sum_p = ggml_permute(ctx, sum_ch, 1, 2, 0, 3);          // [kv_end, Tc, 1]
+        sum_p = ggml_cont(ctx, sum_p);
+        ggml_tensor * scores_chunk = ggml_reshape_2d(ctx, sum_p, kv_end, Tc);   // [kv_end, Tc]
+        scores_acc = scores_acc ? ggml_add(ctx, scores_acc, scores_chunk) : scores_chunk;
+    }
+    ggml_tensor * scores_tc = scores_acc;
+    // Apply k_scale after head reduction
+    ggml_tensor * k_scale_head = ggml_view_2d(ctx, k_scale_2d, kv_end, 1, k_scale_2d->nb[1], 0);
+    ggml_tensor * k_scale_bcast = ggml_repeat(ctx, k_scale_head, scores_tc); // [kv_end, Tc]
+    scores_tc = ggml_mul(ctx, scores_tc, k_scale_bcast);
+    return scores_tc;
+}
+
 
 IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     ggml_context * ctx,
