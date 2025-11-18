@@ -1288,7 +1288,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                   shmem_bytes = compute_smem_fp8(block_Q, block_N);
               }
               if (!capturing) { CUDA_SET_SHARED_MEMORY_LIMIT(k_tl_mqa_attn_return_logits_tma_fp8_full, (int)shmem_bytes); }
-              LAUNCH_PROFILE_KERNEL("PROFILE_TL_TMA_FP8_KONLY", TL_ONLY, stream, ([&](){
+              LAUNCH_PROFILE_KERNEL("PROFILE_TL_FP8_KONLY", TL_ONLY, stream, ([&](){
                           k_tl_mqa_attn_return_logits_tma_fp8_full<<<gridTL, threads, shmem_bytes, stream>>>(
                                   dQfp8, dKfp8, dKS, dLogits, dWrm, dKS_i, dKE_i,
                                   Tc, kv_end, H, D, block_N, num_stages, threads, block_Q);
