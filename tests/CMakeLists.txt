@@ -227,6 +227,10 @@ target_link_libraries(${TEST_TARGET} PRIVATE llama)
 llama_build_and_test(test-alloc.cpp)
 target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
 
+
+# Unit test for sparse_attn_indexer::idx_compute_scores_tile
+llama_build_and_test(test-indexer-scores-tile.cpp)
+target_include_directories(test-indexer-scores-tile PRIVATE ${PROJECT_SOURCE_DIR}/src)
 # Sparse attention tests
 llama_build_and_test(test-sparse-attn.cpp)
 target_include_directories(test-sparse-attn PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
@@ -252,3 +256,8 @@ if (GGML_CUDA)
 endif()
 
 llama_build_and_test(test-sparse-mla-decode-cuda.cpp)
+
+
+if (GGML_CUDA)
+    llama_build_and_test(test-indexer-triplet-vs-fused.cpp)
+endif()

@@ -45,6 +45,7 @@ int main() {
     const int64_t Tc = 64;
     const int64_t kv = 4096;
 
+    // NOTE: keep seed in sync with idx_compute_scores_tile reference in llama-sparse-topk.cpp if changed.
     std::mt19937 rng(123);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
@@ -121,6 +122,17 @@ int main() {
     }
 
     printf("idx_compute_scores_tile test: mism=%d max_abs=%.6f\n", mism, max_abs);
+    // debug: print a small window when mismatches occur
+    if (mism != 0) {
+        int tc0 = 0, kv0 = 0;
+        int tc1 = (int) (Tc > 1 ? Tc - 1 : 0);
+        int kv1 = (int) (kv > 1 ? kv - 1 : 0);
+        printf("sample ref/out at [kv,tc]:\n");
+        printf("  [0,0]: ref=%f out=%f diff=%f\n", ref[(size_t)kv0 + (size_t)kv * (size_t)tc0], out[(size_t)kv0 + (size_t)kv * (size_t)tc0], out[(size_t)kv0 + (size_t)kv * (size_t)tc0] - ref[(size_t)kv0 + (size_t)kv * (size_t)tc0]);
+        printf("  [kv-1,0]: ref=%f out=%f diff=%f\n", ref[(size_t)kv1 + (size_t)kv * (size_t)tc0], out[(size_t)kv1 + (size_t)kv * (size_t)tc0], out[(size_t)kv1 + (size_t)kv * (size_t)tc0] - ref[(size_t)kv1 + (size_t)kv * (size_t)tc0]);
+        printf("  [0,Tc-1]: ref=%f out=%f diff=%f\n", ref[(size_t)kv0 + (size_t)kv * (size_t)tc1], out[(size_t)kv0 + (size_t)kv * (size_t)tc1], out[(size_t)kv0 + (size_t)kv * (size_t)tc1] - ref[(size_t)kv0 + (size_t)kv * (size_t)tc1]);
+        printf("  [kv-1,Tc-1]: ref=%f out=%f diff=%f\n", ref[(size_t)kv1 + (size_t)kv * (size_t)tc1], out[(size_t)kv1 + (size_t)kv * (size_t)tc1], out[(size_t)kv1 + (size_t)kv * (size_t)tc1] - ref[(size_t)kv1 + (size_t)kv * (size_t)tc1]);
+    }
     printf("TEST %s\n", mism == 0 ? "PASS" : "FAIL");
 
     ggml_free(ctx);

@@ -53,8 +53,10 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
         int64_t ch = std::min<int64_t>(HEAD_CHUNK, H - h0);
         size_t q_off_head = (size_t)t0 * q3d->nb[1] + (size_t)h0 * q3d->nb[2];
         ggml_tensor * q_chunk_3d = ggml_view_3d(ctx, q3d, D, Tc, ch, q3d->nb[1], q3d->nb[2], q_off_head);
-        q_chunk_3d = ggml_cont(ctx, q_chunk_3d);
-        ggml_tensor * q_chunk_2d = ggml_reshape_2d(ctx, q_chunk_3d, D, Tc*ch);
+        // permute [D, Tc, ch] -> [D, ch, Tc] so that head index is contiguous inside token-major layout
+        ggml_tensor * q_chunk_ht = ggml_permute(ctx, q_chunk_3d, 0, 2, 1, 3); // [D, ch, Tc]
+        q_chunk_ht = ggml_cont(ctx, q_chunk_ht);
+        ggml_tensor * q_chunk_2d = ggml_reshape_2d(ctx, q_chunk_ht, D, Tc*ch);
         ggml_tensor * b_q = q_chunk_2d;
         if (use_fp16 && q_chunk_2d->type != GGML_TYPE_F16) {
             b_q = ggml_cast(ctx, q_chunk_2d, GGML_TYPE_F16);
@@ -75,9 +77,8 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
         w_bc = ggml_cont(ctx, w_bc);
         ggml_tensor * prod  = ggml_mul(ctx, log_p, w_bc);                     // [ch, N_kv, Tc]
         ggml_tensor * sum_ch= ggml_sum_rows(ctx, prod);                       // [1, N_kv, Tc]
-        ggml_tensor * sum_p = ggml_permute(ctx, sum_ch, 1, 2, 0, 3);          // [kv_end, Tc, 1]
-        sum_p = ggml_cont(ctx, sum_p);
-        ggml_tensor * scores_chunk = ggml_reshape_2d(ctx, sum_p, kv_end, Tc);   // [kv_end, Tc]
+        // sum_ch is [1, N_kv, Tc] with linear layout kv-major, then t; reshape directly to [kv_end, Tc]
+        ggml_tensor * scores_chunk = ggml_reshape_2d(ctx, sum_ch, kv_end, Tc);   // [kv_end, Tc]
         scores_acc = scores_acc ? ggml_add(ctx, scores_acc, scores_chunk) : scores_chunk;
     }
     ggml_tensor * scores_tc = scores_acc;
