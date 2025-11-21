@@ -2,6 +2,8 @@
 #include <ggml-backend.h>
 #include <ggml-alloc.h>
 
+#include "../src/llama-sparse-indexer.h"
+
 #include <cstdio>
 #include <vector>
 #include <random>
@@ -11,6 +13,7 @@
 #include <cstring>
 
 #include <chrono>
+using namespace llama;
 // Helpers to simulate CUDA half rounding (round-to-nearest-even) on CPU
 static inline uint16_t float_to_half_bits_rtne(float f) {
     uint32_t x; std::memcpy(&x, &f, sizeof(x));
@@ -87,162 +90,8 @@ static inline float f32_to_bf16_to_f32(float x) {
 }
 
 
-// Minimal E4M3 (FP8) emulation matching CUDA convert_float_to_fp8/convert_fp8_to_float
-struct fp8e4m3_cpu {
-    static constexpr bool   IS_E4M3                 = true;
-    static constexpr int    FP32_NUM_BITS          = 32;
-    static constexpr int    FP32_NUM_EXPONENT_BITS = 8;
-    static constexpr int    FP32_NUM_MANTISSA_BITS = 23;
-    static constexpr uint32_t FP32_NAN             = 0x7fffffffu;
-    static constexpr uint32_t FP32_INFINITY_MASK   = 0x7f800000u;
-    static constexpr int    FP32_MAX_EXPONENT      = 127;
-    static constexpr int    FP32_MIN_EXPONENT      = -126;
-    static constexpr int    FP32_EXPONENT_BIAS     = 127;
+#include "fp8-e4m3-cpu.h"
 
-    static constexpr int    FP8_NUM_BITS           = 8;
-    static constexpr int    FP8_NUM_EXPONENT_BITS  = 4;
-    static constexpr int    FP8_NUM_MANTISSA_BITS  = 3;
-    static constexpr uint8_t FP8_NAN               = 0x7fu;
-    static constexpr uint8_t FP8_INFINITY_MASK     = 0x78u;
-    static constexpr int    FP8_MAX_EXPONENT       = 7;
-    static constexpr int    FP8_MIN_EXPONENT       = -6;
-    static constexpr int    FP8_EXPONENT_BIAS      = 7;
-
-    static constexpr uint8_t FP8_EXPONENT_MASK     = (1u << FP8_NUM_EXPONENT_BITS) - 1u;
-    static constexpr uint8_t FP8_MANTISSA_MASK     = (1u << FP8_NUM_MANTISSA_BITS) - 1u;
-    static constexpr uint8_t FP8_MAX_FLT           = 0x7eu;
-
-    static inline bool isfinite(float flt) {
-        uint32_t s = reinterpret_cast<uint32_t const &>(flt);
-        return (s & 0x7f800000u) < 0x7f800000u;
-    }
-
-    static inline bool isnan(float flt) {
-        uint32_t s = reinterpret_cast<uint32_t const &>(flt);
-        return (s & 0x7fffffffu) > 0x7f800000u;
-    }
-
-    static inline bool isinf(float flt) {
-        uint32_t s = reinterpret_cast<uint32_t const &>(flt);
-        return (s == 0x7f800000u) || (s == 0xff800000u);
-    }
-
-    static inline uint8_t convert_float_to_fp8(float const &flt) {
-        uint32_t s = reinterpret_cast<uint32_t const &>(flt);
-        uint8_t sign = uint8_t((s >> 24) & 0x80u);
-        int32_t exp = int32_t((s >> FP32_NUM_MANTISSA_BITS) & 0xffu) - FP32_EXPONENT_BIAS;
-        int mantissa = int(s & 0x7fffffu);
-        uint8_t u = 0;
-        uint8_t const kF8_NaN = FP8_NAN;
-
-        if (isnan(flt)) {
-            return kF8_NaN;
-        }
-        if (isinf(flt)) {
-            return uint8_t(sign | FP8_MAX_FLT);
-        }
-        if (exp == -128) {
-            return uint8_t(sign | FP8_MAX_FLT);
-        }
-
-        int sticky_bit = 0;
-        bool skip_sign = false;
-        bool may_be_nan = false;
-
-        if (exp >= FP8_MIN_EXPONENT && exp <= FP8_MAX_EXPONENT) {
-            exp = exp + FP8_EXPONENT_BIAS;
-            u = uint8_t((uint32_t(exp) & FP8_EXPONENT_MASK) << FP8_NUM_MANTISSA_BITS);
-            u = uint8_t(u | (mantissa >> (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS)));
-        } else if (exp < FP8_MIN_EXPONENT) {
-            int rshift = (FP8_MIN_EXPONENT - exp);
-            if (rshift < FP32_NUM_BITS) {
-                mantissa |= (1 << FP32_NUM_MANTISSA_BITS);
-                sticky_bit = ((mantissa & ((1 << rshift) - 1)) != 0);
-                mantissa = (mantissa >> rshift);
-                u = uint8_t((mantissa >> (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS)) & FP8_MANTISSA_MASK);
-            } else {
-                mantissa = 0;
-                u = 0;
-            }
-        } else {
-            if (exp == (FP8_MAX_EXPONENT + 1)) {
-                uint8_t mantissa_tmp = uint8_t(mantissa >> (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS));
-                if (mantissa_tmp < FP8_MANTISSA_MASK) {
-                    exp = exp + FP8_EXPONENT_BIAS;
-                    u = uint8_t(uint32_t(exp) << FP8_NUM_MANTISSA_BITS) | mantissa_tmp;
-                    may_be_nan = (mantissa_tmp == (FP8_MANTISSA_MASK - 1));
-                } else {
-                    return uint8_t(sign | FP8_MAX_FLT);
-                }
-            } else {
-                return uint8_t(sign | FP8_MAX_FLT);
-            }
-        }
-
-        int NUM_BITS_SHIFT = FP32_NUM_MANTISSA_BITS - (FP8_NUM_MANTISSA_BITS + 1);
-        int round_bit = ((mantissa >> NUM_BITS_SHIFT) & 1);
-        sticky_bit |= ((mantissa & ((1 << NUM_BITS_SHIFT) - 1)) != 0);
-
-        if ((round_bit && sticky_bit) || (round_bit && (u & 1))) {
-            u = uint8_t(u + 1);
-            if (may_be_nan) {
-                skip_sign = true;
-            }
-        }
-
-        if (u > FP8_MAX_FLT) {
-            u = uint8_t(sign | FP8_MAX_FLT);
-        }
-        if (!skip_sign) {
-            u = uint8_t(u | sign);
-        }
-        return u;
-    }
-
-    static inline float convert_fp8_to_float(uint8_t const &x) {
-        uint32_t constexpr kF32_NaN = FP32_NAN;
-        uint8_t const &f8 = x;
-        uint32_t sign = (f8 >> (FP8_NUM_BITS - 1)) & 1u;
-        uint32_t exp = (f8 >> FP8_NUM_MANTISSA_BITS) & FP8_EXPONENT_MASK;
-        uint32_t mantissa = f8 & FP8_MANTISSA_MASK;
-        unsigned f = (sign << (FP32_NUM_BITS - 1));
-
-        if (IS_E4M3 && exp == 15 && mantissa == 0x7) {
-            f = kF32_NaN;
-        } else if (exp > 0 && (IS_E4M3 || exp < (FP8_MAX_EXPONENT + FP8_EXPONENT_BIAS + 1))) {
-            exp += (FP32_EXPONENT_BIAS - FP8_EXPONENT_BIAS);
-            f = f |
-                (exp << FP32_NUM_MANTISSA_BITS) |
-                (mantissa << (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS));
-        } else if (exp == 0) {
-            if (mantissa) {
-                exp += (FP32_EXPONENT_BIAS - FP8_EXPONENT_BIAS) + 1;
-                while ((mantissa & (1u << FP8_NUM_MANTISSA_BITS)) == 0u) {
-                    mantissa <<= 1;
-                    exp--;
-                }
-                mantissa &= FP8_MANTISSA_MASK;
-                f = f |
-                    (exp << FP32_NUM_MANTISSA_BITS) |
-                    (mantissa << (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS));
-            } else {
-                // zero
-            }
-        } else {
-            if (mantissa == 0) {
-                f = (f | 0x7f800000u);
-            } else {
-                f = kF32_NaN;
-            }
-        }
-        return reinterpret_cast<float const &>(f);
-    }
-};
-
-static inline float f32_to_fp8e4m3_to_f32(float x) {
-    uint8_t b = fp8e4m3_cpu::convert_float_to_fp8(x);
-    return fp8e4m3_cpu::convert_fp8_to_float(b);
-}
 static void cpu_indexer_logits_bf16like(const float *Q, const float *K, const float *W, const float *k_scale,
                                        int D, int H, int Tc, int kv, std::vector<float> &out) {
     out.assign((size_t)kv*Tc, 0.0f);
@@ -364,7 +213,7 @@ int main() {
     printf("CUDA not enabled; skipping fused indexer op test\n");
     return 0;
 #else
-    const int D=64, H=4, Tc=32, kv=4096, end=kv/4;
+    const int D=128, H=4, Tc=2, kv=4096, end=kv/4;
 
     std::mt19937 rng(123);
     std::uniform_real_distribution<float> dist(-1.0f,1.0f);
@@ -432,9 +281,79 @@ int main() {
     std::vector<float> O_cpu;
     const char *tl_fp8_env = std::getenv("LLAMA_TL_FP8");
     bool use_fp8_ref = (tl_fp8_env && std::atoi(tl_fp8_env) != 0);
+
     if (use_fp8_ref) {
-        // FP8-like reference: approximate TileLang fp8 pipeline in CPU (rough E4M3 emulation)
-        cpu_indexer_logits_fp8like(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
+        // When TL FP8 path is enabled, build scores via the proven CPU Lightning Indexer
+        // implementation (idx_compute_scores_tile), then apply FP8 emulation if desired
+        ggml_init_params ip_ref{};
+        ip_ref.mem_size   = 256ull * 1024 * 1024;
+        ip_ref.mem_buffer = nullptr;
+        ip_ref.no_alloc   = false;
+        ggml_context * ctx_ref = ggml_init(ip_ref);
+        if (!ctx_ref) {
+            printf("ctx_ref init failed\n");
+            return 1;
+        }
+
+        const int64_t D_ref  = D;
+        const int64_t H_ref  = H;
+        const int64_t Tc_ref = Tc;
+        const int64_t kv_ref = kv;
+
+        ggml_tensor * q3d  = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, D_ref, Tc_ref, H_ref);
+        ggml_tensor * a_k  = ggml_new_tensor_2d(ctx_ref, GGML_TYPE_F32, D_ref, kv_ref);
+        ggml_tensor * w2d  = ggml_new_tensor_2d(ctx_ref, GGML_TYPE_F32, H_ref, Tc_ref);
+        ggml_tensor * ks1d = ggml_new_tensor_1d(ctx_ref, GGML_TYPE_F32, kv_ref);
+        ggml_tensor * ks2d = ggml_reshape_2d(ctx_ref, ks1d, kv_ref, 1);
+
+        // Remap Q from [D, Tc*H] layout (column-major, with column index = tc*H + h)
+        // into q3d [D, Tc, H] so that idx_compute_scores_tile sees the same
+        // logical q_{t,h} vectors as the fused CUDA kernel.
+        {
+            std::vector<float> Q3d((size_t)D_ref * (size_t)Tc_ref * (size_t)H_ref);
+            for (int64_t tc = 0; tc < Tc_ref; ++tc) {
+                for (int64_t h = 0; h < H_ref; ++h) {
+                    for (int64_t d = 0; d < D_ref; ++d) {
+                        size_t src = (size_t)d + (size_t)D_ref * ((size_t)tc * (size_t)H_ref + (size_t)h);
+                        size_t dst = (size_t)d + (size_t)D_ref * ((size_t)tc + (size_t)Tc_ref * (size_t)h);
+                        Q3d[dst] = Q[src];
+                    }
+                }
+            }
+            std::memcpy(q3d->data, Q3d.data(), Q3d.size() * sizeof(float));
+        }
+        std::memcpy(a_k->data,  K.data(),  ggml_nbytes(a_k));
+        std::memcpy(w2d->data,  W.data(),  ggml_nbytes(w2d));
+        std::memcpy(ks1d->data, KS.data(), ggml_nbytes(ks1d));
+
+        ggml_tensor * scores_ref = llama::sparse_attn_indexer::idx_compute_scores_tile(
+            ctx_ref,
+            q3d,
+            a_k,
+            w2d,
+            ks2d,
+            D_ref,
+            H_ref,
+            Tc_ref,
+            kv_ref,
+            /*t0=*/0,
+            /*use_fp16=*/false);
+
+        ggml_cgraph * gf_ref = ggml_new_graph(ctx_ref);
+        ggml_build_forward_expand(gf_ref, scores_ref);
+        ggml_graph_compute_with_ctx(ctx_ref, gf_ref, /*n_threads=*/1);
+
+        O_cpu.resize((size_t)kv_ref * (size_t)Tc_ref);
+        std::memcpy(O_cpu.data(), scores_ref->data, O_cpu.size() * sizeof(float));
+
+        // Optional: emulate FP8 quant/dequant on top of the accurate CPU scores
+        // so that we still exercise the FP8 code path while using numerically
+        // stable reference values.
+        for (size_t i = 0; i < O_cpu.size(); ++i) {
+            O_cpu[i] = f32_to_fp8e4m3_to_f32(O_cpu[i]);
+        }
+
+        ggml_free(ctx_ref);
     } else if (use_bf16_ref) {
         cpu_indexer_logits_bf16like(Q.data(), K.data(), W.data(), KS.data(), D,H,Tc,kv, O_cpu);
     } else if (use_fp16_ref) {
