@@ -427,6 +427,24 @@ typedef struct {
 } block_iq4_xs;
 static_assert(sizeof(block_iq4_xs) == sizeof(ggml_half) + sizeof(uint16_t) + QK_K/64 + QK_K/2, "wrong iq4_xs block size/padding");
 
+// fp8 support
+// - fp8 simple type
+typedef struct { uint8_t bits; } ggml_e5m2_t;
+typedef struct { uint8_t bits; } ggml_e4m3_t;
+
+// - fp8 with bloc delta => 8.125 bpw
+typedef struct {
+    float d;  // delta
+    uint8_t qs[QK_K];
+} block_e4m3_q;
+static_assert(sizeof(block_e4m3_q) == sizeof(float) + QK_K, "wrong block_e4m3_q block size/padding");
+
+typedef struct {
+    float d;  // delta
+    uint8_t qs[QK_K];
+} block_e3m4_q;
+static_assert(sizeof(block_e3m4_q) == sizeof(float) + QK_K, "wrong block_e3m4_q block size/padding");
+
 #endif // GGML_COMMON_DECL
 #endif // GGML_COMMON_DECL
 

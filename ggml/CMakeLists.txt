@@ -106,6 +106,10 @@ if (NOT GGML_LLAMAFILE_DEFAULT)
     set(GGML_LLAMAFILE_DEFAULT OFF)
 endif()
 
+if (NOT GGML_OPENMP_SIMD_DEFAULT)
+    set(GGML_OPENMP_SIMD_DEFAULT OFF)
+endif()
+
 if (NOT GGML_CUDA_GRAPHS_DEFAULT)
     set(GGML_CUDA_GRAPHS_DEFAULT OFF)
 endif()
@@ -169,6 +173,7 @@ option(GGML_RV_ZVFH          "ggml: enable riscv zvfh"       ON)
 option(GGML_RV_ZICBOP        "ggml: enable riscv zicbop"     ON)
 option(GGML_XTHEADVECTOR     "ggml: enable xtheadvector"     OFF)
 option(GGML_VXE              "ggml: enable vxe"              ON)
+option(GGML_OPENMP_SIMD      "ggml: enable OPENMP_SIMD"      ${GGML_OPENMP_SIMD_DEFAULT})
 
 option(GGML_CPU_ALL_VARIANTS "ggml: build all variants of the CPU backend (requires GGML_BACKEND_DL)" OFF)
 set(GGML_CPU_ARM_ARCH        "" CACHE STRING "ggml: CPU architecture for ARM")
