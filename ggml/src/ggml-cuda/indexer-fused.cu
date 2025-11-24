@@ -887,7 +887,7 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
     const int * __restrict__ starts,
     const int * __restrict__ ends,
     float * __restrict__ Out) {
-#if __CUDA_ARCH__ >= 900
+#if __CUDA_ARCH__ >= 800
     const int tokens_per_tile = 1;
     const int t0 = blockIdx.x * tokens_per_tile;
     const int k0 = blockIdx.y * 16;
@@ -923,74 +923,69 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
     }
     __syncthreads();
 
-    // Shared buffers for one K-block (we'll use K_block=32) and FP32 accumulators
-    const int K_block = 32;
-    __shared__ uint8_t A_fp8[16 * K_block];   // K tile, FP8 E4M3
-    __shared__ uint8_t B_fp8[16 * K_block];   // Q tile, FP8 E4M3
-    __shared__ float   C_sh[16 * 16];         // accumulator
-    __shared__ float   S_acc[16];
+    __shared__ __half A_sh[16*16]; // row-major K tile (FP8-quantized then decoded)
+    __shared__ __half B_sh[16*16]; // col-major Q tile (FP8-quantized then decoded)
+    __shared__ float  C_sh[16*16]; // accumulator dump
+    __shared__ float  S_acc[16];   // accumulate per kv row
+
     if (threadIdx.x < 16) S_acc[threadIdx.x] = 0.0f;
     __syncthreads();
 
     for (int h0 = 0; h0 < H; h0 += 16) {
-        // Zero per-group accum
-        for (int i = lane; i < 16 * 16; i += 32) C_sh[i] = 0.0f;
-        __syncthreads();
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
+        wmma::fill_fragment(c_frag, 0.0f);
 
-        // Iterate D in K_block chunks
-        for (int d0 = 0; d0 < D; d0 += K_block) {
-            int curK = min(K_block, D - d0);
-            // FP8-encode K into A_fp8
-            for (int idx = lane; idx < 16 * curK; idx += 32) {
-                int mi = idx / curK;
-                int di = idx % curK;
+        // Iterate K dimension in 16-slices
+        for (int d0 = 0; d0 < D; d0 += 16) {
+            int lane2 = threadIdx.x & 31;
+            // Load A_sh: rows are kv rows, cols are k-slice, with FP8 quant/dequant and per-row scale
+            for (int idx = lane2; idx < 16*16; idx += 32) {
+                int mi = idx / 16; // row
+                int di = idx % 16; // col
                 int kv_idx = k0 + mi;
-                uint8_t code = 0;
-                if (kv_idx < kv) {
-                    float f = 0.0f;
-                    if (d0 + di < D) {
-                        f = K[(size_t)(d0 + di) + (size_t)D * (size_t)kv_idx];
-                        float sf = K_sf[mi];
-                        float scaled = f / sf;
-                        code = f32_to_fp8e4m3(scaled);
-                    }
+                __half v = __float2half_rn(0.0f);
+                if (kv_idx < kv && d0 + di < D) {
+                    float f = K[(size_t)(d0 + di) + (size_t)D * (size_t)kv_idx];
+                    float sf = K_sf[mi];
+                    float scaled = f / sf;
+                    uint8_t code = f32_to_fp8e4m3(scaled);
+                    float dec = fp8e4m3_to_f32(code);
+                    v = __float2half_rn(dec);
                 }
-                A_fp8[mi * curK + di] = code;
+                A_sh[mi * 16 + di] = v;
             }
-            // FP8-encode Q into B_fp8
-            for (int idx = lane; idx < 16 * curK; idx += 32) {
-                int di = idx % curK;
-                int cj = idx / curK; // 0..15 heads in group
+            // Load B_sh: columns=16 heads in group, rows=16 k-slice; col-major, FP8 quant/dequant
+            for (int idx = lane2; idx < 16*16; idx += 32) {
+                int di = idx / 16; // k index
+                int cj = idx % 16; // head col 0..15
                 int h = h0 + cj;
-                int tok = t0;
-                uint8_t code = 0;
+                int tok = t0; // one token per tile
+                __half v = __float2half_rn(0.0f);
                 if (tok < Tc && h < H && d0 + di < D) {
                     float f = Q[(size_t)(d0 + di) + (size_t)D * (size_t)(tok*H + h)];
-                    code = f32_to_fp8e4m3(f);
+                    uint8_t code = f32_to_fp8e4m3(f);
+                    float dec = fp8e4m3_to_f32(code);
+                    v = __float2half_rn(dec);
                 }
-                B_fp8[cj * curK + di] = code;
+                B_sh[cj * 16 + di] = v;
             }
             __syncthreads();
 
-            // Naive FP8 matmul: accumulate into C_sh (16x16) in FP32
-            for (int mi = lane; mi < 16; mi += 32) {
-                for (int cj = 0; cj < 16; ++cj) {
-                    float acc = 0.0f;
-                    for (int di = 0; di < curK; ++di) {
-                        uint8_t a = A_fp8[mi * curK + di];
-                        uint8_t b = B_fp8[cj * curK + di];
-                        float fa = fp8e4m3_to_f32(a);
-                        float fb = fp8e4m3_to_f32(b);
-                        acc += fa * fb;
-                    }
-                    C_sh[mi * 16 + cj] += acc;
-                }
-            }
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
+            wmma::load_matrix_sync(a_frag, A_sh, 16);
+            wmma::load_matrix_sync(b_frag, B_sh, 16);
+            wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
             __syncthreads();
         }
 
-        // Post-process: ReLU + head weights into S_acc
-        for (int mi = lane; mi < 16; mi += 32) {
+        // Dump accumulators to shared
+        wmma::store_matrix_sync(C_sh, c_frag, 16, wmma::mem_row_major);
+        __syncthreads();
+
+        // Accumulate this head-group contribution into S_acc per row
+        int lane3 = threadIdx.x & 31;
+        for (int mi = lane3; mi < 16; mi += 32) {
             float srow = 0.0f;
             for (int cj = 0; cj < 16; ++cj) {
                 float v = C_sh[mi * 16 + cj];
