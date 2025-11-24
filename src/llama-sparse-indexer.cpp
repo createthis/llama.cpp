@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cinttypes>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 // Helper function to get memory usage in human-readable format
@@ -25,6 +26,20 @@ static std::string format_memory_size(size_t bytes) {
 }
 
 namespace llama {
+extern "C" {
+    struct ggml_e4m3_t;
+    void ggml_e4m3_to_fp32_row(const ggml_e4m3_t * x, float * y, int64_t k);
+    void ggml_fp32_to_e4m3_row_ref(const float * x, ggml_e4m3_t * y, int64_t k);
+}
+
+static inline float f32_to_e4m3_to_f32(float x) {
+    unsigned char q_byte = 0;
+    ggml_fp32_to_e4m3_row_ref(&x, (ggml_e4m3_t *) &q_byte, 1);
+    float y = 0.0f;
+    ggml_e4m3_to_fp32_row((const ggml_e4m3_t *) &q_byte, &y, 1);
+    return y;
+}
+
 
 using std::function;
 
@@ -40,6 +55,12 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
     bool use_fp16) {
     ggml_tensor * scores_acc = nullptr;
     long HEAD_CHUNK = H;
+
+    // When TL FP8 pipeline is enabled, mirror its per-vector FP8 quantization
+    // on top of the dense FP32 scores so that this CPU reference matches the
+    // device path numerically for testing. We detect this via LLAMA_TL_FP8,
+    // the same knob used by the CUDA wrapper.
+    const bool use_fp8_like = (getenv("LLAMA_TL_FP8") && atoi(getenv("LLAMA_TL_FP8")) != 0);
     if (const char *env = getenv("LLAMA_SPARSE_TOPK_HEAD_CHUNK")) {
         long v = strtol(env, nullptr, 10);
         if (v > 0) HEAD_CHUNK = v;
@@ -82,12 +103,127 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
         scores_acc = scores_acc ? ggml_add(ctx, scores_acc, scores_chunk) : scores_chunk;
     }
     ggml_tensor * scores_tc = scores_acc;
-    // Apply k_scale after head reduction
-    ggml_tensor * k_scale_head = ggml_view_2d(ctx, k_scale_2d, kv_end, 1, k_scale_2d->nb[1], 0);
-    ggml_tensor * k_scale_bcast = ggml_repeat(ctx, k_scale_head, scores_tc); // [kv_end, Tc]
-    scores_tc = ggml_mul(ctx, scores_tc, k_scale_bcast);
+
+    if (use_fp8_like) {
+        // CPU reference for TL FP8 lightning indexer, using GGML FP8 encode/decode.
+        // Layout conventions:
+        //   q3d : [D, T_total, H]
+        //   a_k : [D, N_kv]
+        //   weights : [H, T_total]
+        //   k_scale_2d : [N_kv, 1]
+        const int64_t kv = kv_end;
+
+        // Pack Q tile [D, Tc, H] into flat Q[D * Tc * H] with layout Q[d + D*(tc*H + h)]
+        std::vector<float> Q((size_t)D * (size_t)Tc * (size_t)H);
+        for (int64_t tc = 0; tc < Tc; ++tc) {
+            for (int64_t h = 0; h < H; ++h) {
+                for (int64_t d = 0; d < D; ++d) {
+                    size_t dst = (size_t)d + (size_t)D * ((size_t)tc * (size_t)H + (size_t)h);
+                    // q3d is [D, T_total, H]
+                    size_t off =
+                        (size_t)d * q3d->nb[0] +
+                        (size_t)(t0 + tc) * q3d->nb[1] +
+                        (size_t)h * q3d->nb[2];
+                    Q[dst] = *(float *)((char *) q3d->data + off);
+                }
+            }
+        }
+
+        // Pack K slice [D, kv_end] into K[D*kv] row-major per kv row
+        std::vector<float> K((size_t)D * (size_t)kv);
+        for (int64_t i = 0; i < kv; ++i) {
+            for (int64_t d = 0; d < D; ++d) {
+                size_t dst = (size_t)d + (size_t)D * (size_t)i;
+                size_t off =
+                    (size_t)d * a_k->nb[0] +
+                    (size_t)i * a_k->nb[1];
+                K[dst] = *(float *)((char *) a_k->data + off);
+            }
+        }
+
+        // Pack weights [H, Tc] for this tile: W[h + H*tc]
+        std::vector<float> W((size_t)H * (size_t)Tc);
+        for (int64_t tc = 0; tc < Tc; ++tc) {
+            for (int64_t h = 0; h < H; ++h) {
+                size_t dst = (size_t)h + (size_t)H * (size_t)tc;
+                size_t off =
+                    (size_t)h * weights->nb[0] +
+                    (size_t)(t0 + tc) * weights->nb[1];
+                W[dst] = *(float *)((char *) weights->data + off);
+            }
+        }
+
+        // Pack k_scale (IndexKScale proxy) for first kv rows
+        std::vector<float> KS((size_t)kv);
+        for (int64_t i = 0; i < kv; ++i) {
+            // k_scale_2d has shape [N_kv, 1] with nb[0] = sizeof(float), nb[1] = sizeof(float)*N_kv
+            // The per-row scale is at (i, 0), i.e. offset = i * nb[0]
+            size_t off = (size_t)i * k_scale_2d->nb[0];
+            KS[i] = *(float *)((char *) k_scale_2d->data + off);
+        }
+
+        // Per-row amax and K_sf exactly as in cpu_indexer_logits_fp8like
+        std::vector<float> K_sf((size_t)kv);
+        for (int64_t i = 0; i < kv; ++i) {
+            float maxv = 0.0f;
+            const float *kvp = K.data() + (size_t)D * (size_t)i;
+            for (int64_t d = 0; d < D; ++d) {
+                float v = std::fabs(kvp[d]);
+                if (v > maxv) maxv = v;
+            }
+            if (maxv < 1e-4f) maxv = 1e-4f;
+            K_sf[i] = maxv / 448.0f;
+        }
+
+        // Compute FP8-like logits into host buffer
+        std::vector<float> out((size_t)kv * (size_t)Tc, 0.0f);
+        for (int64_t tc = 0; tc < Tc; ++tc) {
+            for (int64_t i = 0; i < kv; ++i) {
+                float acc = 0.0f;
+                const float *kvp = K.data() + (size_t)D * (size_t)i;
+                float sf_k = K_sf[i];
+                for (int64_t h = 0; h < H; ++h) {
+                    const float *qv = Q.data() + (size_t)D * ((size_t)tc * (size_t)H + (size_t)h);
+                    float dot = 0.0f;
+                    for (int64_t d = 0; d < D; ++d) {
+                        float qh = f32_to_e4m3_to_f32(qv[d]);
+                        float kh = f32_to_e4m3_to_f32(kvp[d] / sf_k);
+                        dot += qh * kh;
+                    }
+                    if (dot < 0.0f) dot = 0.0f; // ReLU
+                    acc += dot * W[(size_t)h + (size_t)H * (size_t)tc];
+                }
+                out[(size_t)i + (size_t)kv * (size_t)tc] = acc * KS[i] * sf_k;
+            }
+        }
+
+        if (getenv("LLAMA_INDEXER_TL_FP8_DEBUG")) {
+            int maxk = (int) (kv < 8 ? kv : 8);
+            int maxt = (int) (Tc < 2 ? Tc : 2);
+            fprintf(stderr, "[IDX_FP8_CPU] Logits (kv x T) sample:");
+            for (int i = 0; i < maxk; ++i) {
+                for (int tc = 0; tc < maxt; ++tc) {
+                    float v = out[(size_t)i + (size_t)kv * (size_t)tc];
+                    fprintf(stderr, "  C[%d,%d]= % .6f", i, tc, v);
+                }
+                fprintf(stderr, "");
+            }
+        }
+
+        // Materialize scores_tc as a new F32 tensor [kv_end, Tc]
+        scores_tc = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, kv, Tc);
+        std::memcpy(scores_tc->data, out.data(), out.size() * sizeof(float));
+        scores_tc->op = GGML_OP_NONE;
+    } else {
+        // Original dense F32 path: apply k_scale after head reduction
+        ggml_tensor * k_scale_head = ggml_view_2d(ctx, k_scale_2d, kv_end, 1, k_scale_2d->nb[1], 0);
+        ggml_tensor * k_scale_bcast = ggml_repeat(ctx, k_scale_head, scores_tc); // [kv_end, Tc]
+        scores_tc = ggml_mul(ctx, scores_tc, k_scale_bcast);
+    }
+
     return scores_tc;
 }
+
 
 
 IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
