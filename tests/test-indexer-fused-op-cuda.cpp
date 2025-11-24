@@ -213,7 +213,16 @@ int main() {
     printf("CUDA not enabled; skipping fused indexer op test\n");
     return 0;
 #else
-    const int D=64, H=4, Tc=2, kv=4096, end=kv/4;
+    const char *tl_fp8_env = std::getenv("LLAMA_TL_FP8");
+    const char *wmma_env = std::getenv("LLAMA_INDEXER_USE_WMMA");
+    bool use_fp8_ref = ( (tl_fp8_env && std::atoi(tl_fp8_env) != 0) ||
+                         (wmma_env && std::atoi(wmma_env) != 0) );
+
+    int D=128, H=16, Tc=2, kv=4096, end=kv/4;
+    if (tl_fp8_env && std::atoi(tl_fp8_env) != 0) {
+      D=64;
+      H=4;
+    }
 
     std::mt19937 rng(123);
     std::uniform_real_distribution<float> dist(-1.0f,1.0f);
@@ -238,7 +247,6 @@ int main() {
 
     ggml_tensor * k2d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D, kv);
     const char *tl = std::getenv("LLAMA_INDEXER_TL_PORT");
-    const char *wmma_env = std::getenv("LLAMA_INDEXER_USE_WMMA");
     bool use_bf16_ref = (wmma_env && std::atoi(wmma_env) != 0 && H < 16);
     bool use_fp16_ref = (!use_bf16_ref) && ((tl && std::atoi(tl) != 0) || (wmma_env && std::atoi(wmma_env) != 0));
 
@@ -279,8 +287,6 @@ int main() {
     }
 
     std::vector<float> O_cpu;
-    const char *tl_fp8_env = std::getenv("LLAMA_TL_FP8");
-    bool use_fp8_ref = (tl_fp8_env && std::atoi(tl_fp8_env) != 0);
 
     if (use_fp8_ref) {
         // When TL FP8 path is enabled, build scores via the proven CPU Lightning Indexer

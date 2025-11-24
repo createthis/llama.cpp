@@ -859,6 +859,24 @@ __global__ void k_indexer_logits_wmma16_bf16(
 }
 
 
+
+
+
+// Device-side FP8 E4M3 helpers using native PTX conversions
+static __device__ __forceinline__ uint8_t f32_to_fp8e4m3(float x) {
+    uint16_t tmp;
+    float zero = 0.0f;
+    asm volatile("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(tmp) : "f"(zero), "f"(x));
+    return static_cast<uint8_t>(tmp & 0xFFu);
+}
+
+static __device__ __forceinline__ float fp8e4m3_to_f32(uint8_t code) {
+    uint16_t bits = code;
+    uint32_t packed;
+    asm volatile("cvt.rn.f16x2.e4m3x2 %0, %1;\n" : "=r"(packed) : "h"(bits));
+    return __half2float(reinterpret_cast<half2 const &>(packed).x);
+}
+
 // WMMA 16x16 with head grouping: supports H multiple of 16
 __global__ void k_indexer_logits_wmma16_f32_hgrp(
     const float * __restrict__ Q, // [D, Tc*H]
@@ -869,78 +887,141 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
     const int * __restrict__ starts,
     const int * __restrict__ ends,
     float * __restrict__ Out) {
-#if __CUDA_ARCH__ >= 700
+#if __CUDA_ARCH__ >= 900
     const int tokens_per_tile = 1;
     const int t0 = blockIdx.x * tokens_per_tile;
     const int k0 = blockIdx.y * 16;
     if (t0 >= Tc || k0 >= kv) return;
 
-    __shared__ __half A_sh[16*16]; // row-major K tile
-    __shared__ __half B_sh[16*16]; // col-major Q tile (heads chunk)
-    __shared__ float  C_sh[16*16]; // accumulator dump
-    __shared__ float  S_acc[16];   // accumulate per kv row
+    // Per-row K scale (amax/448) for 16-row tile
+    __shared__ float K_sf[16];
+    int lane = threadIdx.x & 31;
+    if (lane < 16) K_sf[lane] = 1.0f;
+    __syncthreads();
 
+    for (int mi = 0; mi < 16; ++mi) {
+        int kv_idx = k0 + mi;
+        float local_max = 0.0f;
+        if (kv_idx < kv) {
+            for (int d0 = lane; d0 < D; d0 += 32) {
+                float v = K[(size_t)d0 + (size_t)D * (size_t)kv_idx];
+                float av = fabsf(v);
+                if (av > local_max) local_max = av;
+            }
+        }
+        // warp reduce
+        for (int off = 16; off > 0; off >>= 1) {
+            float other = __shfl_down_sync(0xffffffff, local_max, off);
+            if (other > local_max) local_max = other;
+        }
+        if (lane == 0 && kv_idx < kv) {
+            float maxv = local_max;
+            if (maxv < 1e-4f) maxv = 1e-4f;
+            K_sf[mi] = maxv / 448.0f;
+        }
+        __syncwarp();
+    }
+    __syncthreads();
+
+    // Shared buffers for one K-block (we'll use K_block=32) and FP32 accumulators
+    const int K_block = 32;
+    __shared__ uint8_t A_fp8[16 * K_block];   // K tile, FP8 E4M3
+    __shared__ uint8_t B_fp8[16 * K_block];   // Q tile, FP8 E4M3
+    __shared__ float   C_sh[16 * 16];         // accumulator
+    __shared__ float   S_acc[16];
     if (threadIdx.x < 16) S_acc[threadIdx.x] = 0.0f;
     __syncthreads();
 
     for (int h0 = 0; h0 < H; h0 += 16) {
-        wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
-        wmma::fill_fragment(c_frag, 0.0f);
-        for (int d0 = 0; d0 < D; d0 += 16) {
-            int lane = threadIdx.x & 31;
-            // Load A_sh: rows are kv rows, cols are k-slice
-            for (int idx = lane; idx < 16*16; idx += 32) {
-                int mi = idx / 16; // row
-                int di = idx % 16; // col
+        // Zero per-group accum
+        for (int i = lane; i < 16 * 16; i += 32) C_sh[i] = 0.0f;
+        __syncthreads();
+
+        // Iterate D in K_block chunks
+        for (int d0 = 0; d0 < D; d0 += K_block) {
+            int curK = min(K_block, D - d0);
+            // FP8-encode K into A_fp8
+            for (int idx = lane; idx < 16 * curK; idx += 32) {
+                int mi = idx / curK;
+                int di = idx % curK;
                 int kv_idx = k0 + mi;
-                float v = 0.0f;
-                if (kv_idx < kv && d0 + di < D) v = K[(size_t)(d0 + di) + (size_t)D * kv_idx];
-                A_sh[mi * 16 + di] = __float2half_rn(v);
-            }
-            // Load B_sh: columns=16 heads in group, rows=16 k-slice; col-major
-            for (int idx = lane; idx < 16*16; idx += 32) {
-                int di = idx / 16; // k index
-                int cj = idx % 16; // head col 0..15
-                int h = h0 + cj;
-                int tok = t0; // one token per tile
-                float v = 0.0f;
-                if (tok < Tc && h < H && d0 + di < D) {
-                    v = Q[(size_t)(d0 + di) + (size_t)D * (tok*H + h)];
+                uint8_t code = 0;
+                if (kv_idx < kv) {
+                    float f = 0.0f;
+                    if (d0 + di < D) {
+                        f = K[(size_t)(d0 + di) + (size_t)D * (size_t)kv_idx];
+                        float sf = K_sf[mi];
+                        float scaled = f / sf;
+                        code = f32_to_fp8e4m3(scaled);
+                    }
                 }
-                B_sh[cj * 16 + di] = __float2half_rn(v);
+                A_fp8[mi * curK + di] = code;
+            }
+            // FP8-encode Q into B_fp8
+            for (int idx = lane; idx < 16 * curK; idx += 32) {
+                int di = idx % curK;
+                int cj = idx / curK; // 0..15 heads in group
+                int h = h0 + cj;
+                int tok = t0;
+                uint8_t code = 0;
+                if (tok < Tc && h < H && d0 + di < D) {
+                    float f = Q[(size_t)(d0 + di) + (size_t)D * (size_t)(tok*H + h)];
+                    code = f32_to_fp8e4m3(f);
+                }
+                B_fp8[cj * curK + di] = code;
             }
             __syncthreads();
 
-            wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
-            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
-            wmma::load_matrix_sync(a_frag, A_sh, 16);
-            wmma::load_matrix_sync(b_frag, B_sh, 16);
-            wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            // Naive FP8 matmul: accumulate into C_sh (16x16) in FP32
+            for (int mi = lane; mi < 16; mi += 32) {
+                for (int cj = 0; cj < 16; ++cj) {
+                    float acc = 0.0f;
+                    for (int di = 0; di < curK; ++di) {
+                        uint8_t a = A_fp8[mi * curK + di];
+                        uint8_t b = B_fp8[cj * curK + di];
+                        float fa = fp8e4m3_to_f32(a);
+                        float fb = fp8e4m3_to_f32(b);
+                        acc += fa * fb;
+                    }
+                    C_sh[mi * 16 + cj] += acc;
+                }
+            }
             __syncthreads();
         }
-        wmma::store_matrix_sync(C_sh, c_frag, 16, wmma::mem_row_major);
-        __syncthreads();
-        // Accumulate this head-group contribution into S_acc per row
-        int lane = threadIdx.x & 31;
+
+        // Post-process: ReLU + head weights into S_acc
         for (int mi = lane; mi < 16; mi += 32) {
             float srow = 0.0f;
             for (int cj = 0; cj < 16; ++cj) {
                 float v = C_sh[mi * 16 + cj];
                 if (v < 0.0f) v = 0.0f;
-                float w = W[(h0 + cj) + (size_t)H * t0];
-                srow += v * w;
+                int h = h0 + cj;
+                if (h < H) {
+                    float w = W[h + (size_t)H * (size_t)t0];
+                    srow += v * w;
+                }
             }
             atomicAdd(&S_acc[mi], srow);
         }
         __syncthreads();
     }
-    // Write out
-    int lane = threadIdx.x & 31;
+
+    // Write out with combined scale KS * K_sf and windowing
     for (int mi = lane; mi < 16; mi += 32) {
         int kv_idx = k0 + mi;
         if (kv_idx < kv && t0 < Tc) {
-            float srow = S_acc[mi] * k_scale[kv_idx];
-            if (starts!=nullptr && ends!=nullptr) { int s0=starts[t0]; int e0=ends[t0]; if (s0<0) s0=0; if (s0>kv) s0=kv; if (e0<0) e0=0; if (e0>kv) e0=kv; Out[kv_idx + (size_t)kv * t0] = (kv_idx>=s0 && kv_idx<e0) ? srow : 0.0f; } else { Out[kv_idx + (size_t)kv * t0] = srow; }
+            float srow = S_acc[mi] * k_scale[kv_idx] * K_sf[mi];
+            if (starts != nullptr && ends != nullptr) {
+                int s0 = starts[t0];
+                int e0 = ends[t0];
+                if (s0 < 0) s0 = 0;
+                if (s0 > kv) s0 = kv;
+                if (e0 < 0) e0 = 0;
+                if (e0 > kv) e0 = kv;
+                Out[kv_idx + (size_t)kv * (size_t)t0] = (kv_idx >= s0 && kv_idx < e0) ? srow : 0.0f;
+            } else {
+                Out[kv_idx + (size_t)kv * (size_t)t0] = srow;
+            }
         }
     }
 #endif
