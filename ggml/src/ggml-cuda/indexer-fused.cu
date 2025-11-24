@@ -71,6 +71,9 @@ static __device__ inline void cp_async_wait() {
 #endif
 
 // helper kernels
+static __device__ __forceinline__ uint8_t f32_to_fp8e4m3(float);
+static __device__ __forceinline__ float fp8e4m3_to_f32(uint8_t);
+
 __global__ void k_fill_int(int *arr, int n, int val) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) arr[i] = val;
@@ -172,6 +175,7 @@ __global__ void k_indexer_logits_tiled_f32(
     float * __restrict__ Out) {
     __shared__ int s_min_blk;
     __shared__ int s_max_blk;
+    __shared__ float s_K_sf[512];
 
     // Dynamic select exact vs optimized based on workload or env
     bool exact = (exact_flag != 0);
@@ -258,6 +262,25 @@ __global__ void k_indexer_logits_tiled_f32(
             if (smin > smax) smin = smax;
         }
         s_min_blk = smin; s_max_blk = smax;
+    }
+    __syncthreads();
+
+    // Per-row K scale (amax/448) for BLOCK_N kv rows in this tile, matching CPU FP8 path
+    if (threadIdx.x == 0) {
+        int j = threadIdx.y;
+        if (j < BLOCK_N) {
+            int row = k0 + j;
+            float maxv = 0.0f;
+            if (row < kv) {
+                for (int d0 = 0; d0 < D; ++d0) {
+                    float v = K[(size_t)d0 + (size_t)D * (size_t)row];
+                    float av = fabsf(v);
+                    if (av > maxv) maxv = av;
+                }
+            }
+            if (maxv < 1e-4f) maxv = 1e-4f;
+            s_K_sf[j] = maxv / 448.0f;
+        }
     }
     __syncthreads();
 
@@ -388,6 +411,27 @@ __global__ void k_indexer_logits_tiled_f32(
                 __syncthreads();
             }
 
+            // Apply FP8 E4M3 quant/dequant in shared memory to match CPU Lightning Indexer
+            // Kbuf: [cur, BLOCK_N] row-major, with per-row scale s_K_sf[j]
+            for (int idx = tid; idx < cur * BLOCK_N; idx += stride) {
+                int di = idx / BLOCK_N;
+                int j  = idx % BLOCK_N;
+                float x = Kbuf[di * BLOCK_N + j];
+                float sf = s_K_sf[j];
+                float scaled = x / sf;
+                uint8_t code = f32_to_fp8e4m3(scaled);
+                float dec = fp8e4m3_to_f32(code);
+                Kbuf[di * BLOCK_N + j] = dec;
+            }
+            // Qbuf: contiguous buffer of size cur * BLOCK_Q * hc (layout depends on cp.async)
+            for (int idx = tid; idx < cur * BLOCK_Q * hc; idx += stride) {
+                float x = Qbuf[idx];
+                uint8_t code = f32_to_fp8e4m3(x);
+                float dec = fp8e4m3_to_f32(code);
+                Qbuf[idx] = dec;
+            }
+            __syncthreads();
+
             // Compute partial dot across cur for this (kv_idx, token), accumulating per head
             float * Kcomp = Kbuf;
             for (int di = 0; di < cur; ++di) {
@@ -414,8 +458,9 @@ __global__ void k_indexer_logits_tiled_f32(
         acc += sum_hc;
     }
 
-    // Apply k_scale
-    acc *= k_scale[kv_idx];
+    // Apply combined scale k_scale * K_sf (per-row amax scale) to match CPU FP8 path
+    float sf_row = s_K_sf[k_local];
+    acc *= k_scale[kv_idx] * sf_row;
     Out[kv_idx + (size_t)kv * token] = (starts && ends) ? ((kv_idx >= starts[token] && kv_idx < ends[token]) ? acc : 0.0f) : acc;
 }
 

@@ -215,8 +215,9 @@ int main() {
 #else
     const char *tl_fp8_env = std::getenv("LLAMA_TL_FP8");
     const char *wmma_env = std::getenv("LLAMA_INDEXER_USE_WMMA");
-    bool use_fp8_ref = ( (tl_fp8_env && std::atoi(tl_fp8_env) != 0) ||
-                         (wmma_env && std::atoi(wmma_env) != 0) );
+    // Always use the FP8 Lightning Indexer CPU reference (idx_compute_scores_tile)
+    // as the ground truth for this test, regardless of kernel selection.
+    bool use_fp8_ref = true;
 
     int D=128, H=16, Tc=2, kv=4096, end=kv/4;
     if (tl_fp8_env && std::atoi(tl_fp8_env) != 0) {
