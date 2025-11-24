@@ -51,8 +51,7 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
     ggml_tensor * k_scale_2d,
     int64_t D, int64_t H,
     int64_t Tc, int64_t kv_end,
-    int64_t t0,
-    bool use_fp16) {
+    int64_t t0) {
     const char * __prof_env = getenv("LLAMA_SPARSE_PROF");
     bool prof = (__prof_env && atoi(__prof_env) != 0);
     double t0_us = 0.0;
@@ -184,7 +183,6 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
                 float v = out[(size_t)i + (size_t)kv * (size_t)tc];
                 fprintf(stderr, "  C[%d,%d]= % .6f", i, tc, v);
             }
-            fprintf(stderr, "");
         }
     }
 

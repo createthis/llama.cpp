@@ -32,8 +32,7 @@ struct sparse_attn_indexer {
         ggml_tensor * k_scale_2d,
         int64_t D, int64_t H,
         int64_t Tc, int64_t kv_end,
-        int64_t t0,
-        bool use_fp16);
+        int64_t t0);
 
     // Build KV-aware top-k token indices using the Lightning Indexer tensors.
     // If mctx is nullptr, uses freshly computed K_indexer directly without cache writes.

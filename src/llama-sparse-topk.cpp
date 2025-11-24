@@ -505,7 +505,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                 }
 
                 if (dbg && t0 == 0) {
-                    ggml_tensor * ref_scores = llama::sparse_attn_indexer::idx_compute_scores_tile(ctx, q3d, k_indexer_f16, weights, k_scale_2d, D, H, Tc, kv_end, t0, use_fp16);
+                    ggml_tensor * ref_scores = llama::sparse_attn_indexer::idx_compute_scores_tile(ctx, q3d, k_indexer_f16, weights, k_scale_2d, D, H, Tc, kv_end, t0);
                     ggml_tensor * ref_head = ggml_view_2d(ctx, ref_scores, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), ref_scores->nb[1], 0);
                     cb(ref_head, "idxkv_scores_ref_head", -1);
                     if (gf) { ggml_set_output(ref_head); ggml_build_forward_expand(gf, ref_head); }
@@ -542,7 +542,7 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                 }
 
             } else {
-                scores_tc = llama::sparse_attn_indexer::idx_compute_scores_tile(ctx, q3d, k_indexer_f16, weights, k_scale_2d, D, H, Tc, kv_end, t0, use_fp16);
+                scores_tc = llama::sparse_attn_indexer::idx_compute_scores_tile(ctx, q3d, k_indexer_f16, weights, k_scale_2d, D, H, Tc, kv_end, t0);
             }
         }
 

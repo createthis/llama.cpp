@@ -293,8 +293,7 @@ int main() {
             H_ref,
             Tc_ref,
             kv_ref,
-            /*t0=*/0,
-            /*use_fp16=*/false);
+            /*t0=*/0);
 
         ggml_cgraph * gf_ref = ggml_new_graph(ctx_ref);
         ggml_build_forward_expand(gf_ref, scores_ref);

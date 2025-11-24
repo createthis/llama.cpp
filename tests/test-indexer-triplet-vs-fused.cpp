@@ -139,7 +139,7 @@ int main() {
     ggml_tensor * scores_tc = sparse_attn_indexer::idx_compute_scores_tile(
         cpu_ctx.ctx, q3d, a_k, w2d, k_scale_2d,
         D_index, H_index, T, N_kv,
-        /*t0=*/0, /*use_fp16=*/false);
+        /*t0=*/0);
 
     ggml_cgraph * gf_cpu = ggml_new_graph(cpu_ctx.ctx);
     ggml_build_forward_expand(gf_cpu, scores_tc);

@@ -85,7 +85,7 @@ int main() {
     std::memcpy(ks1d->data, KS.data(), ggml_nbytes(ks1d));
 
     ggml_tensor * scores = sparse_attn_indexer::idx_compute_scores_tile(
-        ctx, q3d, a_k, w2d, ks2d, D, H, Tc, kv, 0, /*use_fp16=*/false);
+        ctx, q3d, a_k, w2d, ks2d, D, H, Tc, kv, 0);
 
     const int iters = 10;
 
