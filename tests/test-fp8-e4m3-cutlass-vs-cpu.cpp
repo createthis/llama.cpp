@@ -11,7 +11,11 @@
 
 using cutlass::float_e4m3_t;
 
-#include "fp8-e4m3-cpu.h"
+extern "C" {
+void ggml_e4m3_to_fp32_row(const uint8_t * x, float * y, int64_t k);
+void ggml_fp32_to_e4m3_row_ref(const float * x, uint8_t * y, int64_t k);
+}
+
 
 static inline uint32_t f32_bits(float x) {
     uint32_t u; std::memcpy(&u, &x, sizeof(u)); return u;
@@ -27,9 +31,10 @@ int main() {
     float max_abs_decode = 0.0f;
     for (int b = 0; b < 256; ++b) {
         uint8_t code = (uint8_t) b;
-        float cpu = fp8e4m3_cpu::convert_fp8_to_float(code);
+        float cpu; ggml_e4m3_to_fp32_row(&code, &cpu, 1);
         float ref = float_e4m3_t::to_float(float_e4m3_t::bitcast(code));
         if (std::isnan(cpu) && std::isnan(ref)) continue;
+        if (cpu == 0.0f && ref == 0.0f) continue; // treat +0 and -0 as equal
         uint32_t bc = f32_bits(cpu);
         uint32_t br = f32_bits(ref);
         if (bc != br) {
@@ -64,7 +69,7 @@ int main() {
     int mism_encode = 0;
     for (int i = 0; i < N; ++i) {
         float x = vals[i];
-        uint8_t c = fp8e4m3_cpu::convert_float_to_fp8(x);
+        uint8_t c; ggml_fp32_to_e4m3_row_ref(&x, &c, 1);
         uint8_t r = float_e4m3_t::from_float(x).storage;
         if (c != r) {
             ++mism_encode;
