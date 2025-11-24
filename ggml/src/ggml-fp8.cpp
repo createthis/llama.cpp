@@ -1,5 +1,7 @@
 #include <cassert>
 #include <algorithm>
+#include <cstring>
+#include <cstdio>
 
 #define GGML_COMMON_DECL_CPP
 #include "ggml-common.h"
@@ -12,8 +14,117 @@ union fp32_int32 {
     uint32_t bits;
 };
 
+
+static inline uint8_t float_to_e4m3_bits(float flt) {
+    constexpr int FP32_NUM_BITS           = 32;
+    constexpr int FP32_NUM_EXPONENT_BITS  = 8;
+    constexpr int FP32_NUM_MANTISSA_BITS  = 23;
+    constexpr uint32_t FP32_NAN           = 0x7fffffffu;
+    constexpr uint32_t FP32_INFINITY_MASK = 0x7f800000u;
+    constexpr int FP32_MAX_EXPONENT       = 127;
+    constexpr int FP32_MIN_EXPONENT       = -126;
+    constexpr int FP32_EXPONENT_BIAS      = 127;
+
+    constexpr int FP8_NUM_BITS            = 8;
+    constexpr int FP8_NUM_EXPONENT_BITS   = 4;
+    constexpr int FP8_NUM_MANTISSA_BITS   = 3;
+    constexpr uint8_t FP8_NAN             = 0x7fu;
+    constexpr uint8_t FP8_INFINITY_MASK   = 0x78u;
+    constexpr int FP8_MAX_EXPONENT        = 7;
+    constexpr int FP8_MIN_EXPONENT        = -6;
+    constexpr int FP8_EXPONENT_BIAS       = 7;
+    constexpr uint8_t FP8_EXPONENT_MASK   = (1u << FP8_NUM_EXPONENT_BITS) - 1u;
+    constexpr uint8_t FP8_MANTISSA_MASK   = (1u << FP8_NUM_MANTISSA_BITS) - 1u;
+    constexpr uint8_t FP8_MAX_FLT         = 0x7eu;
+
+    auto is_nan_f = [](float v) {
+        uint32_t s; std::memcpy(&s, &v, sizeof(s));
+        return (s & 0x7fffffffu) > 0x7f800000u;
+    };
+    auto is_inf_f = [](float v) {
+        uint32_t s; std::memcpy(&s, &v, sizeof(s));
+        return (s == 0x7f800000u) || (s == 0xff800000u);
+    };
+
+    uint32_t s; std::memcpy(&s, &flt, sizeof(s));
+    uint8_t sign = uint8_t((s >> 24) & 0x80u);
+    int32_t exp = int32_t((s >> FP32_NUM_MANTISSA_BITS) & 0xffu) - FP32_EXPONENT_BIAS;
+    int mantissa = int(s & 0x7fffffu);
+    uint8_t u = 0;
+    uint8_t const kF8_NaN = FP8_NAN;
+
+    if (is_nan_f(flt)) {
+        return kF8_NaN;
+    }
+    if (is_inf_f(flt)) {
+        return uint8_t(sign | FP8_MAX_FLT);
+    }
+    if (exp == -128) {
+        return uint8_t(sign | FP8_MAX_FLT);
+    }
+
+    int sticky_bit = 0;
+    bool skip_sign = false;
+    bool may_be_nan = false;
+
+    if (exp >= FP8_MIN_EXPONENT && exp <= FP8_MAX_EXPONENT) {
+        exp = exp + FP8_EXPONENT_BIAS;
+        u = uint8_t((uint32_t(exp) & FP8_EXPONENT_MASK) << FP8_NUM_MANTISSA_BITS);
+        u = uint8_t(u | (mantissa >> (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS)));
+    } else if (exp < FP8_MIN_EXPONENT) {
+        int rshift = (FP8_MIN_EXPONENT - exp);
+        if (rshift < FP32_NUM_BITS) {
+            mantissa |= (1 << FP32_NUM_MANTISSA_BITS);
+            sticky_bit = ((mantissa & ((1 << rshift) - 1)) != 0);
+            mantissa = (mantissa >> rshift);
+            u = uint8_t((mantissa >> (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS)) & FP8_MANTISSA_MASK);
+        } else {
+            mantissa = 0;
+            u = 0;
+        }
+    } else {
+        if (exp == (FP8_MAX_EXPONENT + 1)) {
+            uint8_t mantissa_tmp = uint8_t(mantissa >> (FP32_NUM_MANTISSA_BITS - FP8_NUM_MANTISSA_BITS));
+            if (mantissa_tmp < FP8_MANTISSA_MASK) {
+                exp = exp + FP8_EXPONENT_BIAS;
+                u = uint8_t(uint32_t(exp) << FP8_NUM_MANTISSA_BITS) | mantissa_tmp;
+                may_be_nan = (mantissa_tmp == (FP8_MANTISSA_MASK - 1));
+            } else {
+                return uint8_t(sign | FP8_MAX_FLT);
+            }
+        } else {
+            return uint8_t(sign | FP8_MAX_FLT);
+        }
+    }
+
+    int NUM_BITS_SHIFT = FP32_NUM_MANTISSA_BITS - (FP8_NUM_MANTISSA_BITS + 1);
+    int round_bit = ((mantissa >> NUM_BITS_SHIFT) & 1);
+    sticky_bit |= ((mantissa & ((1 << NUM_BITS_SHIFT) - 1)) != 0);
+
+    if ((round_bit && sticky_bit) || (round_bit && (u & 1))) {
+        u = uint8_t(u + 1);
+        if (may_be_nan) {
+            skip_sign = true;
+        }
+    }
+
+    if (u > FP8_MAX_FLT) {
+        u = uint8_t(sign | FP8_MAX_FLT);
+    }
+    if (!skip_sign) {
+        u = uint8_t(u | sign);
+    }
+    return u;
+}
+
 template<int E>
 inline FP8<E> float_to_fp8(float value) {
+    if constexpr (E == 4) {
+        FP8<E> out;
+        out.bits = float_to_e4m3_bits(value);
+        return out;
+    }
+
     FP8<E> out;
     fp32_int32 in = {value};
     // the sign
@@ -44,6 +155,17 @@ inline FP8<E> float_to_fp8(float value) {
 
 template<int E>
 inline float fp8_to_float(const FP8<E>& in) {
+    if constexpr (E == 4) {
+        const uint8_t v = in.bits;
+        const uint32_t exp = (v >> 3) & 0x0F;
+        const uint32_t mant = v & 0x07;
+        if (exp == 0x0F && mant == 0x07) {
+            fp32_int32 out_nan;
+            out_nan.bits = 0x7fffffff; // FP32_NAN pattern used in tests
+            return out_nan.f;
+        }
+    }
+
     fp32_int32 out = {0};
     out.bits = in.bits & 0x80;
     out.bits <<= 24;
