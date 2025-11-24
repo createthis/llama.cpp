@@ -53,6 +53,13 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
     int64_t Tc, int64_t kv_end,
     int64_t t0,
     bool use_fp16) {
+    const char * __prof_env = getenv("LLAMA_SPARSE_PROF");
+    bool prof = (__prof_env && atoi(__prof_env) != 0);
+    double t0_us = 0.0;
+    if (prof) {
+        t0_us = ggml_time_us();
+    }
+
     ggml_tensor * scores_acc = nullptr;
     long HEAD_CHUNK = H;
 
@@ -209,10 +216,15 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
     std::memcpy(scores_tc->data, out.data(), out.size() * sizeof(float));
     scores_tc->op = GGML_OP_NONE;
 
+    if (prof) {
+        double t1_us = ggml_time_us();
+        double dt_ms = (t1_us - t0_us) / 1000.0;
+        fprintf(stderr, "[PROFILE_IDX_CPU] D=%lld H=%lld Tc=%lld kv=%lld ms=%.3f\n",
+                (long long) D, (long long) H, (long long) Tc, (long long) kv_end, (float) dt_ms);
+    }
+
     return scores_tc;
 }
-
-
 
 IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     ggml_context * ctx,
