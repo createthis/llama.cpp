@@ -96,6 +96,18 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
         }
     }
 
+    // Precompute FP8-dequantized Q: Qq = dequant(quant(Q))
+    std::vector<float> Qq(Q.size());
+    for (int64_t tc = 0; tc < Tc; ++tc) {
+        for (int64_t h = 0; h < H; ++h) {
+            for (int64_t d = 0; d < D; ++d) {
+                size_t idx_q = (size_t)d + (size_t)D * ((size_t)tc * (size_t)H + (size_t)h);
+                Qq[idx_q] = f32_to_e4m3_to_f32(Q[idx_q]);
+            }
+        }
+    }
+
+
     // Pack weights [H, Tc] for this tile: W[h + H*tc]
     std::vector<float> W((size_t)H * (size_t)Tc);
     for (int64_t tc = 0; tc < Tc; ++tc) {
@@ -130,20 +142,31 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
         K_sf[i] = maxv / 448.0f;
     }
 
-    // Compute FP8-like logits into host buffer
+    // Precompute FP8-dequantized K with per-row scaling: Kh = dequant(quant(K / K_sf[row]))
+    std::vector<float> Kh(K.size());
+    for (int64_t i = 0; i < kv; ++i) {
+        float sf = K_sf[i];
+        const float *kvp = K.data() + (size_t)D * (size_t)i;
+        float *khp = Kh.data() + (size_t)D * (size_t)i;
+        for (int64_t d = 0; d < D; ++d) {
+            float v = kvp[d] / sf;
+            khp[d] = f32_to_e4m3_to_f32(v);
+        }
+    }
+
+
+    // Compute FP8-like logits into host buffer using precomputed Qq and Kh
     std::vector<float> out((size_t)kv * (size_t)Tc, 0.0f);
     for (int64_t tc = 0; tc < Tc; ++tc) {
         for (int64_t i = 0; i < kv; ++i) {
             float acc = 0.0f;
-            const float *kvp = K.data() + (size_t)D * (size_t)i;
+            const float *kvp = Kh.data() + (size_t)D * (size_t)i;
             float sf_k = K_sf[i];
             for (int64_t h = 0; h < H; ++h) {
-                const float *qv = Q.data() + (size_t)D * ((size_t)tc * (size_t)H + (size_t)h);
+                const float *qv = Qq.data() + (size_t)D * ((size_t)tc * (size_t)H + (size_t)h);
                 float dot = 0.0f;
                 for (int64_t d = 0; d < D; ++d) {
-                    float qh = f32_to_e4m3_to_f32(qv[d]);
-                    float kh = f32_to_e4m3_to_f32(kvp[d] / sf_k);
-                    dot += qh * kh;
+                    dot += qv[d] * kvp[d];
                 }
                 if (dot < 0.0f) dot = 0.0f; // ReLU
                 acc += dot * W[(size_t)h + (size_t)H * (size_t)tc];
