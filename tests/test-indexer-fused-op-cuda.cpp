@@ -346,12 +346,10 @@ int main() {
         O_cpu.resize((size_t)kv_ref * (size_t)Tc_ref);
         std::memcpy(O_cpu.data(), scores_ref->data, O_cpu.size() * sizeof(float));
 
-        // Optional: emulate FP8 quant/dequant on top of the accurate CPU scores
-        // so that we still exercise the FP8 code path while using numerically
-        // stable reference values.
-        for (size_t i = 0; i < O_cpu.size(); ++i) {
-            O_cpu[i] = f32_to_fp8e4m3_to_f32(O_cpu[i]);
-        }
+        // NOTE: idx_compute_scores_tile already mirrors the TL FP8 math when
+        // LLAMA_TL_FP8 is enabled, so we no longer apply an extra f32->fp8->f32
+        // round-trip on the final scores here. This keeps the CPU reference
+        // numerically aligned with the TileLang CUDA kernel output.
 
         ggml_free(ctx_ref);
     } else if (use_bf16_ref) {

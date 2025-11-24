@@ -41,6 +41,8 @@ int main() {
             ++mism_decode;
             float da = std::fabs(cpu - ref);
             if (da > max_abs_decode) max_abs_decode = da;
+            std::printf("DECODE MISM b=%3d code=0x%02x cpu=%08x ref=%08x cpu=%g ref=%g isNaN(cpu)=%d isNaN(ref)=%d\n",
+                        b, code, bc, br, cpu, ref, std::isnan(cpu), std::isnan(ref));
         }
     }
     std::printf("FP8 E4M3 decode mismatches=%d max_abs_diff=%.6f\n", mism_decode, max_abs_decode);
