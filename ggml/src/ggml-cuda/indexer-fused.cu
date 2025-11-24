@@ -730,6 +730,21 @@ __global__ __launch_bounds__(640, 1) void k_tl_mqa_attn_return_logits_port(
   }
 }
 
+// Device-side FP8 E4M3 helpers using native PTX conversions
+static __device__ __forceinline__ uint8_t f32_to_fp8e4m3(float x) {
+    uint16_t tmp;
+    float zero = 0.0f;
+    asm volatile("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(tmp) : "f"(zero), "f"(x));
+    return static_cast<uint8_t>(tmp & 0xFFu);
+}
+
+static __device__ __forceinline__ float fp8e4m3_to_f32(uint8_t code) {
+    uint16_t bits = code;
+    uint32_t packed;
+    asm volatile("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(packed) : "h"(bits));
+    return __half2float(reinterpret_cast<half2 const &>(packed).x);
+}
+
 // WMMA 16x16x16 BF16 (float input cast to bf16), one warp per block
 __global__ void k_indexer_logits_wmma16_bf16(
     const float * __restrict__ Q, // [D, Tc*H]
@@ -773,39 +788,73 @@ __global__ void k_indexer_logits_wmma16_bf16(
         }
     }
 
+    // Per-row K scale (amax/448) for 16-row tile
+    __shared__ float K_sf[16];
+    int lane = threadIdx.x & 31;
+    if (lane < 16) K_sf[lane] = 1.0f;
+    __syncthreads();
+    for (int mi = 0; mi < 16; ++mi) {
+        int kv_idx = k0 + mi;
+        float local_max = 0.0f;
+        if (kv_idx < kv) {
+            for (int d0 = lane; d0 < D; d0 += 32) {
+                float v = K[(size_t)d0 + (size_t)D * (size_t)kv_idx];
+                float av = fabsf(v);
+                if (av > local_max) local_max = av;
+            }
+        }
+        for (int off = 16; off > 0; off >>= 1) {
+            float other = __shfl_down_sync(0xffffffff, local_max, off);
+            if (other > local_max) local_max = other;
+        }
+        if (lane == 0 && kv_idx < kv) {
+            float maxv = local_max;
+            if (maxv < 1e-4f) maxv = 1e-4f;
+            K_sf[mi] = maxv / 448.0f;
+        }
+        __syncwarp();
+    }
+    __syncthreads();
 
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
     wmma::fill_fragment(c_frag, 0.0f);
 
     __shared__ __nv_bfloat16 A_sh[16*16]; // row-major
     __shared__ __nv_bfloat16 B_sh[16*16]; // col-major
+    __shared__ float         C_sh[16*16];
 
     // Iterate K dimension in 16-slices
     for (int d0 = 0; d0 < D; d0 += 16) {
-        int lane = threadIdx.x & 31;
-        // Load A_sh
-        for (int idx = lane; idx < 16*16; idx += 32) {
+        int lane2 = threadIdx.x & 31;
+        // Load A_sh with FP8 quant/dequant and per-row scaling
+        for (int idx = lane2; idx < 16*16; idx += 32) {
             int mi = idx / 16;
             int di = idx % 16;
             int kv_idx = k0 + mi;
             __nv_bfloat16 v = __float2bfloat16(0.0f);
             if (kv_idx < kv && d0 + di < D) {
-                float f = K[(size_t)(d0 + di) + (size_t)D * kv_idx];
-                v = __float2bfloat16(f);
+                float f = K[(size_t)(d0 + di) + (size_t)D * (size_t)kv_idx];
+                float sf = K_sf[mi];
+                float scaled = f / sf;
+                uint8_t code = f32_to_fp8e4m3(scaled);
+                float dec = fp8e4m3_to_f32(code);
+                v = __float2bfloat16(dec);
             }
             A_sh[mi * 16 + di] = v;
         }
-        // Load B_sh (col-major)
-        for (int idx = lane; idx < 16*16; idx += 32) {
+        // Load B_sh (col-major) with FP8 quant/dequant
+        for (int idx = lane2; idx < 16*16; idx += 32) {
             int di = idx / 16; // k index
             int cj = idx % 16; // column index 0..15 => (tok_local,h)
             int tok_local = cj / H;
             int h = cj % H;
             int tok = t0 + tok_local;
             __nv_bfloat16 v = __float2bfloat16(0.0f);
-            if (tok < Tc && d0 + di < D) {
-                float f = Q[(size_t)(d0 + di) + (size_t)D * (tok*H + h)];
-                v = __float2bfloat16(f);
+            if (tok < Tc && h < H && d0 + di < D) {
+                float f = Q[(size_t)(d0 + di) + (size_t)D * (size_t)(tok*H + h)];
+                uint8_t code = f32_to_fp8e4m3(f);
+                float dec = fp8e4m3_to_f32(code);
+                v = __float2bfloat16(dec);
             }
             B_sh[cj * 16 + di] = v;
         }
@@ -819,12 +868,11 @@ __global__ void k_indexer_logits_wmma16_bf16(
         __syncthreads();
     }
 
-    __shared__ float C_sh[16*16];
     wmma::store_matrix_sync(C_sh, c_frag, 16, wmma::mem_row_major);
     __syncthreads();
 
-    int lane = threadIdx.x & 31;
-    for (int idx = lane; idx < 16 * tokens_per_tile; idx += 32) {
+    int lane3 = threadIdx.x & 31;
+    for (int idx = lane3; idx < 16 * tokens_per_tile; idx += 32) {
         int mi = idx / tokens_per_tile;
         int tl = idx % tokens_per_tile;
         int kv_idx = k0 + mi;
@@ -833,15 +881,13 @@ __global__ void k_indexer_logits_wmma16_bf16(
             float s = 0.0f;
             int col_base = tl * H;
             for (int h = 0; h < H; ++h) {
-
-                // Warp-cooperative kernel: one warp computes all tokens (Tc) for one kv row.
-                // Reuses K across all heads and tokens; accumulates H*Tc partial dots in registers.
                 float v = C_sh[mi * 16 + (col_base + h)];
                 if (v < 0.0f) v = 0.0f;
                 float w = W[h + (size_t)H * tok];
                 s += v * w;
             }
-            s *= k_scale[kv_idx];
+            // Apply combined scale k_scale * K_sf, matching CPU FP8 path
+            s *= k_scale[kv_idx] * K_sf[mi];
             if (starts != nullptr && ends != nullptr) {
                 int s0 = starts[tok];
                 int e0 = ends[tok];
@@ -856,25 +902,6 @@ __global__ void k_indexer_logits_wmma16_bf16(
         }
     }
 #endif
-}
-
-
-
-
-
-// Device-side FP8 E4M3 helpers using native PTX conversions
-static __device__ __forceinline__ uint8_t f32_to_fp8e4m3(float x) {
-    uint16_t tmp;
-    float zero = 0.0f;
-    asm volatile("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(tmp) : "f"(zero), "f"(x));
-    return static_cast<uint8_t>(tmp & 0xFFu);
-}
-
-static __device__ __forceinline__ float fp8e4m3_to_f32(uint8_t code) {
-    uint16_t bits = code;
-    uint32_t packed;
-    asm volatile("cvt.rn.f16x2.e4m3x2 %0, %1;\n" : "=r"(packed) : "h"(bits));
-    return __half2float(reinterpret_cast<half2 const &>(packed).x);
 }
 
 // WMMA 16x16 with head grouping: supports H multiple of 16
