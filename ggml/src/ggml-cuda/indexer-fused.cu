@@ -12,6 +12,7 @@ using namespace nvcuda;
 #include <mma.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <vector>
 #include "../../include/ggml-cuda-indexer.h"
 
 struct fp8_e4_t;
@@ -1054,6 +1055,10 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
               CUDA_CHECK(cudaMemcpyAsync(dKE_i, dEnds,   sizeof(int)*(size_t)Tc, cudaMemcpyDeviceToDevice, stream));
           }
           if (use_tma_fp8) {
+              if (getenv("LLAMA_INDEXER_TL_FP8_DEBUG")) {
+                  fprintf(stderr, "[TL_FP8_DBG] entering TL FP8 path: D=%d H=%d Tc=%d kv=%d\n", D, H, Tc, kv_end);
+                  fflush(stderr);
+              }
               static bool __tl_fp8_init_done = false;
               static int  __tl_fp8_init_status = 0;
               if (!__tl_fp8_init_done) {
@@ -1084,8 +1089,30 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
               dim3 gdW((Tc + tbT.x - 1)/tbT.x, (H + tbT.y - 1)/tbT.y);
               // Convert GGML column-major to row-major layouts matching TileLang kernel
               k_colmajor_DN_to_rowmajor_ND<<<gdQ, tbT, 0, stream>>>(dQ, D, Tc*H, dQrm);
+              if (getenv("LLAMA_INDEXER_TL_FP8_DEBUG")) {
+                  std::vector<float> hQrm((size_t)(Tc*H)*(size_t)D);
+                  cudaMemcpy(hQrm.data(), dQrm, hQrm.size()*sizeof(float), cudaMemcpyDeviceToHost);
+                  int maxd = D < 8 ? D : 8;
+                  fprintf(stderr, "[TL_FP8_DBG] Qrm[0,0..%d]:", maxd-1);
+                  for (int d0 = 0; d0 < maxd; ++d0) fprintf(stderr, " % .6f", hQrm[d0]);
+                  fprintf(stderr, "\n");
+              }
               k_colmajor_DN_to_rowmajor_ND<<<gdK, tbT, 0, stream>>>(dK, D, kv_end, dKrm);
               k_colmajor_DN_to_rowmajor_ND<<<gdW, tbT, 0, stream>>>(dW, H, Tc, dWrm);
+              if (getenv("LLAMA_INDEXER_TL_FP8_DEBUG")) {
+                  std::vector<float> hKrm((size_t)kv_end*(size_t)D);
+                  cudaMemcpy(hKrm.data(), dKrm, hKrm.size()*sizeof(float), cudaMemcpyDeviceToHost);
+                  int maxd = D < 8 ? D : 8;
+                  fprintf(stderr, "[TL_FP8_DBG] Krm[0,0..%d]:", maxd-1);
+                  for (int d0 = 0; d0 < maxd; ++d0) fprintf(stderr, " % .6f", hKrm[d0]);
+                  fprintf(stderr, "\n");
+                  std::vector<float> hWrm((size_t)Tc*(size_t)H);
+                  cudaMemcpy(hWrm.data(), dWrm, hWrm.size()*sizeof(float), cudaMemcpyDeviceToHost);
+                  int maxh = H < 8 ? H : 8;
+                  fprintf(stderr, "[TL_FP8_DBG] Wrm[0,0..%d] for token0:", maxh-1);
+                  for (int h0 = 0; h0 < maxh; ++h0) fprintf(stderr, " % .6f", hWrm[h0]);
+                  fprintf(stderr, "\n");
+              }
               // Q: direct FP8 cast (no per-row scaling, as in TileLang test)
               {
                   size_t Qtotal = (size_t)(Tc*H) * (size_t)D;
@@ -1110,7 +1137,26 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                   // Combine GGML k_scale (dKS) with FP8 per-row scale into effective IndexKScale
                   k_elemwise_mul<<<blocksAmax, threadsAmax, 0, stream>>>(dKS, dKsf, dIdxKScale, rowsK);
                   CUDA_CHECK(cudaGetLastError());
+                  if (getenv("LLAMA_INDEXER_TL_FP8_DEBUG")) {
+                      std::vector<float> hKS(rowsK);
+                      std::vector<float> hKsf(rowsK);
+                      std::vector<float> hIdxKScale(rowsK);
+                      cudaMemcpy(hKS.data(), dKS, rowsK*sizeof(float), cudaMemcpyDeviceToHost);
+                      cudaMemcpy(hKsf.data(), dKsf, rowsK*sizeof(float), cudaMemcpyDeviceToHost);
+                      cudaMemcpy(hIdxKScale.data(), dIdxKScale, rowsK*sizeof(float), cudaMemcpyDeviceToHost);
+                      int maxr = rowsK < 8 ? rowsK : 8;
+                      fprintf(stderr, "[TL_FP8_DBG] KS[0..%d]:", maxr-1);
+                      for (int i = 0; i < maxr; ++i) fprintf(stderr, " % .6f", hKS[i]);
+                      fprintf(stderr, "\n");
+                      fprintf(stderr, "[TL_FP8_DBG] Ksf[0..%d]:", maxr-1);
+                      for (int i = 0; i < maxr; ++i) fprintf(stderr, " % .6f", hKsf[i]);
+                      fprintf(stderr, "\n");
+                      fprintf(stderr, "[TL_FP8_DBG] IdxKScale[0..%d]:", maxr-1);
+                      for (int i = 0; i < maxr; ++i) fprintf(stderr, " % .6f", hIdxKScale[i]);
+                      fprintf(stderr, "\n");
+                  }
               }
+
               int __tl_call_status = 0;
               LAUNCH_PROFILE_KERNEL("PROFILE_TL_FP8_KONLY", TL_ONLY, stream, ([&](){
                           __tl_call_status = call(reinterpret_cast<fp8_e4_t*>(dQfp8), reinterpret_cast<fp8_e4_t*>(dKfp8),
@@ -1128,10 +1174,33 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
               dim3 tgrid((Tc + tblock.x - 1)/tblock.x, (kv_end + tblock.y - 1)/tblock.y);
               k_transpose_TcKv_to_KvTc<<<tgrid, tblock, 0, stream>>>(dLogits, Tc, kv_end, dOut);
               CUDA_CHECK(cudaGetLastError());
+              if (getenv("LLAMA_INDEXER_TL_FP8_DEBUG")) {
+                  std::vector<float> hLogits((size_t)Tc*(size_t)kv_end);
+                  cudaMemcpy(hLogits.data(), dOut, hLogits.size()*sizeof(float), cudaMemcpyDeviceToHost);
+                  int maxk = kv_end < 8 ? kv_end : 8;
+                  int maxt = Tc < 2 ? Tc : 2;
+                  fprintf(stderr, "[TL_FP8_DBG] Logits (kv x T) sample:\n");
+                  for (int k = 0; k < maxk; ++k) {
+                      for (int t = 0; t < maxt; ++t) {
+                          float v = hLogits[k + (size_t)kv_end * t];
+                          fprintf(stderr, "  L[%d,%d]=% .6f", k, t, v);
+                      }
+                      fprintf(stderr, "\n");
+                  }
+              }
+
           } else {
               dim3 tbT(32, 8);
               dim3 gdQ((Tc*H + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
               k_colmajor_DN_to_rowmajor_ND<<<gdQ, tbT, 0, stream>>>(dQ, D, Tc*H, dQrm);
+              if (getenv("LLAMA_INDEXER_TL_FP8_DEBUG")) {
+                  std::vector<float> hQrm((size_t)(Tc*H)*(size_t)D);
+                  cudaMemcpy(hQrm.data(), dQrm, hQrm.size()*sizeof(float), cudaMemcpyDeviceToHost);
+                  int maxd = D < 8 ? D : 8;
+                  fprintf(stderr, "[TL_FP8_DBG] Qrm[0,0..%d]:", maxd-1);
+                  for (int d0 = 0; d0 < maxd; ++d0) fprintf(stderr, " % .6f", hQrm[d0]);
+                  fprintf(stderr, "\n");
+              }
               dim3 gdK((kv_end + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
               k_colmajor_DN_to_rowmajor_ND<<<gdK, tbT, 0, stream>>>(dK, D, kv_end, dKrm);
               dim3 gdW((Tc + tbT.x - 1)/tbT.x, (H + tbT.y - 1)/tbT.y);

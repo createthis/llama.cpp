@@ -17,19 +17,12 @@ union fp32_int32 {
 
 static inline uint8_t float_to_e4m3_bits(float flt) {
     constexpr int FP32_NUM_BITS           = 32;
-    constexpr int FP32_NUM_EXPONENT_BITS  = 8;
     constexpr int FP32_NUM_MANTISSA_BITS  = 23;
-    constexpr uint32_t FP32_NAN           = 0x7fffffffu;
-    constexpr uint32_t FP32_INFINITY_MASK = 0x7f800000u;
-    constexpr int FP32_MAX_EXPONENT       = 127;
-    constexpr int FP32_MIN_EXPONENT       = -126;
     constexpr int FP32_EXPONENT_BIAS      = 127;
 
-    constexpr int FP8_NUM_BITS            = 8;
     constexpr int FP8_NUM_EXPONENT_BITS   = 4;
     constexpr int FP8_NUM_MANTISSA_BITS   = 3;
     constexpr uint8_t FP8_NAN             = 0x7fu;
-    constexpr uint8_t FP8_INFINITY_MASK   = 0x78u;
     constexpr int FP8_MAX_EXPONENT        = 7;
     constexpr int FP8_MIN_EXPONENT        = -6;
     constexpr int FP8_EXPONENT_BIAS       = 7;
