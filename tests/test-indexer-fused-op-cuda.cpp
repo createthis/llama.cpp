@@ -90,7 +90,6 @@ static inline float f32_to_bf16_to_f32(float x) {
 }
 
 
-#include "fp8-e4m3-cpu.h"
 
 static void cpu_indexer_logits_bf16like(const float *Q, const float *K, const float *W, const float *k_scale,
                                        int D, int H, int Tc, int kv, std::vector<float> &out) {
@@ -154,55 +153,6 @@ static void cpu_indexer_logits(const float *Q, const float *K, const float *W, c
                 acc += dot * W[h + (size_t)H*tc];
             }
             out[i + (size_t)kv*tc] = acc * k_scale[i];
-        }
-    }
-}
-
-static void cpu_indexer_logits_fp8like(const float *Q, const float *K, const float *W, const float *k_scale,
-                                          int D, int H, int Tc, int kv, std::vector<float> &out) {
-    out.assign((size_t)kv*Tc, 0.0f);
-    // Host-side FP8-like reference for TL_FP8 path.
-    // We use the same E4M3 quantization math as the CUDA helper in llama.pp.cu
-    // (see float_e4m3_t::from_float / to_float), approximated here by
-    // fp8e4m3_cpu::convert_float_to_fp8 / convert_fp8_to_float acting on float.
-
-    // Per-row amax and scale for K: match device kernels k_rowmajor_f32_rowwise_absmax
-    // and k_fp8_compute_row_scales up to the FP8 dynamic range choice.
-    std::vector<float> K_amax(kv, 0.0f);
-    std::vector<float> K_sf(kv, 0.0f);
-    for (int i = 0; i < kv; ++i) {
-        float maxv = 0.0f;
-        const float *kvp = K + (size_t)D * i;
-        for (int d = 0; d < D; ++d) {
-            float v = std::fabs(kvp[d]);
-            if (v > maxv) maxv = v;
-        }
-        if (maxv < 1e-4f) maxv = 1e-4f;
-        K_amax[i] = maxv;
-        // DEVICE: s = amax/448; here we reuse the same 448 constant
-        K_sf[i]   = maxv / 448.0f;
-    }
-
-    for (int tc = 0; tc < Tc; ++tc) {
-        for (int i = 0; i < kv; ++i) {
-            float acc = 0.0f;
-            const float *kvp = K + (size_t)D * i;
-            float sf_k = K_sf[i];
-            for (int h = 0; h < H; ++h) {
-                const float *qv = Q + (size_t)D * (tc*H + h);
-                float dot = 0.0f;
-                for (int d = 0; d < D; ++d) {
-                    // Q: direct E4M3 quant/dequant
-                    float qh = f32_to_fp8e4m3_to_f32(qv[d]);
-                    // K: per-row scaled by sf_k before quantization, as in device path
-                    float kh = f32_to_fp8e4m3_to_f32(kvp[d] / sf_k);
-                    dot += qh * kh;
-                }
-                if (dot < 0.0f) dot = 0.0f; // ReLU
-                acc += dot * W[h + (size_t)H * tc];
-            }
-            // Effective scale absorbs both device-side fp8 K scale and IndexKScale
-            out[i + (size_t)kv * tc] = acc * k_scale[i] * sf_k;
         }
     }
 }
