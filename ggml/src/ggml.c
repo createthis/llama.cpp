@@ -9,6 +9,7 @@
 
 // FIXME: required here for quantization functions
 #include "ggml-quants.h"
+#include "ggml-fp8.h"
 
 #ifdef GGML_USE_CPU_HBM
 #include <hbwmalloc.h>
@@ -23,6 +24,8 @@
 #include <assert.h>
 #include <errno.h>
 #include <time.h>
+#include <inttypes.h>
+
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -873,6 +876,38 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .type_size                = 0,
         .is_quantized             = false,
     },
+    [GGML_TYPE_E5M2] = {
+        .type_name                = "fp8_e5m2",
+        .blck_size                = 1,
+        .type_size                = sizeof(ggml_e5m2_t),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) ggml_e5m2_to_fp32_row,
+        .from_float_ref           = (ggml_from_float_t) ggml_fp32_to_e5m2_row_ref,
+    },
+    [GGML_TYPE_E4M3] = {
+        .type_name                = "fp8_e4m3",
+        .blck_size                = 1,
+        .type_size                = sizeof(ggml_e4m3_t),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) ggml_e4m3_to_fp32_row,
+        .from_float_ref           = (ggml_from_float_t) ggml_fp32_to_e4m3_row_ref,
+    },
+    [GGML_TYPE_E4M3_Q] = {
+        .type_name                = "fp8_e4m3_q",
+        .blck_size                = QK_K,
+        .type_size                = sizeof(block_e4m3_q),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_e4m3_q,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_e4m3_q_ref,
+    },
+    [GGML_TYPE_E3M4_Q] = {
+        .type_name                = "fp8_e3m4_q",
+        .blck_size                = QK_K,
+        .type_size                = sizeof(block_e3m4_q),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_e3m4_q,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_e3m4_q_ref,
+    },
 };
 
 const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {
@@ -1016,10 +1051,12 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_ADAMW",
     "OPT_STEP_SGD",
 
+    "SPARSE_TOPK_RADIX",
+    "INDEXER_FUSED",
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 90, "GGML_OP_COUNT != 90");
+static_assert(GGML_OP_COUNT == 93, "GGML_OP_COUNT != 92");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1120,10 +1157,12 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "adamw(x)",
     "sgd(x)",
 
+    "sparse_topk_radix(x)",
+    "indexer_fused(x)",
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 90, "GGML_OP_COUNT != 90");
+static_assert(GGML_OP_COUNT == 93, "GGML_OP_COUNT != 92");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -1340,6 +1379,10 @@ enum ggml_type ggml_ftype_to_ggml_type(enum ggml_ftype ftype) {
         case GGML_FTYPE_MOSTLY_IQ4_XS:        wtype = GGML_TYPE_IQ4_XS;   break;
         case GGML_FTYPE_MOSTLY_IQ3_S:         wtype = GGML_TYPE_IQ3_S;    break;
         case GGML_FTYPE_MOSTLY_IQ2_S:         wtype = GGML_TYPE_IQ2_S;    break;
+        case GGML_FTYPE_MOSTLY_E5M2:          wtype = GGML_TYPE_E5M2;     break;
+        case GGML_FTYPE_MOSTLY_E4M3:          wtype = GGML_TYPE_E4M3;     break;
+        case GGML_FTYPE_MOSTLY_E4M3_Q:        wtype = GGML_TYPE_E4M3_Q;   break;
+        case GGML_FTYPE_MOSTLY_E3M4_Q:        wtype = GGML_TYPE_E3M4_Q;   break;
         case GGML_FTYPE_UNKNOWN:              wtype = GGML_TYPE_COUNT; break;
         case GGML_FTYPE_MOSTLY_Q4_1_SOME_F16: wtype = GGML_TYPE_COUNT; break;
     }
@@ -1919,6 +1962,11 @@ static struct ggml_tensor * ggml_add_impl(
         struct ggml_tensor  * b,
         bool                  inplace) {
     GGML_ASSERT(ggml_can_repeat(b, a));
+
+    // Ensure RHS has CUDA-friendly stride alignment for broadcast add
+    if (ggml_type_size(b->type) > 0 && (b->nb[1] % ggml_type_size(b->type)) != 0) {
+        b = ggml_cont(ctx, b);
+    }
 
     struct ggml_tensor * result = inplace ? ggml_view_tensor(ctx, a) : ggml_dup_tensor(ctx, a);
 
@@ -3394,6 +3442,12 @@ struct ggml_tensor * ggml_reshape_2d(
         int64_t               ne0,
         int64_t               ne1) {
     GGML_ASSERT(ggml_is_contiguous(a));
+    /*
+    printf("ggml_reshape_2d: a=[%5" PRId64 ", %5" PRId64 "], ne0=%5" PRId64 ", ne1=%5" PRId64 "\n",
+                a->ne[0], a->ne[1],
+                ne0, ne1);
+    fflush(stdout);
+    */
     GGML_ASSERT(ggml_nelements(a) == ne0*ne1);
 
     const int64_t ne[2] = { ne0, ne1 };
@@ -3413,6 +3467,12 @@ struct ggml_tensor * ggml_reshape_3d(
         int64_t               ne1,
         int64_t               ne2) {
     GGML_ASSERT(ggml_is_contiguous(a));
+    /*
+    printf("ggml_reshape_3d: a=[%5" PRId64 ", %5" PRId64 ", %5" PRId64 "], ne0=%5" PRId64 ", ne1=%5" PRId64 ", ne2=%5" PRId64 "\n",
+                a->ne[0], a->ne[1], a->ne[2],
+                ne0, ne1, ne2);
+    fflush(stdout);
+    */
     GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2);
 
     const int64_t ne[3] = { ne0, ne1, ne2 };
@@ -7152,6 +7212,26 @@ size_t ggml_quantize_chunk(
         case GGML_TYPE_IQ1_M:   result = quantize_iq1_m  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ4_NL:  result = quantize_iq4_nl (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ4_XS:  result = quantize_iq4_xs (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_E5M2  :
+            {   // move to ggml-cpu.c : type_traits[type].from_float(src + start, (char *) dst + start_row * row_size, (int64_t)nrows*n_per_row);
+                ggml_fp32_to_e5m2_row_ref(src + start, (ggml_e5m2_t*)((char *) dst + start_row * row_size), (int64_t)nrows*n_per_row);
+                result = nrows * row_size;
+            } break;
+        case GGML_TYPE_E4M3  :
+            {   // move to ggml-cpu.c : type_traits[type].from_float(src + start, (char *) dst + start_row * row_size, (int64_t)nrows*n_per_row);
+                ggml_fp32_to_e4m3_row_ref(src + start, (ggml_e4m3_t*)((char *) dst + start_row * row_size), (int64_t)nrows*n_per_row);
+                result = nrows * row_size;
+            } break;
+        case GGML_TYPE_E4M3_Q:
+            {   // move to ggml-cpu.c : type_traits[type].from_float(src + start, (char *) dst + start_row * row_size, (int64_t)nrows*n_per_row);
+                quantize_row_e4m3_q_ref(src + start, (block_e4m3_q*)((char *) dst + start_row * row_size), (int64_t)nrows*n_per_row);
+                result = nrows * row_size;
+            } break;
+        case GGML_TYPE_E3M4_Q:
+            {   // move to ggml-cpu.c : type_traits[type].from_float(src + start, (char *) dst + start_row * row_size, (int64_t)nrows*n_per_row);
+                quantize_row_e3m4_q_ref(src + start, (block_e3m4_q*)((char *) dst + start_row * row_size), (int64_t)nrows*n_per_row);
+                result = nrows * row_size;
+            } break;
         case GGML_TYPE_F16:
             {
                 size_t elemsize = sizeof(ggml_fp16_t);
@@ -7207,4 +7287,143 @@ bool ggml_threadpool_params_match(const struct ggml_threadpool_params * p0, cons
     if (p0->poll           != p1->poll       )    return false;
     if (p0->strict_cpu     != p1->strict_cpu )    return false;
     return memcmp(p0->cpumask, p1->cpumask, GGML_MAX_N_THREADS) == 0;
+}
+
+
+// ggml_sparse_topk_radix
+
+GGML_API struct ggml_tensor * ggml_sparse_topk_radix(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * scores,
+        int                   k) {
+    GGML_ASSERT(scores->type == GGML_TYPE_F32 || scores->type == GGML_TYPE_F16);
+    GGML_ASSERT(scores->ne[2] == 1 && scores->ne[3] == 1);
+    GGML_ASSERT(k > 0 && k <= scores->ne[0]);
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, k, scores->ne[1]);
+    ggml_set_op_params_i32(result, 0, k);
+    result->op     = GGML_OP_SPARSE_TOPK_RADIX;
+    result->src[0] = scores;
+    return result;
+}
+
+// ggml_indexer_logits_fused
+GGML_API struct ggml_tensor * ggml_indexer_logits_fused(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q2d,
+        struct ggml_tensor  * k2d,
+        struct ggml_tensor  * w2d,
+        struct ggml_tensor  * k_scale) {
+    GGML_ASSERT(q2d->type == GGML_TYPE_F32 || q2d->type == GGML_TYPE_F16 || q2d->type == GGML_TYPE_BF16);
+    GGML_ASSERT(k2d->type == GGML_TYPE_F32 || k2d->type == GGML_TYPE_F16 || k2d->type == GGML_TYPE_BF16);
+    GGML_ASSERT(w2d->type == GGML_TYPE_F32);
+    GGML_ASSERT(k_scale->type == GGML_TYPE_F32);
+    // Shapes: q2d:[D, Tc*H], k2d:[D, kv], w2d:[H, Tc], k_scale:[kv,1] or [kv]
+    GGML_ASSERT(q2d->ne[0] == k2d->ne[0]);
+    const int64_t D   = q2d->ne[0];
+    const int64_t TcH = q2d->ne[1];
+    const int64_t kv  = k2d->ne[1];
+    const int64_t Tc  = w2d->ne[1];
+    const int64_t H   = w2d->ne[0];
+    GGML_ASSERT(TcH == Tc*H);
+
+    struct ggml_tensor * out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, kv, Tc);
+    out->op      = GGML_OP_INDEXER_FUSED;
+    out->src[0]  = q2d;
+    out->src[1]  = k2d;
+    out->src[2]  = w2d;
+    out->src[3]  = k_scale;
+    (void)D; // silence unused warning in this TU
+    return out;
+}
+
+// ggml_indexer_logits_fused_ex
+GGML_API struct ggml_tensor * ggml_indexer_logits_fused_ex(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q2d,
+        struct ggml_tensor  * k2d,
+        struct ggml_tensor  * w2d,
+        struct ggml_tensor  * k_scale,
+        struct ggml_tensor  * starts,
+        struct ggml_tensor  * ends) {
+    GGML_ASSERT(q2d->type == GGML_TYPE_F32 || q2d->type == GGML_TYPE_F16 || q2d->type == GGML_TYPE_BF16);
+    GGML_ASSERT(k2d->type == GGML_TYPE_F32 || k2d->type == GGML_TYPE_F16 || k2d->type == GGML_TYPE_BF16);
+    GGML_ASSERT(w2d->type == GGML_TYPE_F32);
+    GGML_ASSERT(k_scale->type == GGML_TYPE_F32);
+    // Shapes: q2d:[D, Tc*H], k2d:[D, kv], w2d:[H, Tc], k_scale:[kv,1] or [kv]
+    GGML_ASSERT(q2d->ne[0] == k2d->ne[0]);
+    const int64_t D   = q2d->ne[0];
+    const int64_t TcH = q2d->ne[1];
+    const int64_t kv  = k2d->ne[1];
+    const int64_t Tc  = w2d->ne[1];
+    const int64_t H   = w2d->ne[0];
+    GGML_ASSERT(TcH == Tc*H);
+
+    struct ggml_tensor * out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, kv, Tc);
+    out->op      = GGML_OP_INDEXER_FUSED;
+    out->src[0]  = q2d;
+    out->src[1]  = k2d;
+    out->src[2]  = w2d;
+    out->src[3]  = k_scale;
+    out->src[4]  = starts;
+    out->src[5]  = ends;
+    (void)D;
+    return out;
+}
+
+
+
+// ggml_sparse_mla_decode_fused
+GGML_API struct ggml_tensor * ggml_sparse_mla_decode_fused(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q2d,        // [Dq, Hq]
+        struct ggml_tensor  * k_cache,    // [Dk, Hkv, N_kv]
+        struct ggml_tensor  * v_cache,    // [Dv, Hkv, N_kv]
+        struct ggml_tensor  * idx_topk,   // [K]
+        float                 kq_scale,
+        float                 attn_softcap) {
+    GGML_ASSERT(q2d->ne[2] == 1 && q2d->ne[3] == 1);
+    GGML_ASSERT(k_cache->ne[2] == v_cache->ne[2]);
+    GGML_ASSERT(k_cache->ne[1] == v_cache->ne[1]);
+    struct ggml_tensor * out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, v_cache->ne[0], q2d->ne[1]); // [Dv, Hq]
+    out->op      = GGML_OP_SPARSE_MLA_DECODE;
+    out->src[0]  = q2d;
+    out->src[1]  = k_cache;
+    out->src[2]  = v_cache;
+    out->src[3]  = idx_topk;
+    ggml_set_op_params_f32(out, 0, kq_scale);
+    ggml_set_op_params_f32(out, 1, attn_softcap);
+    return out;
+}
+
+
+
+GGML_API struct ggml_tensor * ggml_sparse_topk_radix_ex(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * scores,
+        int                   k,
+        struct ggml_tensor  * starts,
+        struct ggml_tensor  * ends) {
+    GGML_ASSERT(scores->type == GGML_TYPE_F32 || scores->type == GGML_TYPE_F16);
+    GGML_ASSERT(scores->ne[2] == 1 && scores->ne[3] == 1);
+    GGML_ASSERT(k > 0 && k <= scores->ne[0]);
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, k, scores->ne[1]);
+    ggml_set_op_params_i32(result, 0, k);
+    result->op     = GGML_OP_SPARSE_TOPK_RADIX;
+    result->src[0] = scores;
+    // Thread optional starts/ends to backend via src[1]/src[2]; CPU path ignores them
+    if (starts) {
+        // starts must be 1D of length T (scores->ne[1])
+        GGML_ASSERT(starts->ne[0] == scores->ne[1]);
+        result->src[1] = starts;
+    } else {
+        result->src[1] = NULL;
+    }
+    if (ends) {
+        GGML_ASSERT(ends->ne[0] == scores->ne[1]);
+        result->src[2] = ends;
+    } else {
+        result->src[2] = NULL;
+    }
+    return result;
 }

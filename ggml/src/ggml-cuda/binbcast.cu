@@ -1,6 +1,7 @@
 #include "binbcast.cuh"
 #include <cstdint>
 #include <utility>
+#include <cstdio>
 
 static __device__ __forceinline__ float op_repeat(const float a, const float b) {
     return b;

@@ -206,6 +206,7 @@ add_library(ggml-base
             ggml-threading.h
             ggml-quants.c
             ggml-quants.h
+            ggml-fp8.cpp
             gguf.cpp)
 
 target_include_directories(ggml-base PRIVATE .)

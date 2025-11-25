@@ -226,3 +226,44 @@ target_link_libraries(${TEST_TARGET} PRIVATE llama)
 
 llama_build_and_test(test-alloc.cpp)
 target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
+
+
+# Unit test for sparse_attn_indexer::idx_compute_scores_tile
+llama_build_and_test(test-indexer-scores-tile.cpp)
+target_include_directories(test-indexer-scores-tile PRIVATE ${PROJECT_SOURCE_DIR}/src)
+# Sparse attention tests
+llama_build_and_test(test-sparse-attn.cpp)
+target_include_directories(test-sparse-attn PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
+
+# Reproducer for no_alloc sparse indexer crash
+llama_build_and_test(test-sparse-attn-noalloc.cpp)
+
+# Radix top-k unit test for sparse indexer
+llama_build_and_test(test-sparse-topk-radix.cpp)
+
+# CUDA radix top-k host wrapper quick test: reuse same source (it includes CUDA-only path)
+if (GGML_CUDA)
+    llama_build_and_test(test-sparse-topk-radix-cuda.cpp)
+
+    llama_build_and_test(test-sparse-topk-histogram-cuda.cpp)
+    llama_build_and_test(test-sparse-topk-select-cuda.cpp)
+    llama_build_and_test(test-sparse-topk-select-stress-cuda.cpp)
+    llama_build_and_test(test-sparse-topk-radix-stress-cuda.cpp)
+    llama_build_and_test(test-sparse-topk-op-cuda.cpp)
+    llama_build_and_test(test-indexer-fused-op-cuda.cpp)
+    find_package(CUDAToolkit)
+    llama_build_and_test(test-fp8-e4m3-cutlass-vs-cpu.cpp)
+    target_include_directories(test-fp8-e4m3-cutlass-vs-cpu PRIVATE
+	    ${CUDAToolkit_INCLUDE_DIRS}
+	    ${PROJECT_SOURCE_DIR}/ggml/src/ggml-cuda/vendors/cutlass/include
+    )
+    llama_build_and_test(test-sparse-attn-mqa-cuda.cpp)
+    llama_build_and_test(test-sparse-mla-decode-mqa-cuda.cpp)
+endif()
+
+llama_build_and_test(test-sparse-mla-decode-cuda.cpp)
+
+
+if (GGML_CUDA)
+    llama_build_and_test(test-indexer-triplet-vs-fused.cpp)
+endif()

@@ -5398,6 +5398,12 @@ void ggml_compute_forward_clamp(
             {
                 ggml_compute_forward_clamp_f16(params, dst);
             } break;
+        case GGML_TYPE_E5M2:
+        case GGML_TYPE_E4M3:
+        case GGML_TYPE_E4M3_Q:
+        case GGML_TYPE_E3M4_Q:
+            GGML_ASSERT(false && "clamp for fp8 types not implemented on CPU");
+            break;
         case GGML_TYPE_BF16:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:

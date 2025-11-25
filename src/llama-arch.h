@@ -66,6 +66,7 @@ enum llm_arch {
     LLM_ARCH_ARCTIC,
     LLM_ARCH_DEEPSEEK,
     LLM_ARCH_DEEPSEEK2,
+    LLM_ARCH_DEEPSEEK3_2,
     LLM_ARCH_CHATGLM,
     LLM_ARCH_GLM4,
     LLM_ARCH_GLM4_MOE,
@@ -442,6 +443,10 @@ enum llm_tensor {
     LLM_TENSOR_NEXTN_HNORM,
     LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD,
     LLM_TENSOR_NEXTN_SHARED_HEAD_NORM,
+    LLM_TENSOR_ATTN_INDEXER_K_NORM,       // deepseek3_2
+    LLM_TENSOR_ATTN_INDEXER_WEIGHTS_PROJ, // deepseek3_2
+    LLM_TENSOR_ATTN_INDEXER_WK,           // deepseek3_2
+    LLM_TENSOR_ATTN_INDEXER_WQ_B,         // deepseek3_2
 };
 
 enum llm_tensor_layer {

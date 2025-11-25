@@ -21,7 +21,11 @@ class llama_kv_cache : public llama_memory_i {
 public:
     static uint32_t get_padding(const llama_cparams & cparams);
 
+    // Return true if the underlying model architecture is DeepSeek V3.2 (sparse attention)
+    bool is_arch_deepseek_v3_2() const;
+
     struct stream_copy_info {
+
         bool empty() const {
             assert(ssrc.size() == sdst.size());
             return ssrc.empty();
@@ -146,10 +150,19 @@ public:
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+    ggml_tensor * get_k_indexer(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+
+    // DeepSeek V3.2: full-width indexer K view
+    ggml_tensor * get_k_indexer_full(ggml_context * ctx, int32_t il, const slot_info & sinfo) const;
+
+    // Full-width KV accessors for sparse paths (ignore micro-window)
+    ggml_tensor * get_k_full(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_v_full(ggml_context * ctx, int32_t il) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
+    ggml_tensor * cpy_k_indexer(ggml_context * ctx, ggml_tensor * kidx_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
 
     //
     // preparation API
@@ -181,11 +194,14 @@ public:
 
     void set_input_k_shift(ggml_tensor * dst) const;
 
+    void set_input_kq_mask_full_2d(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
+
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
 private:
     const llama_model & model;
+
     const llama_hparams & hparams;
 
     struct kv_layer {
@@ -198,6 +214,10 @@ private:
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
+
+        // DeepSeek V3.2: Lightning Indexer K cache per layer
+        ggml_tensor * k_indexer = nullptr; // [D_index, kv_size, n_stream]
+        std::vector<ggml_tensor *> k_indexer_stream; // views per stream
     };
 
     bool v_trans = true;  // the value tensor is transposed
@@ -313,10 +333,21 @@ public:
     //
 
     uint32_t get_n_kv() const;
+    uint32_t get_kv_size() const;
+
+
+    bool is_arch_deepseek_v3_2() const;
 
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_k_indexer(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_k_indexer_full(ggml_context * ctx, int32_t il) const; // DeepSeek V3.2 only
+    // Full-width KV accessors for sparse paths (ignore micro-window)
+    void set_input_kq_mask_full_2d(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
+
+    ggml_tensor * get_k_full(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_v_full(ggml_context * ctx, int32_t il) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     // note: the heads in k_cur and v_cur should be layed out contiguously in memory
@@ -326,6 +357,7 @@ public:
     //   - v_idxs [n_tokens] or [n_tokens*n_embd_v_gqa] depending if V cache is transposed
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
+    ggml_tensor * cpy_k_indexer(ggml_context * ctx, ggml_tensor * kidx_cur, ggml_tensor * k_idxs, int32_t il) const;
 
     // create destination indices for each head of the current batch for where it would be written in the KV cache
     // the indices address the global KV cache (not per stream) - this is not relevant for the user of this API, but

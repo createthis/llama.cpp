@@ -347,6 +347,25 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
     mctx->set_input_v_idxs(self_v_idxs, ubatch);
 
     mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
+
+    /*
+    printf("[SET_INPUT_KV][base] micro=[%lld,%lld,%lld,%lld] full2d=%p\n",
+           (long long) self_kq_mask->ne[0], (long long) self_kq_mask->ne[1],
+           (long long) self_kq_mask->ne[2], (long long) self_kq_mask->ne[3],
+           (void*) self_kq_mask_full_2d);
+    fflush(stdout);
+    */
+
+    if (self_kq_mask_full_2d) {
+        /*
+        printf("[SET_INPUT_KV][base] full2d=[%lld,%lld,%lld,%lld]\n",
+               (long long) self_kq_mask_full_2d->ne[0], (long long) self_kq_mask_full_2d->ne[1],
+               (long long) self_kq_mask_full_2d->ne[2], (long long) self_kq_mask_full_2d->ne[3]);
+        fflush(stdout);
+        */
+        mctx->set_input_kq_mask_full_2d(self_kq_mask_full_2d, ubatch, cparams.causal_attn);
+    }
+
 }
 
 bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
@@ -355,6 +374,14 @@ bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
     this->mctx = mctx;
 
     bool res = true;
+
+    /*
+    printf("[SET_INPUT_KV][iswa] micro(base)=[%lld,%lld,%lld,%lld]\n",
+           (long long) self_kq_mask->ne[0], (long long) self_kq_mask->ne[1],
+           (long long) self_kq_mask->ne[2], (long long) self_kq_mask->ne[3]);
+    fflush(stdout);
+    */
+
 
     res &= self_k_idxs->ne[0] == params.ubatch.n_tokens;
   //res &= self_v_idxs->ne[0] == params.ubatch.n_tokens; // TODO: need to move this to the unified cache and check there
@@ -1497,6 +1524,13 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
 
         inp->self_kq_mask = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, n_kv, GGML_PAD(n_tokens/n_stream, GGML_KQ_MASK_PAD), 1, n_stream);
         ggml_set_input(inp->self_kq_mask);
+        // Full-width KV-aware 2D mask for indexer/sparse MLA (DeepSeek V3.2 only)
+        if (mctx_cur->is_arch_deepseek_v3_2()) {
+            const auto kv_size_full = mctx_cur->get_kv_size();
+            inp->self_kq_mask_full_2d = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, kv_size_full, GGML_PAD(n_tokens, GGML_KQ_MASK_PAD));
+            ggml_set_input(inp->self_kq_mask_full_2d);
+        }
+
 
         inp->self_kq_mask_cnv = cparams.flash_attn ? ggml_cast(ctx0, inp->self_kq_mask, GGML_TYPE_F16) : inp->self_kq_mask;
     }

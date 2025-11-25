@@ -1671,6 +1671,11 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
     }
 
     switch (tensor->op) {
+        case GGML_OP_SPARSE_TOPK_RADIX:
+        case GGML_OP_SPARSE_MLA_DECODE:
+            // Not implemented on CPU yet; should be caught by backend selection.
+            GGML_ASSERT(false && "CPU backend: SPARSE_TOPK_RADIX / SPARSE_MLA_DECODE not supported");
+            return;
         case GGML_OP_DUP:
             {
                 ggml_compute_forward_dup(params, tensor);
@@ -2133,6 +2138,13 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
     }
 
     switch (node->op) {
+        case GGML_OP_SPARSE_TOPK_RADIX:
+            n_tasks = 1;
+            break;
+        case GGML_OP_INDEXER_FUSED:
+            n_tasks = 1;
+            break;
+
         case GGML_OP_CPY:
         case GGML_OP_DUP:
         case GGML_OP_CONT:

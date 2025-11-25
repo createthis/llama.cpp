@@ -10,6 +10,9 @@
 #include "llama-kv-cache-iswa.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
+#include "llama-sparse-indexer.h"
+#include "llama-sparse-mla-fwd.h"
+#include "llama-sparse-topk.h"
 
 #include "ggml-cpp.h"
 
@@ -24,6 +27,31 @@
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <cinttypes>
+
+
+// Debug helpers for tracking add() operand layouts during sparse attention
+static void llama_dbg_tensor(const char * tag, struct ggml_tensor * t, int il) {
+    if (!t) {
+      printf("DBG %s L%d: null\n", tag, il);
+      fflush(stdout);
+      return;
+    }
+    printf("DBG %s L%d: ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] type=%d cont=%d rowcont=%d\n",
+           tag, il,
+           (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3],
+           t->nb[0], t->nb[1], t->nb[2], t->nb[3],
+           (int) t->type,
+           (int) ggml_is_contiguous(t), (int) ggml_is_contiguous_rows(t));
+    fflush(stdout);
+}
+
+static struct ggml_tensor * llama_add_dbg(struct ggml_context * ctx, struct ggml_tensor * a, struct ggml_tensor * b,
+                                          const char * where, int il) {
+    llama_dbg_tensor(where, a, il);
+    llama_dbg_tensor(where, b, il);
+    return ggml_add(ctx, a, b);
+}
 
 const char * llm_type_name(llm_type type) {
     switch (type) {
@@ -277,6 +305,11 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
         case GGML_OP_SCALE:
             {
                 op_tensor = ggml_scale(ctx, w, 1.0f);
+            } break;
+        case GGML_OP_NORM:
+            {
+                ggml_tensor * a = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, w->ne[0], w->ne[1], w->ne[2], w->ne[3]);
+                op_tensor = ggml_norm(ctx, a, 1e-5f);
             } break;
         default:
             GGML_ABORT("%s: missing test for op %s for tensor %s", __func__, ggml_op_name(op), w->name);
@@ -1491,6 +1524,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 }
             } break;
         case LLM_ARCH_DEEPSEEK2:
+        case LLM_ARCH_DEEPSEEK3_2:
             {
                 bool is_lite = (hparams.n_layer == 27);
                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
@@ -4464,6 +4498,99 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         }
                     }
                 } break;
+            case LLM_ARCH_DEEPSEEK3_2:
+                {
+                    const bool is_lite = (hparams.n_layer == 27);
+
+                    const bool is_mla = (hparams.n_embd_head_k_mla != 0 && hparams.n_embd_head_v_mla != 0);
+
+                    // note: these are the actual head sizes you get when treating as MHA or after "decompression" using wv_b for MLA
+                    const int64_t n_embd_head_k_mla = is_mla ? hparams.n_embd_head_k_mla : hparams.n_embd_head_k;
+                    const int64_t n_embd_head_v_mla = is_mla ? hparams.n_embd_head_v_mla : hparams.n_embd_head_v;
+
+                    const int64_t n_embd_head_qk_rope = hparams.n_rot;
+                    const int64_t n_embd_head_qk_nope = n_embd_head_k_mla - n_embd_head_qk_rope;
+
+                    const int64_t q_lora_rank  = hparams.n_lora_q;
+                    const int64_t kv_lora_rank = hparams.n_lora_kv;
+
+                    const int64_t n_ff_exp        = hparams.n_ff_exp;
+                    const int64_t n_expert_shared = hparams.n_expert_shared;
+
+                    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+
+                    // output
+                    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+                    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, 0);
+
+                    for (int i = 0; i < n_layer; ++i) {
+                        auto & layer = layers[i];
+
+                        layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
+                        if (!is_lite) {
+                            layer.attn_q_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_A_NORM, "weight", i), {q_lora_rank}, 0);
+                        }
+
+                        layer.attn_kv_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_NORM, "weight", i), {kv_lora_rank}, 0);
+
+                        if (!is_lite) {
+                            layer.wq_a = create_tensor(tn(LLM_TENSOR_ATTN_Q_A, "weight", i), {n_embd, q_lora_rank}, 0);
+                            layer.wq_b = create_tensor(tn(LLM_TENSOR_ATTN_Q_B, "weight", i), {q_lora_rank, n_head * n_embd_head_k_mla}, 0);
+                        } else {
+                            layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight", i), {n_embd, n_head * n_embd_head_k_mla}, 0);
+                        }
+
+                        layer.wkv_a_mqa = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_MQA, "weight", i), {n_embd, kv_lora_rank + n_embd_head_qk_rope}, 0);
+
+                        // note: only old legacy GGUF files will have the unsplit wkv_b tensor in
+                        if (is_mla) {
+                            layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K_B, "weight", i), {n_embd_head_qk_nope, kv_lora_rank, n_head}, 0);
+                            layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V_B, "weight", i), {kv_lora_rank, n_embd_head_v_mla, n_head}, 0);
+                        } else {
+                            layer.wkv_b = create_tensor(tn(LLM_TENSOR_ATTN_KV_B, "weight", i), {kv_lora_rank, n_head * (n_embd_head_qk_nope + n_embd_head_v_mla)}, 0);
+                        }
+
+                        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_head * n_embd_head_v_mla, n_embd}, 0);
+
+                        layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
+
+                        if (i < (int) hparams.n_layer_dense_lead) {
+                            layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd,   n_ff}, 0);
+                            layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {  n_ff, n_embd}, 0);
+                            layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd,   n_ff}, 0);
+                        } else {
+                            layer.ffn_gate_inp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", i), {n_embd, n_expert}, 0);
+                            layer.ffn_exp_probs_b = create_tensor(tn(LLM_TENSOR_FFN_EXP_PROBS_B, "bias", i), {n_expert}, TENSOR_NOT_REQUIRED);
+
+                            if (n_expert == 0) {
+                                throw std::runtime_error("n_expert must be > 0");
+                            }
+                            if (n_expert_used == 0) {
+                                throw std::runtime_error("n_expert_used must be > 0");
+                            }
+
+                            // MoE branch
+                            layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+                            layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp,   n_embd, n_expert}, 0);
+                            layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+
+                            // Shared expert branch
+                            layer.ffn_gate_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", i), {n_embd, n_ff_exp * n_expert_shared}, 0);
+                            layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", i), {        n_ff_exp * n_expert_shared, n_embd}, 0);
+                            layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", i), {n_embd, n_ff_exp * n_expert_shared}, 0);
+                        }
+
+                        // Sparse attention tensors (ATTN_INDEXER_*)
+                        // These are part of the DeepSeek V3.2 sparse attention mechanism (indexer)
+                        const int64_t index_head_dim = 128; // From VLLM: config.index_head_dim
+                        const int64_t index_n_heads = 64;   // From VLLM: config.index_n_heads
+                        layer.attn_indexer_k_norm       = create_tensor(tn(LLM_TENSOR_ATTN_INDEXER_K_NORM, "weight", i), {index_head_dim}, 0);
+                        layer.attn_indexer_k_norm_bias  = create_tensor(tn(LLM_TENSOR_ATTN_INDEXER_K_NORM, "bias", i), {index_head_dim}, TENSOR_NOT_REQUIRED);
+                        layer.attn_indexer_weights_proj = create_tensor(tn(LLM_TENSOR_ATTN_INDEXER_WEIGHTS_PROJ, "weight", i), {n_embd, index_n_heads}, 0);
+                        layer.attn_indexer_wk           = create_tensor(tn(LLM_TENSOR_ATTN_INDEXER_WK, "weight", i), {n_embd, index_head_dim}, 0);
+                        layer.attn_indexer_wq_b         = create_tensor(tn(LLM_TENSOR_ATTN_INDEXER_WQ_B, "weight", i), {q_lora_rank, index_n_heads * index_head_dim}, 0);
+                    }
+                } break;
             case LLM_ARCH_PLM:
                 {
                     const int64_t n_embd_head_qk_rope = hparams.n_rot;
@@ -6202,7 +6329,7 @@ void llama_model::print_info() const {
         LLAMA_LOG_INFO("%s: expert_weights_scale = %.1f\n",   __func__, hparams.expert_weights_scale);
     }
 
-    if (arch == LLM_ARCH_DEEPSEEK2) {
+    if (arch == LLM_ARCH_DEEPSEEK2 || arch == LLM_ARCH_DEEPSEEK3_2) {
         LLAMA_LOG_INFO("%s: n_layer_dense_lead   = %d\n",     __func__, hparams.n_layer_dense_lead);
         LLAMA_LOG_INFO("%s: n_lora_q             = %d\n",     __func__, hparams.n_lora_q);
         LLAMA_LOG_INFO("%s: n_lora_kv            = %d\n",     __func__, hparams.n_lora_kv);
@@ -13601,6 +13728,431 @@ struct llm_build_deepseek2 : public llm_graph_context {
     }
 };
 
+struct llm_build_deepseek3_2 : public llm_graph_context {
+    llm_build_deepseek3_2(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
+        const char * ENV_SPARSE_DEBUG = getenv("LLAMA_SPARSE_DEBUG");
+        const bool dbg = (ENV_SPARSE_DEBUG && atoi(ENV_SPARSE_DEBUG) != 0);
+
+        bool is_lite = (hparams.n_layer == 27);
+
+        const bool is_mla = (hparams.n_embd_head_k_mla != 0 && hparams.n_embd_head_v_mla != 0);
+
+        // note: these are the actual head sizes you get when treating as MHA or after "decompression" using wv_b for MLA
+        const int64_t n_embd_head_k = is_mla ? hparams.n_embd_head_k_mla : hparams.n_embd_head_k;
+        const int64_t n_embd_head_v = is_mla ? hparams.n_embd_head_v_mla : hparams.n_embd_head_v;
+
+        const int64_t n_embd_head_qk_rope = hparams.n_rot;
+        const int64_t n_embd_head_qk_nope = n_embd_head_k - n_embd_head_qk_rope;
+
+        const uint32_t kv_lora_rank = hparams.n_lora_kv;
+
+        // We have to pre-scale kq_scale and attn_factor to make the YaRN RoPE work correctly.
+        // See https://github.com/ggerganov/llama.cpp/discussions/7416 for detailed explanation.
+        const float mscale = attn_factor * (1.0f + hparams.rope_yarn_log_mul * logf(1.0f / freq_scale));
+        const float kq_scale = 1.0f*mscale*mscale/sqrtf(float(n_embd_head_k));
+        const float attn_factor = 1.0f / (1.0f + 0.1f * logf(1.0f / freq_scale));
+
+        if (dbg) printf("[deepseek3_2] layer init: attn_factor=%g mscale=%g dense_kq_scale=%g (n_embd_head_k=%lld)\n", attn_factor, mscale, kq_scale, (long long) n_embd_head_k);
+
+        ggml_tensor * cur;
+        ggml_tensor * inpL;
+
+        // {n_embd, n_tokens}
+        inpL = build_inp_embd(model.tok_embd);
+
+        // inp_pos - contains the positions
+        ggml_tensor * inp_pos = build_inp_pos();
+
+        auto * inp_attn = build_attn_inp_kv();
+
+        ggml_tensor * inp_out_ids = build_inp_out_ids();
+
+        for (int il = 0; il < n_layer; ++il) {
+            ggml_tensor * inpSA = inpL;
+
+            // norm
+            cur = build_norm(inpL,
+                    model.layers[il].attn_norm, NULL,
+                    LLM_NORM_RMS, il);
+            cb(cur, "attn_norm", il);
+
+            // Sparse attention indexer for DeepSeek V3.2
+            // This should be computed BEFORE the regular attention using the normalized hidden state
+            bool use_sparse_attention = false;
+            int64_t top_k = 0;
+            auto cb_wrapper = [this](ggml_tensor * cur, const char * name, int il) {
+                this->cb(cur, name, il);
+            };
+
+            if (model.layers[il].attn_indexer_k_norm != nullptr) {
+                // Use the new sparse attention implementation for indexer computation
+
+                // Defer KV-aware top-k computation to the attention block using KV cache
+                use_sparse_attention = true;
+                top_k = 0;
+            }
+
+            // self_attention
+            {
+                ggml_tensor * q = NULL;
+                if (!is_lite) {
+                    q = ggml_mul_mat(ctx0, model.layers[il].wq_a, cur);
+                    cb(q, "q", il);
+
+                    q = build_norm(q,
+                            model.layers[il].attn_q_a_norm, nullptr,
+                            LLM_NORM_RMS, il);
+                    cb(q, "q", il);
+
+                    q = ggml_mul_mat(ctx0, model.layers[il].wq_b, q);
+                    cb(q, "q", il);
+                } else {
+                    q = ggml_mul_mat(ctx0, model.layers[il].wq, cur);
+                    cb(q, "q", il);
+                }
+
+                // split into {n_embd_head_qk_nope, n_head, n_tokens}
+                ggml_tensor * q_nope = ggml_view_3d(ctx0, q,
+                        n_embd_head_qk_nope, n_head, n_tokens,
+                        ggml_row_size(q->type, n_embd_head_k),
+                        ggml_row_size(q->type, n_embd_head_k) * n_head,
+                        0);
+                cb(q_nope, "q_nope", il);
+
+                // and {n_embd_head_qk_rope, n_head, n_tokens}
+                ggml_tensor * q_pe = ggml_view_3d(ctx0, q,
+                        n_embd_head_qk_rope, n_head, n_tokens,
+                        ggml_row_size(q->type, n_embd_head_k),
+                        ggml_row_size(q->type, n_embd_head_k) * n_head,
+                        ggml_row_size(q->type, n_embd_head_qk_nope));
+                cb(q_pe, "q_pe", il);
+
+                ggml_tensor * kv_cmpr_pe = ggml_mul_mat(ctx0, model.layers[il].wkv_a_mqa, cur);
+                cb(kv_cmpr_pe, "kv_cmpr_pe", il);
+
+                // split into {kv_lora_rank, n_tokens}
+                ggml_tensor * kv_cmpr = ggml_view_2d(ctx0, kv_cmpr_pe,
+                        kv_lora_rank, n_tokens,
+                        ggml_row_size(kv_cmpr_pe->type, kv_lora_rank + n_embd_head_qk_rope),
+                        0);
+                cb(kv_cmpr, "kv_cmpr", il);
+
+                // and {n_embd_head_qk_rope, 1, n_tokens}
+                ggml_tensor * k_pe = ggml_view_3d(ctx0, kv_cmpr_pe,
+                        n_embd_head_qk_rope, 1, n_tokens,
+                        ggml_row_size(kv_cmpr_pe->type, kv_lora_rank + n_embd_head_qk_rope),
+                        ggml_row_size(kv_cmpr_pe->type, kv_lora_rank + n_embd_head_qk_rope),
+                        ggml_row_size(kv_cmpr_pe->type, kv_lora_rank));
+                cb(k_pe, "k_pe", il);
+
+                q_pe = ggml_rope_ext(ctx0, q_pe, inp_pos, nullptr,
+                        n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
+                        ext_factor, attn_factor, beta_fast, beta_slow
+                );
+                cb(q_pe, "q_pe", il);
+
+                k_pe = ggml_rope_ext(ctx0, k_pe, inp_pos, nullptr,
+                        n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
+                        ext_factor, attn_factor, beta_fast, beta_slow
+                );
+                cb(k_pe, "k_pe", il);
+
+                kv_cmpr = build_norm(kv_cmpr,
+                        model.layers[il].attn_kv_a_norm, nullptr,
+                        LLM_NORM_RMS, il);
+                cb(kv_cmpr, "kv_cmpr", il);
+
+                // Declare Qcur, Kcur, Vcur at higher scope for sparse attention
+                ggml_tensor * Qcur = nullptr;
+                ggml_tensor * Kcur = nullptr;
+                ggml_tensor * Vcur = nullptr;
+
+                if (is_mla) {
+                    // {n_embd_head_qk_nope, n_tokens, n_head}
+                    q_nope = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
+                    cb(q_nope, "q_nope_perm", il);
+
+                    // {n_embd_head_qk_nope, kv_lora_rank, n_head} x {n_embd_head_qk_nope, n_tokens, n_head}
+                    ggml_tensor * q_nope_absorbed = ggml_mul_mat(ctx0, model.layers[il].wk_b, q_nope);
+                    cb(q_nope_absorbed, "q_nope_absorbed", il);
+
+                    // {kv_lora_rank, n_head, n_tokens}
+                    q_nope_absorbed = ggml_permute(ctx0, q_nope_absorbed, 0, 2, 1, 3);
+                    cb(q_nope_absorbed, "q_nope_absorbed_perm", il);
+
+                    // {n_embd_head_qk_rope + kv_lora_rank, n_head, n_tokens}
+                    // note: rope must go first for in-place context shifting in build_rope_shift()
+                    Qcur = ggml_concat(ctx0, q_pe, q_nope_absorbed, 0);
+                    cb(Qcur, "Qcur", il);
+
+                    kv_cmpr = ggml_reshape_3d(ctx0, kv_cmpr, kv_lora_rank, 1, n_tokens);
+                    cb(kv_cmpr, "kv_cmpr_reshape", il);
+
+                    // {n_embd_head_qk_rope + kv_lora_rank, 1, n_tokens}
+                    Kcur = ggml_concat(ctx0, k_pe, kv_cmpr, 0);
+                    cb(Kcur, "Kcur", il);
+
+                    // {kv_lora_rank, 1, n_tokens}
+                    Vcur = kv_cmpr;
+                    cb(Vcur, "Vcur", il);
+
+                    // Apply sparse attention if available, otherwise use regular attention
+                    if (use_sparse_attention) {{
+                            const auto * mctx_cur = inp_attn->mctx;
+                            ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, Kcur, inp_attn->get_k_idxs(), il));
+                            ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
+                            ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
+                        }
+
+                        // Use sparse attention with top-k tokens (KV-aware)
+                        {
+                            const auto * mctx_cur2 = inp_attn->mctx;
+                            // Use full-width KV cache for sparse MLA to match indexer indices
+                            ggml_tensor * Kcache = mctx_cur2->get_k_full(ctx0, il);
+                            ggml_tensor * Vcache = mctx_cur2->get_v_full(ctx0, il);
+                            ggml_tensor * KQmask2 = inp_attn->get_kq_mask_full_2d();
+
+                            const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
+                            top_k = env_topk ? std::max<int64_t>(1, atoll(env_topk)) : 2048;
+                            ggml_build_forward_expand(gf, KQmask2);
+                            {
+                                int64_t used_kv = mctx_cur2->get_n_kv();
+                                int64_t n_kv_cache = (int64_t) Kcache->ne[2];
+                                ggml_tensor * Kindexer_full = mctx_cur2->get_k_indexer_full(ctx0, il);
+                                int64_t n_kv_indexer = Kindexer_full ? (int64_t) Kindexer_full->ne[1] : n_kv_cache;
+                                int64_t available_kv = std::min(used_kv, std::min(n_kv_cache, n_kv_indexer));
+                                top_k = std::min<int64_t>(top_k, available_kv);
+                            }
+
+                            ggml_tensor * kvaware_indices = llama::sparse_attn_indexer::build_kvaware_topk_indices(
+                                ctx0, model, il, cur, n_tokens, mctx_cur2, inp_attn->get_k_idxs(), KQmask2, top_k,
+                                inp_pos, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,
+                                cb_wrapper, gf, sched, backend_cpu);
+                            cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
+                                ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, cb_wrapper);
+                            // Sanity checks for MLA sparse attention output vs expected V-dim (kv_lora_rank)
+                            if (cur->ne[0] != (int64_t) kv_lora_rank) {
+                                printf("[SPARSE-DBG-MLA] L%d: sparse attn out Dv=%" PRId64 " but kv_lora_rank=%u (mismatch)\n", il, cur->ne[0], kv_lora_rank);
+                            }
+                            if (dbg && model.layers[il].wv_b) {
+                                printf("[SPARSE-DBG-MLA] L%d: wv_b dims=[%" PRId64 ", %" PRId64 "] expected=[%u, %" PRId64 "]\n",
+                                       il, (int64_t) model.layers[il].wv_b->ne[0], (int64_t) model.layers[il].wv_b->ne[1], kv_lora_rank, (int64_t) n_embd_head_v);
+                            }
+                            GGML_ASSERT(cur->ne[0] == (int64_t) kv_lora_rank);
+                            if (model.layers[il].wv_b) {
+                                GGML_ASSERT(model.layers[il].wv_b->ne[0] == (int64_t) kv_lora_rank);
+                                GGML_ASSERT(model.layers[il].wv_b->ne[1] == (int64_t) n_embd_head_v);
+                            }
+                        }
+
+                        /* keep sparse attention output on device to avoid backend hops */
+
+                        // Project kv_lora_rank -> n_embd_head_v per head using wv_b and flatten heads before WO
+                        ggml_tensor * cur_perm = ggml_permute(ctx0, cur, 0, 2, 1, 3); // [kv_lora_rank, n_tokens, n_head]
+                        cb(cur_perm, "sparse_attn_perm_kvT_H", il);
+
+                        ggml_tensor * cur_proj = ggml_mul_mat(ctx0, model.layers[il].wv_b, cur_perm); // [n_embd_head_v, n_tokens, n_head]
+                        cb(cur_proj, "sparse_attn_vproj", il);
+
+                        ggml_tensor * cur_proj_perm = ggml_permute(ctx0, cur_proj, 0, 2, 1, 3); // [n_embd_head_v, n_head, n_tokens]
+                        cb(cur_proj_perm, "sparse_attn_vproj_perm", il);
+
+                        cur_proj_perm = ggml_cont(ctx0, cur_proj_perm);
+                        ggml_tensor * cur2d = ggml_reshape_2d(ctx0, cur_proj_perm, n_head * n_embd_head_v, n_tokens);
+                        cb(cur2d, "sparse_attn_flat", il);
+
+                        // Apply output projection for sparse attention
+                        cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur2d);
+                        cb(cur, "sparse_attn_out", il);
+
+                        // Log that we're using sparse attention
+                        LLAMA_LOG_DEBUG("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d\n",
+                                      (int)top_k, il);
+                    } else {
+                        // note: MLA with the absorption optimzation converts into MQA (ie: GQA with 1 group)
+                        cur = build_attn(inp_attn,
+                                model.layers[il].wo, NULL,
+                                Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, kq_scale, il);
+                    }
+                } else {
+                    ggml_tensor * kv = ggml_mul_mat(ctx0, model.layers[il].wkv_b, kv_cmpr);
+                    cb(kv, "kv", il);
+
+                    // split into {n_embd_head_qk_nope, n_head, n_tokens}
+                    ggml_tensor * k_nope = ggml_view_3d(ctx0, kv,
+                            n_embd_head_qk_nope, n_head, n_tokens,
+                            ggml_row_size(kv->type, n_embd_head_qk_nope + n_embd_head_v),
+                            ggml_row_size(kv->type, n_embd_head_qk_nope + n_embd_head_v) * n_head,
+                            0);
+                    cb(k_nope, "k_nope_view", il);
+
+                    // and {n_embd_head_v, n_head, n_tokens}
+                    Vcur = ggml_view_3d(ctx0, kv,
+                            n_embd_head_v, n_head, n_tokens,
+                            ggml_row_size(kv->type, n_embd_head_qk_nope + n_embd_head_v),
+                            ggml_row_size(kv->type, n_embd_head_qk_nope + n_embd_head_v) * n_head,
+                            ggml_row_size(kv->type, n_embd_head_qk_nope));
+                    cb(Vcur, "Vcur_view", il);
+
+                    Vcur = ggml_cont(ctx0, Vcur);
+                    cb(Vcur, "Vcur_cont", il);
+
+                    // note: rope must go first for in-place context shifting in build_rope_shift()
+                    Qcur = ggml_concat(ctx0, q_pe, q_nope, 0);
+                    cb(Qcur, "Qcur", il);
+
+                    Kcur = ggml_concat(ctx0, ggml_repeat(ctx0, k_pe, q_pe), k_nope, 0);
+                    cb(Kcur, "Kcur", il);
+
+                    // Apply sparse attention if available, otherwise use regular attention
+                    if (use_sparse_attention) {{
+                            const auto * mctx_cur = inp_attn->mctx;
+                            ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, Kcur, inp_attn->get_k_idxs(), il));
+                            ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
+                            ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
+                        }
+
+                        // Use sparse attention with top-k tokens (KV-aware)
+                        {
+                            const auto * mctx_cur2 = inp_attn->mctx;
+                            // Use full-width KV cache for sparse MLA to match indexer indices
+                            ggml_tensor * Kcache = mctx_cur2->get_k_full(ctx0, il);
+                            ggml_tensor * Vcache = mctx_cur2->get_v_full(ctx0, il);
+                            ggml_tensor * KQmask2 = inp_attn->get_kq_mask_full_2d();
+
+                            const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
+                            top_k = env_topk ? std::max<int64_t>(1, atoll(env_topk)) : 2048;
+                            ggml_build_forward_expand(gf, KQmask2);
+                            {
+                                int64_t used_kv = mctx_cur2->get_n_kv();
+                                int64_t n_kv_cache = (int64_t) Kcache->ne[2];
+                                ggml_tensor * Kindexer_full = mctx_cur2->get_k_indexer_full(ctx0, il);
+                                int64_t n_kv_indexer = Kindexer_full ? (int64_t) Kindexer_full->ne[1] : n_kv_cache;
+                                int64_t available_kv = std::min(used_kv, std::min(n_kv_cache, n_kv_indexer));
+                                top_k = std::min<int64_t>(top_k, available_kv);
+                            }
+                            ggml_tensor * kvaware_indices = llama::sparse_attn_indexer::build_kvaware_topk_indices(
+                                ctx0, model, il, cur, n_tokens, mctx_cur2, inp_attn->get_k_idxs(), KQmask2, top_k,
+                                inp_pos, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,
+                                cb_wrapper, gf, sched, backend_cpu);
+                            cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
+                                ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, cb_wrapper);
+                            // Sanity checks for MHA sparse attention output vs expected V-dim (n_embd_head_v)
+                            if (cur->ne[0] != (int64_t) n_embd_head_v) {
+                                printf("[SPARSE-DBG-MHA] L%d: sparse attn out Dv=%" PRId64 " but n_embd_head_v=%" PRId64 " (mismatch)\n", il, (int64_t) cur->ne[0], (int64_t) n_embd_head_v);
+                            }
+                            GGML_ASSERT(cur->ne[0] == (int64_t) n_embd_head_v);
+                        }
+
+                        /* keep sparse attention output on device to avoid backend hops */
+
+                        // Flatten heads before WO
+                        ggml_tensor * cur_perm2 = ggml_permute(ctx0, cur, 0, 2, 1, 3); // [n_embd_head_v, n_tokens, n_head]
+                        cb(cur_perm2, "sparse_attn_perm_vT_H", il);
+
+                        cur_perm2 = ggml_cont(ctx0, cur_perm2);
+                        ggml_tensor * cur2d2 = ggml_reshape_2d(ctx0, cur_perm2, n_head * n_embd_head_v, n_tokens);
+                        cb(cur2d2, "sparse_attn_flat", il);
+
+                        // Apply output projection for sparse attention
+                        cur = ggml_mul_mat(ctx0, model.layers[il].wo, cur2d2);
+                        cb(cur, "sparse_attn_out", il);
+                        // ensure contiguous layout for subsequent broadcast adds (CUDA)
+                        cur = ggml_cont(ctx0, cur);
+
+                        // Log that we're using sparse attention
+                        LLAMA_LOG_DEBUG("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d\n",
+                                      (int)top_k, il);
+                    } else {
+                        // note: MLA without the absorption optimization converts into MHA (ie: GQA with full n_head groups)
+                        cur = build_attn(inp_attn,
+                                model.layers[il].wo, NULL,
+                                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+                    }
+                }
+
+            }
+
+            if (il == n_layer - 1 && inp_out_ids) {
+                cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
+                inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
+            }
+
+            ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
+            cb(ffn_inp, "ffn_inp", il);
+
+            cur = build_norm(ffn_inp,
+                    model.layers[il].ffn_norm, NULL,
+                    LLM_NORM_RMS, il);
+            cb(cur, "ffn_norm", il);
+
+            if ((uint32_t) il < hparams.n_layer_dense_lead) {
+                cur = build_ffn(cur,
+                        model.layers[il].ffn_up,   NULL, NULL,
+                        model.layers[il].ffn_gate, NULL, NULL,
+                        model.layers[il].ffn_down, NULL, NULL,
+                        NULL,
+                        LLM_FFN_SILU, LLM_FFN_PAR, il);
+                cb(cur, "ffn_out", il);
+            } else {
+                // MoE branch
+                ggml_tensor * moe_out =
+                    build_moe_ffn(cur,
+                            model.layers[il].ffn_gate_inp,
+                            model.layers[il].ffn_up_exps,
+                            model.layers[il].ffn_gate_exps,
+                            model.layers[il].ffn_down_exps,
+                            model.layers[il].ffn_exp_probs_b,
+                            n_expert, n_expert_used,
+                            LLM_FFN_SILU, hparams.expert_weights_norm,
+                            true, hparams.expert_weights_scale,
+                            (llama_expert_gating_func_type) hparams.expert_gating_func,
+                            il);
+                cb(moe_out, "ffn_moe_out", il);
+
+                // FFN shared expert
+                {
+                    ggml_tensor * ffn_shexp = build_ffn(cur,
+                            model.layers[il].ffn_up_shexp,   NULL, NULL,
+                            model.layers[il].ffn_gate_shexp, NULL, NULL,
+                            model.layers[il].ffn_down_shexp, NULL, NULL,
+                            NULL,
+                            LLM_FFN_SILU, LLM_FFN_PAR, il);
+                    cb(ffn_shexp, "ffn_shexp", il);
+
+                    cur = ggml_add(ctx0, moe_out, ffn_shexp);
+                    cb(cur, "ffn_out", il);
+                }
+            }
+
+            cur = ggml_add(ctx0, cur, ffn_inp);
+
+            cur = build_cvec(cur, il);
+            cb(cur, "l_out", il);
+
+            // input for next layer
+            inpL = cur;
+        }
+
+        cur = inpL;
+
+        cur = build_norm(cur,
+                model.output_norm, NULL,
+                LLM_NORM_RMS, -1);
+
+        cb(cur, "result_norm", -1);
+        res->t_embd = cur;
+
+        // lm_head
+        cur = ggml_mul_mat(ctx0, model.output, cur);
+
+        cb(cur, "result_output", -1);
+        res->t_logits = cur;
+
+        ggml_build_forward_expand(gf, cur);
+    }
+};
+
 struct llm_build_bitnet : public llm_graph_context {
     llm_build_bitnet(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
         const int64_t n_embd_head = hparams.n_embd_head_v;
@@ -19465,6 +20017,10 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
             {
                 llm = std::make_unique<llm_build_deepseek2>(*this, params);
             } break;
+        case LLM_ARCH_DEEPSEEK3_2:
+            {
+                llm = std::make_unique<llm_build_deepseek3_2>(*this, params);
+            } break;
         case LLM_ARCH_CHATGLM:
             {
                 llm = std::make_unique<llm_build_chatglm>(*this, params);
@@ -19765,6 +20321,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_ARCTIC:
         case LLM_ARCH_DEEPSEEK:
         case LLM_ARCH_DEEPSEEK2:
+        case LLM_ARCH_DEEPSEEK3_2:
         case LLM_ARCH_PLM:
         case LLM_ARCH_CHATGLM:
         case LLM_ARCH_GLM4:

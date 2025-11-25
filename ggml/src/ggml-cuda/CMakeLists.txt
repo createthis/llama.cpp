@@ -42,8 +42,11 @@ if (CUDAToolkit_FOUND)
 
     file(GLOB   GGML_HEADERS_CUDA "*.cuh")
     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
+    list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda-radix.h")
 
     file(GLOB   GGML_SOURCES_CUDA "*.cu")
+    list(APPEND GGML_SOURCES_CUDA "topk-radix.cu" indexer-fused.cu sparse-mla-decode.cu)
+
     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
     file(GLOB   SRCS "template-instances/mmq*.cu")
@@ -68,6 +71,28 @@ if (CUDAToolkit_FOUND)
                              ${GGML_HEADERS_CUDA}
                              ${GGML_SOURCES_CUDA}
                             )
+
+
+    list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "mqa_attn_return_logits_kernel\\.cu$")
+
+    # Build the Lightning Indexer kernel as its own OBJECT library so we can
+    # give it a different CUDA arch than the rest of the project.
+    add_library(lightning_kernels OBJECT
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/tilelang/fp8_lightning_indexer/mqa_attn_return_logits_kernel.cu
+    )
+    # Compile just this TU for Hopper/ADA style WGMMA (change as needed)
+    set_property(TARGET lightning_kernels PROPERTY CUDA_ARCHITECTURES "120a")
+    set_property(TARGET lightning_kernels PROPERTY POSITION_INDEPENDENT_CODE ON)
+    # Includes required to compile this TU
+    target_include_directories(lightning_kernels PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/tilelang/fp8_lightning_indexer
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/cutlass/include
+    )
+    target_compile_options(lightning_kernels PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fPIC -std=c++17 -w -Xcudafe --diag_suppress=177 -lineinfo --use_fast_math -gencode arch=compute_120a,code=sm_120a>)
+    # Inject the compiled objects into ggml-cuda
+    target_sources(ggml-cuda PRIVATE $<TARGET_OBJECTS:lightning_kernels>)
+
 
     add_compile_definitions(GGML_CUDA_PEER_MAX_BATCH_SIZE=${GGML_CUDA_PEER_MAX_BATCH_SIZE})
 
@@ -186,3 +211,10 @@ if (CUDAToolkit_FOUND)
 else()
     message(FATAL_ERROR "CUDA Toolkit not found")
 endif()
+      # (mirror includes outside the if() block)
+      target_include_directories(ggml-cuda PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/tilelang/fp8_lightning_indexer
+      )
+      target_include_directories(ggml-cuda PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/cutlass/include
+      )

@@ -43,7 +43,7 @@ llama_kv_cache::llama_kv_cache(
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
             ggml_init_params params = {
-                /*.mem_size   =*/ size_t(2u*(1 + n_stream)*n_layer_kv*ggml_tensor_overhead()),
+                /*.mem_size   =*/ size_t(3u*(1 + n_stream)*n_layer_kv*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -142,7 +142,30 @@ llama_kv_cache::llama_kv_cache(
 
         map_layer_ids[il] = layers.size();
 
-        layers.push_back({ il, k, v, k_stream, v_stream, });
+        // initialize kv_layer entry
+        layers.push_back({});
+        auto & lyr = layers.back();
+        lyr.il = il;
+        lyr.k  = k;
+        lyr.v  = v;
+        lyr.k_stream = std::move(k_stream);
+        lyr.v_stream = std::move(v_stream);
+
+        // Allocate Indexer K cache if the model layer has indexer tensors
+        if (model.layers[il].attn_indexer_wk != nullptr) {
+            const int64_t index_head_dim = model.layers[il].attn_indexer_wk->ne[1];
+            // Use F32 for indexer K cache to preserve top-k ranking stability
+            ggml_tensor * kidx = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, index_head_dim, kv_size, n_stream);
+            ggml_format_name(kidx, "cache_k_indexer_l%d", il);
+
+            std::vector<ggml_tensor *> kidx_stream;
+            for (uint32_t s = 0; s < n_stream; ++s) {
+                kidx_stream.push_back(ggml_view_2d(ctx, kidx, index_head_dim, kv_size, kidx->nb[1], s*kidx->nb[2]));
+            }
+
+            lyr.k_indexer = kidx;
+            lyr.k_indexer_stream = std::move(kidx_stream);
+        }
     }
 
     if (reuse) {
@@ -197,6 +220,10 @@ llama_kv_cache::llama_kv_cache(
 
     const char * LLAMA_KV_CACHE_DEBUG = getenv("LLAMA_KV_CACHE_DEBUG");
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
+}
+
+bool llama_kv_cache::is_arch_deepseek_v3_2() const {
+    return model.arch == LLM_ARCH_DEEPSEEK3_2;
 }
 
 void llama_kv_cache::clear(bool data) {
@@ -1056,6 +1083,45 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
     return ggml_set_rows(ctx, k, k_cur, k_idxs);
 }
 
+
+
+ggml_tensor * llama_kv_cache::get_k_indexer(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    ggml_tensor * kidx = layers[ikv].k_indexer;
+    GGML_ASSERT(kidx && "Indexer K cache not allocated for this layer");
+
+    const uint64_t kv_size = get_size();
+    const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
+
+    // view as [D_index, n_kv, ns]
+    return ggml_view_3d(ctx, kidx,
+            kidx->ne[0], n_kv, ns,
+            ggml_row_size(kidx->type, kidx->ne[0]),
+            ggml_row_size(kidx->type, kidx->ne[0])*kv_size,
+            ggml_row_size(kidx->type, kidx->ne[0])*kv_size*sinfo.s0);
+}
+
+ggml_tensor * llama_kv_cache::get_k_indexer_full(ggml_context * ctx, int32_t il, const slot_info & sinfo) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    ggml_tensor * kidx = layers[ikv].k_indexer;
+    GGML_ASSERT(kidx && "Indexer K cache not allocated for this layer");
+    const uint64_t kv_size = get_size();
+    const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
+    if (kidx->ne[2] > 1) {
+        ggml_tensor * kidx_2d = ggml_reshape_2d(ctx, kidx, kidx->ne[0], kv_size * kidx->ne[2]);
+        return ggml_view_3d(ctx, kidx_2d,
+                kidx->ne[0], kv_size, ns,
+                ggml_row_size(kidx->type, kidx->ne[0]),
+                ggml_row_size(kidx->type, kidx->ne[0]) * kv_size,
+                ggml_row_size(kidx->type, kidx->ne[0]) * kv_size * sinfo.s0);
+    }
+    return ggml_view_3d(ctx, kidx,
+            kidx->ne[0], kv_size, ns,
+            ggml_row_size(kidx->type, kidx->ne[0]),
+            ggml_row_size(kidx->type, kidx->ne[0]) * kv_size,
+            ggml_row_size(kidx->type, kidx->ne[0]) * kv_size * sinfo.s0);
+}
+
 ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const {
     GGML_UNUSED(sinfo);
 
@@ -1172,7 +1238,6 @@ void llama_kv_cache::set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ub
     } else {
         // note: the V cache is transposed when not using flash attention
         const int64_t kv_size = get_size();
-
         const int64_t n_embd_v_gqa = hparams.n_embd_v_gqa_max();
 
         for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
@@ -1306,6 +1371,40 @@ size_t llama_kv_cache::total_size() const {
     }
 
     return size;
+}
+
+void llama_kv_cache::set_input_kq_mask_full_2d(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const {
+    GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
+    float * data = (float *) dst->data;
+
+    const int64_t kv_size = get_size();
+    const int64_t T_pad   = dst->ne[1];
+    const int64_t T       = ubatch->n_tokens;
+
+    std::fill(data, data + kv_size * T_pad, -INFINITY);
+
+    // For each token i in the batch, mark valid KV positions across the full cache width
+    for (uint32_t i = 0; i < T; ++i) {
+        // Use first seq_id for mask (consistent with existing set_input_kq_mask)
+        const llama_seq_id seq_id = ubatch->seq_id[i][0];
+        const auto & cells = v_cells[seq_to_stream[seq_id]];
+        const llama_pos p1 = ubatch->pos[i];
+
+        for (uint32_t j = 0; j < kv_size; ++j) {
+            if (cells.is_empty(j)) continue;
+            if (!cells.seq_has(j, seq_id)) continue;
+            const llama_pos p0 = cells.pos_get(j);
+            if (causal_attn && p0 > p1) continue;
+            if (is_masked_swa(p0, p1)) continue;
+
+            // Row major: ne[0] = kv_size, ne[1] = T_pad
+            // offset = row + col*row_stride
+            // Row major: ne[0] = kv_size, ne[1] = T_pad
+            // offset = row + col*row_stride
+            // For valid entries: apply ALiBi if enabled, else 0.0f
+            data[j + i * kv_size] = hparams.use_alibi ? -std::abs(p0 - p1) : 0.0f;
+        }
+    }
 }
 
 size_t llama_kv_cache::size_k_bytes() const {
@@ -1949,7 +2048,6 @@ bool llama_kv_cache_context::apply() {
 
         return true;
     }
-
     kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);
     n_kv = kv->get_n_kv(sinfos[i_cur]);
 
@@ -1970,8 +2068,69 @@ uint32_t llama_kv_cache_context::get_n_kv() const {
     return n_kv;
 }
 
+bool llama_kv_cache_context::is_arch_deepseek_v3_2() const {
+    return kv->is_arch_deepseek_v3_2();
+}
+
+void llama_kv_cache_context::set_input_kq_mask_full_2d(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const {
+    kv->set_input_kq_mask_full_2d(dst, ubatch, causal_attn);
+}
+
+uint32_t llama_kv_cache_context::get_kv_size() const {
+    return kv->get_size();
+}
+
 ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) const {
     return kv->get_k(ctx, il, n_kv, sinfos[i_cur]);
+}
+
+ggml_tensor * llama_kv_cache_context::get_k_indexer(ggml_context * ctx, int32_t il) const {
+    return kv->get_k_indexer(ctx, il, n_kv, sinfos[i_cur]);
+}
+
+ggml_tensor * llama_kv_cache_context::get_k_full(ggml_context * ctx, int32_t il) const {
+    const auto & sinfo = sinfos[i_cur];
+    return kv->get_k(ctx, il, kv->get_size(), sinfo);
+}
+
+ggml_tensor * llama_kv_cache_context::get_v_full(ggml_context * ctx, int32_t il) const {
+    const auto & sinfo = sinfos[i_cur];
+    return kv->get_v(ctx, il, kv->get_size(), sinfo);
+}
+
+ggml_tensor * llama_kv_cache::get_k_full(ggml_context * ctx, int32_t il) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    auto * k = layers[ikv].k;
+    const uint64_t kv_size      = get_size();
+    const uint64_t n_embd_k_gqa = k->ne[0];
+    return ggml_view_3d(ctx, k,
+            n_embd_k_gqa, kv_size, k->ne[2],
+            ggml_row_size(k->type, n_embd_k_gqa),
+            ggml_row_size(k->type, n_embd_k_gqa),
+            ggml_row_size(k->type, n_embd_k_gqa)*kv_size);
+}
+
+ggml_tensor * llama_kv_cache::get_v_full(ggml_context * ctx, int32_t il) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    auto * v = layers[ikv].v;
+    const uint64_t kv_size      = get_size();
+    const uint64_t n_embd_v_gqa = v->ne[0];
+    return ggml_view_3d(ctx, v,
+            n_embd_v_gqa, kv_size, v->ne[2],
+            ggml_row_size(v->type, n_embd_v_gqa),
+            ggml_row_size(v->type, n_embd_v_gqa),
+            ggml_row_size(v->type, n_embd_v_gqa)*kv_size);
+}
+
+ggml_tensor * llama_kv_cache_context::get_k_indexer_full(ggml_context * ctx, int32_t il) const {
+    // Full-width indexer K view for DeepSeek V3.2
+    const auto & sinfo = sinfos[i_cur];
+    return kv->get_k_indexer_full(ctx, il, sinfo);
+}
+
+ggml_tensor * llama_kv_cache_context::cpy_k_indexer(ggml_context * ctx, ggml_tensor * kidx_cur, ggml_tensor * k_idxs, int32_t il) const {
+    const auto & sinfo = sinfos[i_cur];
+    return kv->cpy_k_indexer(ctx, kidx_cur, k_idxs, il, sinfo);
 }
 
 ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il) const {
@@ -2017,4 +2176,24 @@ void llama_kv_cache_context::set_input_pos_bucket(ggml_tensor * dst, const llama
 uint32_t llama_kv_cache::get_padding(const llama_cparams & cparams) {
     // the FA kernels require padding to avoid extra runtime boundary checks
     return cparams.flash_attn ? 256u : 32u;
+}
+
+
+// Lightning Indexer: write K_indexer rows into cache
+ggml_tensor * llama_kv_cache::cpy_k_indexer(ggml_context * ctx, ggml_tensor * kidx_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const {
+    GGML_UNUSED(sinfo);
+    const int32_t ikv = map_layer_ids.at(il);
+    ggml_tensor * kidx = layers[ikv].k_indexer;
+    GGML_ASSERT(kidx && "Indexer K cache not allocated for this layer");
+    ggml_tensor * cur2d = kidx_cur;
+    if (kidx_cur->ne[2] > 1) {
+        GGML_ASSERT(ggml_row_size(kidx_cur->type, kidx_cur->ne[0]) == kidx_cur->nb[1]);
+        cur2d = ggml_view_2d(ctx, kidx_cur, kidx_cur->ne[0], kidx_cur->ne[2], kidx_cur->nb[2], 0);
+    }
+    const int64_t n_stream = kidx->ne[2];
+    if (n_stream > 1) {
+        const int64_t kv_size = get_size();
+        kidx = ggml_reshape_2d(ctx, kidx, kidx->ne[0], kv_size*n_stream);
+    }
+    return ggml_set_rows(ctx, kidx, cur2d, k_idxs);
 }

@@ -417,7 +417,11 @@ extern "C" {
         // GGML_TYPE_IQ4_NL_4_8 = 37,
         // GGML_TYPE_IQ4_NL_8_8 = 38,
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
-        GGML_TYPE_COUNT   = 40,
+        GGML_TYPE_E5M2    = 40,
+        GGML_TYPE_E4M3    = 41,
+        GGML_TYPE_E4M3_Q  = 42,
+        GGML_TYPE_E3M4_Q  = 43,
+        GGML_TYPE_COUNT   = 44,
     };
 
     // precision
@@ -453,6 +457,10 @@ extern "C" {
         GGML_FTYPE_MOSTLY_IQ1_M   = 23, // except 1d tensors
         GGML_FTYPE_MOSTLY_BF16    = 24, // except 1d tensors
         GGML_FTYPE_MOSTLY_MXFP4   = 25, // except 1d tensors
+        GGML_FTYPE_MOSTLY_E5M2    = 26, // except 1d tensors
+        GGML_FTYPE_MOSTLY_E4M3    = 27, // except 1d tensors
+        GGML_FTYPE_MOSTLY_E4M3_Q  = 28, // except 1d tensors
+        GGML_FTYPE_MOSTLY_E3M4_Q  = 29, // except 1d tensors
     };
 
     // available tensor operations:
@@ -555,6 +563,9 @@ extern "C" {
         GGML_OP_OPT_STEP_ADAMW,
         GGML_OP_OPT_STEP_SGD,
 
+        GGML_OP_SPARSE_TOPK_RADIX,
+        GGML_OP_INDEXER_FUSED,
+        GGML_OP_SPARSE_MLA_DECODE,
         GGML_OP_GLU,
 
         GGML_OP_COUNT,
@@ -725,12 +736,56 @@ extern "C" {
     GGML_API bool ggml_is_scalar    (const struct ggml_tensor * tensor);
     GGML_API bool ggml_is_vector    (const struct ggml_tensor * tensor);
     GGML_API bool ggml_is_matrix    (const struct ggml_tensor * tensor);
+
+    // sparse MLA decode fused (CUDA backend)
+    GGML_API struct ggml_tensor * ggml_sparse_mla_decode_fused(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q2d,
+        struct ggml_tensor  * k_cache,
+        struct ggml_tensor  * v_cache,
+        struct ggml_tensor  * idx_topk,
+        float                 kq_scale,
+        float                 attn_softcap);
+
     GGML_API bool ggml_is_3d        (const struct ggml_tensor * tensor);
     GGML_API int  ggml_n_dims       (const struct ggml_tensor * tensor); // returns 1 for scalars
 
     // returns whether the tensor elements can be iterated over with a flattened index (no gaps, no permutation)
     GGML_API bool ggml_is_contiguous  (const struct ggml_tensor * tensor);
     GGML_API bool ggml_is_contiguous_0(const struct ggml_tensor * tensor); // same as ggml_is_contiguous()
+
+    // radix-based sparse top-k indices per column (specialized CUDA path with CPU fallback)
+    GGML_API struct ggml_tensor * ggml_sparse_topk_radix(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * scores,
+            int                   k);
+
+
+    // Variant that accepts optional per-column windows [start,end)
+    GGML_API struct ggml_tensor * ggml_sparse_topk_radix_ex(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * scores,
+            int                   k,
+            struct ggml_tensor  * starts,
+            struct ggml_tensor  * ends);
+
+    // fused lightning-indexer logits: inputs Q[D, Tc*H], K[D, kv_end], W[H, Tc], k_scale[kv_end] => out [kv_end, Tc]
+    GGML_API struct ggml_tensor * ggml_indexer_logits_fused(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q2d,
+            struct ggml_tensor  * k2d,
+            struct ggml_tensor  * w2d,
+            struct ggml_tensor  * k_scale);
+
+    GGML_API struct ggml_tensor * ggml_indexer_logits_fused_ex(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q2d,
+            struct ggml_tensor  * k2d,
+            struct ggml_tensor  * w2d,
+            struct ggml_tensor  * k_scale,
+            struct ggml_tensor  * starts,
+            struct ggml_tensor  * ends);
+
     GGML_API bool ggml_is_contiguous_1(const struct ggml_tensor * tensor); // contiguous for dims >= 1
     GGML_API bool ggml_is_contiguous_2(const struct ggml_tensor * tensor); // contiguous for dims >= 2
 
@@ -2546,3 +2601,5 @@ extern "C" {
 #ifdef  __cplusplus
 }
 #endif
+
+     // optional [Tc] I32
