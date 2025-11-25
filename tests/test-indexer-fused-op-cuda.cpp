@@ -387,6 +387,18 @@ int main() {
     ggml_backend_tensor_set(starts, starts_h.data(), 0, sizeof(int32_t)*(size_t)Tc);
     ggml_backend_tensor_set(ends,   ends_h.data(),   0, sizeof(int32_t)*(size_t)Tc);
 
+    // Warmup run: compute once without sparse profiling so first-call overheads
+    // (e.g., TMA descriptor setup, JIT init) don't pollute timing logs.
+    {
+        const char *sav_prof    = std::getenv("LLAMA_SPARSE_PROF");
+        const char *sav_prof_ea = std::getenv("LLAMA_SPARSE_PROF_EACH");
+        if (sav_prof)    unsetenv("LLAMA_SPARSE_PROF");
+        if (sav_prof_ea) unsetenv("LLAMA_SPARSE_PROF_EACH");
+        ggml_backend_sched_graph_compute(sched, gf);
+        if (sav_prof)    setenv("LLAMA_SPARSE_PROF", sav_prof, 1); else unsetenv("LLAMA_SPARSE_PROF");
+        if (sav_prof_ea) setenv("LLAMA_SPARSE_PROF_EACH", sav_prof_ea, 1); else unsetenv("LLAMA_SPARSE_PROF_EACH");
+    }
+
     printf("starting compute\n");
     ggml_status st = ggml_backend_sched_graph_compute(sched, gf);
     printf("here5.4\n");
