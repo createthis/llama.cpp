@@ -218,3 +218,8 @@ endif()
       target_include_directories(ggml-cuda PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/vendors/cutlass/include
       )
+
+    # DeepGEMM vendor includes for sm90/sm100 FP8 paged MQA logits kernel (DSA)
+    target_include_directories(ggml-cuda PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/DeepGEMM
+    )
