@@ -72,6 +72,12 @@ if (CUDAToolkit_FOUND)
                              ${GGML_SOURCES_CUDA}
                             )
 
+    # DeepGEMM FP8 paged MQA logits (sm100) uses constexpr helpers in device code;
+    # enable relaxed constexpr just for the TU that includes the DeepGEMM kernels.
+    set_source_files_properties(indexer-fused.cu PROPERTIES
+        COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>"
+    )
+
 
     list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "mqa_attn_return_logits_kernel\\.cu$")
 

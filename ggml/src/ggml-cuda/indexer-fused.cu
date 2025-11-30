@@ -7,8 +7,62 @@
 using namespace nvcuda;
 
 #include <cuda_runtime.h>
+#include <cuda.h>
+#include <cute/arch/copy_sm90_desc.hpp>
+#include <deep_gemm/impls/sm100_fp8_paged_mqa_logits.cuh>
 
 #include <cuda_pipeline_primitives.h>
+
+#if CUDART_VERSION >= 12000
+static inline bool dg_fp8_encode_tma_2d(
+    cute::TmaDescriptor &desc,
+    CUtensorMapDataType type,
+    void *base,
+    uint32_t inner_dim, uint32_t outer_dim,
+    uint32_t box_inner, uint32_t box_outer,
+    uint32_t outer_stride_elems,
+    size_t elem_size) {
+    cuuint64_t dims[2]    = { (cuuint64_t) inner_dim, (cuuint64_t) outer_dim };
+    cuuint64_t strides[1] = { (cuuint64_t) outer_stride_elems * (cuuint64_t) elem_size };
+    cuuint32_t box[2]     = { (cuuint32_t) box_inner, (cuuint32_t) box_outer };
+    cuuint32_t elem_strides[2] = { 1u, 1u };
+    CUresult res = cuTensorMapEncodeTiled(
+        reinterpret_cast<CUtensorMap*>(&desc), type,
+        2u, base, dims, strides, box, elem_strides,
+        CU_TENSOR_MAP_INTERLEAVE_NONE,
+        CU_TENSOR_MAP_SWIZZLE_NONE,
+        CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+        CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    return res == CUDA_SUCCESS;
+}
+
+static inline bool dg_fp8_encode_tma_3d(
+    cute::TmaDescriptor &desc,
+    CUtensorMapDataType type,
+    void *base,
+    uint32_t dim0, uint32_t dim1, uint32_t dim2,
+    uint32_t box0, uint32_t box1, uint32_t box2,
+    uint32_t stride0_elems, uint32_t stride1_elems,
+    size_t elem_size) {
+    cuuint64_t dims[3]    = { (cuuint64_t) dim0, (cuuint64_t) dim1, (cuuint64_t) dim2 };
+    cuuint64_t strides[2] = {
+        (cuuint64_t) stride0_elems * (cuuint64_t) elem_size,
+        (cuuint64_t) stride1_elems * (cuuint64_t) elem_size
+    };
+    cuuint32_t box[3]     = { (cuuint32_t) box0, (cuuint32_t) box1, (cuuint32_t) box2 };
+    cuuint32_t elem_strides[3] = { 1u, 1u, 1u };
+    CUresult res = cuTensorMapEncodeTiled(
+        reinterpret_cast<CUtensorMap*>(&desc), type,
+        3u, base, dims, strides, box, elem_strides,
+        CU_TENSOR_MAP_INTERLEAVE_NONE,
+        CU_TENSOR_MAP_SWIZZLE_NONE,
+        CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+        CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    return res == CUDA_SUCCESS;
+}
+#endif // CUDART_VERSION >= 12000
+
+
 #include <mma.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1145,11 +1199,238 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         }
     }
 
+    const char *dg_env = getenv("LLAMA_DG_FP8");
+    const bool use_dg_fp8 = (dg_env && *dg_env && atoi(dg_env) != 0);
     if (sparse_debug_on()) printf("[INDEXER_DISPATCH] use_wmma=%d D=%d H=%d Tc=%d kv=%d BLOCK_Q=%d BLOCK_N=%d D_TILE=%d\n", (int)use_wmma, D, H, Tc, kv_end, BLOCK_Q, BLOCK_N, D_TILE);
     // Optional: TL port path in device wrapper
     const char * __prof_env = getenv("LLAMA_SPARSE_PROF");
     auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
-    if (const char *s = getenv("LLAMA_INDEXER_TL_PORT"); s && atoi(s) != 0) {
+    if (use_dg_fp8) {
+        if (sparse_debug_on()) fprintf(stderr, "[INDEXER_DISPATCH] using DeepGEMM FP8 paged MQA logits path\n");
+
+#if CUDART_VERSION >= 12000
+        // DeepSeek V3.2-Exp: use DeepGEMM FP8 paged MQA logits kernel when shapes match
+        const int block_kv = 64;
+        const int num_math_warp_groups = 4;
+        const int num_specialized_threads = 128;
+        const int num_math_threads = num_math_warp_groups * 128;
+        if (H == 64 && (D == 64 || D == 128) && (Tc == 1 || Tc == 2) && kv_end % block_kv == 0) {
+            int batch_size = 1;
+            int next_n = Tc;
+            int num_heads = H;
+            int head_dim = D;
+            int num_kv_blocks = kv_end / block_kv;
+            int max_context_len = kv_end;
+
+            ggml_cuda_pool & pool = ctx.pool(ggml_cuda_get_device());
+
+            // Build DeepGEMM-style context_lens (1D) and block_table
+            ggml_cuda_pool_alloc<unsigned int> __ctx_lens(pool, batch_size);
+            ggml_cuda_pool_alloc<unsigned int> __block_tbl(pool, (size_t)batch_size * (size_t)num_kv_blocks);
+            unsigned int *d_ctx_lens = __ctx_lens.get();
+            unsigned int *d_block_tbl = __block_tbl.get();
+            CUDA_CHECK(cudaMemsetAsync(d_block_tbl, 0, sizeof(unsigned int)*(size_t)batch_size*(size_t)num_kv_blocks, stream));
+            unsigned int h_ctx[1] = { (unsigned int) kv_end };
+            CUDA_CHECK(cudaMemcpyAsync(d_ctx_lens, h_ctx, sizeof(unsigned int), cudaMemcpyHostToDevice, stream));
+            // block_table[0][i] = i
+            CUDA_CHECK(cudaMemsetAsync(d_block_tbl, 0, sizeof(unsigned int)*(size_t)num_kv_blocks, stream));
+            {
+                // simple host init for block_table
+                std::vector<unsigned int> h_bt(num_kv_blocks);
+                for (int i = 0; i < num_kv_blocks; ++i) h_bt[i] = (unsigned int) i;
+                CUDA_CHECK(cudaMemcpyAsync(d_block_tbl, h_bt.data(), sizeof(unsigned int)*h_bt.size(), cudaMemcpyHostToDevice, stream));
+            }
+
+            // Build schedule_meta on host mirroring DeepGEMM scheduler
+            int dev = ggml_cuda_get_device();
+            int num_sms = 0;
+            CUDA_CHECK(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev));
+            ggml_cuda_pool_alloc<unsigned int> __sched(pool, (size_t)(num_sms + 1) * 2);
+            unsigned int *d_sched = __sched.get();
+            std::vector<unsigned int> h_sched((size_t)(num_sms + 1) * 2, 0);
+            {
+                const int aligned_batch_size = ((batch_size + 31) / 32) * 32;
+                const int split_kv = block_kv * num_math_warp_groups;
+                // For our single-q case, num_segs for q=0 is ceil_div(context_len, split_kv)
+                int context_len = kv_end;
+                int num_segs = (context_len + split_kv - 1) / split_kv;
+                unsigned int total_segs = (unsigned int) num_segs;
+                unsigned int q = total_segs / (unsigned int) num_sms;
+                unsigned int r = total_segs % (unsigned int) num_sms;
+                for (int sm = 0; sm <= num_sms; ++sm) {
+                    unsigned int seg_starts = (unsigned int) sm * q + (sm < (int)r ? (unsigned int) sm : (unsigned int) r);
+                    unsigned int q_idx = (seg_starts == 0 ? 0u : (unsigned int) batch_size);
+                    unsigned int kv_split_idx = (seg_starts == 0 ? 0u : (seg_starts - 1));
+                    h_sched[(size_t)sm*2 + 0] = q_idx;
+                    h_sched[(size_t)sm*2 + 1] = kv_split_idx;
+                }
+            }
+            CUDA_CHECK(cudaMemcpyAsync(d_sched, h_sched.data(), sizeof(unsigned int)*h_sched.size(), cudaMemcpyHostToDevice, stream));
+
+            // Allocate logits [batch*next_n, aligned_max_context_len]
+            const int aligned_max_context_len = ((max_context_len + num_math_warp_groups*block_kv - 1) / (num_math_warp_groups*block_kv))*(num_math_warp_groups*block_kv);
+            ggml_cuda_pool_alloc<float> __dg_logits(pool, (size_t)batch_size * (size_t)next_n * (size_t)aligned_max_context_len);
+            float *d_dg_logits = __dg_logits.get();
+            CUDA_CHECK(cudaMemsetAsync(d_dg_logits, 0, sizeof(float)*(size_t)batch_size*(size_t)next_n*(size_t)aligned_max_context_len, stream));
+
+            // Build FP8 Q, K and scales in row-major and flatten
+            ggml_cuda_pool_alloc<float> __Qrm(pool, (size_t)(Tc*H) * (size_t)D);
+            ggml_cuda_pool_alloc<float> __Krm(pool, (size_t)kv_end * (size_t)D);
+            ggml_cuda_pool_alloc<float> __Wrm(pool, (size_t)Tc * (size_t)H);
+            float *dQrm = __Qrm.get();
+            float *dKrm = __Krm.get();
+            float *dWrm = __Wrm.get();
+            dim3 tbT(32, 8);
+            dim3 gdQ((Tc*H + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
+            dim3 gdK((kv_end + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
+            dim3 gdW((Tc + tbT.x - 1)/tbT.x, (H + tbT.y - 1)/tbT.y);
+            k_colmajor_DN_to_rowmajor_ND<<<gdQ, tbT, 0, stream>>>(dQ, D, Tc*H, dQrm);
+            k_colmajor_DN_to_rowmajor_ND<<<gdK, tbT, 0, stream>>>(dK, D, kv_end, dKrm);
+            k_colmajor_DN_to_rowmajor_ND<<<gdW, tbT, 0, stream>>>(dW, H, Tc, dWrm);
+
+            // FP8 Q (no per-row scaling)
+            ggml_cuda_pool_alloc<unsigned char> __Qfp8(pool, (size_t)(Tc*H) * (size_t)D);
+            unsigned char *dQfp8 = __Qfp8.get();
+            {
+                size_t total = (size_t)(Tc*H) * (size_t)D;
+                dim3 tb(256);
+                dim3 gd((unsigned)((total + tb.x - 1)/tb.x));
+                k_rowmajor_f32_to_fp8_e4m3<<<gd, tb, 0, stream>>>(dQrm, (int)(Tc*H), D, dQfp8);
+            }
+
+            // FP8 K with per-row scaling and combined k_scale
+            ggml_cuda_pool_alloc<unsigned char> __Kfp8(pool, (size_t)kv_end * (size_t)D);
+            ggml_cuda_pool_alloc<float> __Kamax(pool, (size_t)kv_end);
+            ggml_cuda_pool_alloc<float> __Ksf(pool, (size_t)kv_end);
+            ggml_cuda_pool_alloc<float> __KsfInv(pool, (size_t)kv_end);
+            ggml_cuda_pool_alloc<float> __IdxKScale(pool, (size_t)kv_end);
+            unsigned char *dKfp8 = __Kfp8.get();
+            float *dKamax = __Kamax.get();
+            float *dKsf   = __Ksf.get();
+            float *dKsfInv= __KsfInv.get();
+            float *dIdxKScale = __IdxKScale.get();
+            {
+                int rowsK = kv_end;
+                int colsK = D;
+                int threadsA = 256;
+                int blocksA = (rowsK + threadsA - 1) / threadsA;
+                k_rowmajor_f32_rowwise_absmax<<<blocksA, threadsA, 0, stream>>>(dKrm, rowsK, colsK, dKamax);
+                k_fp8_compute_row_scales<<<blocksA, threadsA, 0, stream>>>(dKamax, rowsK, dKsf, dKsfInv);
+                size_t total = (size_t)rowsK * (size_t)colsK;
+                dim3 tb(256);
+                dim3 gd((unsigned)((total + tb.x - 1)/tb.x));
+                k_rowmajor_f32_to_fp8_e4m3_rowwise_scaled<<<gd, tb, 0, stream>>>(dKrm, rowsK, colsK, dKsfInv, dKfp8);
+                k_elemwise_mul<<<blocksA, threadsA, 0, stream>>>(dKS, dKsf, dIdxKScale, rowsK);
+            }
+
+            // Build fused KV cache buffer [num_kv_blocks, block_kv, 1, head_dim+4]
+            const int head_dim_with_sf = head_dim + 4;
+            ggml_cuda_pool_alloc<unsigned char> __FusedKV(pool, (size_t)num_kv_blocks * (size_t)block_kv * (size_t)head_dim_with_sf);
+            unsigned char *dFusedKV = __FusedKV.get();
+            CUDA_CHECK(cudaMemsetAsync(dFusedKV, 0, (size_t)num_kv_blocks * (size_t)block_kv * (size_t)head_dim_with_sf, stream));
+            {
+                // Layout: [num_blocks, block_kv, 1, head_dim+4]
+                dim3 tb(256);
+                dim3 gd((unsigned)((kv_end * head_dim + tb.x - 1)/tb.x));
+                // pack Kfp8 into leading head_dim slots; then we will separately feed scales via TMA
+                // here we only lay out FP8 values row-major
+                // index: row r in [0,kv_end), col c in [0,head_dim)
+                auto pack = [=] __device__ (int idx) {};
+            }
+            // For DeepGEMM kernel we actually pass Kfp8 and scales separately via tensor_map_kv and tensor_map_kv_scales,
+            // so we do not need a true fused buffer here; instead we treat dKfp8 as [num_kv_blocks, block_kv, head_dim]
+
+            // Create TMA descriptors using driver API wrappers
+            cute::TmaDescriptor tma_q{}, tma_kv{}, tma_kv_scales{}, tma_w{};
+            // Q: [head_dim, batch*next_n*num_heads]
+            dg_fp8_encode_tma_2d(tma_q, CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                 dQfp8,
+                                 (uint32_t) head_dim,
+                                 (uint32_t)(batch_size * next_n * num_heads),
+                                 (uint32_t) head_dim,
+                                 (uint32_t)(next_n * num_heads),
+                                 (uint32_t) head_dim,
+                                 sizeof(unsigned char));
+            // KV: [head_dim, block_kv, num_kv_blocks]
+            dg_fp8_encode_tma_3d(tma_kv, CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                 dKfp8,
+                                 (uint32_t) head_dim,
+                                 (uint32_t) block_kv,
+                                 (uint32_t) num_kv_blocks,
+                                 (uint32_t) head_dim,
+                                 (uint32_t) block_kv,
+                                 1u,
+                                 (uint32_t) head_dim,
+                                 (uint32_t)(head_dim * block_kv),
+                                 sizeof(unsigned char));
+            // KV scales: [block_kv, num_kv_blocks]
+            dg_fp8_encode_tma_2d(tma_kv_scales, CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
+                                 dIdxKScale,
+                                 (uint32_t) block_kv,
+                                 (uint32_t) num_kv_blocks,
+                                 (uint32_t) block_kv,
+                                 1u,
+                                 (uint32_t) block_kv,
+                                 sizeof(float));
+            // Weights: [next_n*num_heads, batch_size]
+            dg_fp8_encode_tma_2d(tma_w, CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
+                                 dWrm,
+                                 (uint32_t)(next_n * num_heads),
+                                 (uint32_t) batch_size,
+                                 (uint32_t)(next_n * num_heads),
+                                 1u,
+                                 (uint32_t)(next_n * num_heads),
+                                 sizeof(float));
+
+            // Launch DeepGEMM kernel
+            dim3 grid(num_sms, 1, 1);
+            dim3 block(num_specialized_threads + num_math_threads + 128, 1, 1);
+            const uint32_t kNextN = 2;
+            const uint32_t kNumHeads = 64;
+            const uint32_t kHeadDim = 128;
+            const uint32_t kNumQStages = 3;
+            const uint32_t kNumKVStages = 3;
+            const uint32_t SPLIT_KV = block_kv * num_math_warp_groups;
+            const uint32_t kNumSpecializedThreads = 128;
+            const uint32_t kNumMathThreads = num_math_warp_groups * 128;
+            size_t shmem_bytes = 0; // computed in-kernel
+
+            LAUNCH_PROFILE_KERNEL("PROFILE_DG_FP8", DG_FP8, stream, ([&](){
+                deep_gemm::sm100_fp8_paged_mqa_logits<
+                    kNextN, kNumHeads,
+                    kHeadDim, (uint32_t) block_kv,
+                    false,
+                    kNumQStages, kNumKVStages,
+                    SPLIT_KV,
+                    kNumSpecializedThreads, kNumMathThreads
+                ><<<grid, block, shmem_bytes, stream>>>(
+                    (uint32_t) batch_size,
+                    (uint64_t) aligned_max_context_len,
+                    (uint64_t) num_kv_blocks,
+                    d_ctx_lens,
+                    d_dg_logits,
+                    d_block_tbl,
+                    d_sched,
+                    tma_q,
+                    tma_kv,
+                    tma_kv_scales,
+                    tma_w);
+            })(), D, H, Tc, kv_end);
+
+            // Map logits [batch*next_n, max_context_len] back to Out [kv, Tc]
+            // For our simple case (batch=1), token t in [0,Tc), kv index k in [0,kv_end)
+            dim3 tb(32, 4);
+            dim3 gd((kv_end + tb.x - 1)/tb.x, (Tc + tb.y - 1)/tb.y);
+            k_transpose_TcKv_to_KvTc<<<gd, tb, 0, stream>>>(d_dg_logits, Tc, kv_end, dOut);
+            CUDA_CHECK(cudaGetLastError());
+            cudaStreamSynchronize(stream);
+            if (dStarts_tmp) cudaFree(dStarts_tmp);
+            if (dEnds_tmp) cudaFree(dEnds_tmp);
+            return;
+        }
+#endif // CUDART_VERSION >= 12000
+    } else if (const char *s = getenv("LLAMA_INDEXER_TL_PORT"); s && atoi(s) != 0) {
+
         ggml_cuda_pool & __pool = ctx.pool(ggml_cuda_get_device());
           bool use_tma_fp8 = false;
           if (const char *e = getenv("LLAMA_TL_FP8"); e && atoi(e) != 0) use_tma_fp8 = true;
