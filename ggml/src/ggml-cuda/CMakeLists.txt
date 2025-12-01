@@ -75,12 +75,13 @@ if (CUDAToolkit_FOUND)
 
     list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "mqa_attn_return_logits_kernel\\.cu$")
 
-    # DeepGEMM FP8 paged MQA logits (SM90/SM100-style) as a separate OBJECT library
+    # DeepGEMM FP8 paged MQA logits (SM100-style) as a separate OBJECT library
     add_library(deepgemm_kernels OBJECT
         ${CMAKE_CURRENT_SOURCE_DIR}/ggml-cuda-deepgemm.cu
     )
-    # Compile only for SM90A-style archs; this TU uses TMA/TMEM/WGMMA
-    set_property(TARGET deepgemm_kernels PROPERTY CUDA_ARCHITECTURES "90a")
+    # Compile this TU for SM100A; TCGen05 TMEM/WGMMA is only available on SM100/SM101/SM110.
+    # The resulting binary remains forward-compatible with SM120 GPUs.
+    set_property(TARGET deepgemm_kernels PROPERTY CUDA_ARCHITECTURES "100a")
     set_property(TARGET deepgemm_kernels PROPERTY POSITION_INDEPENDENT_CODE ON)
     target_include_directories(deepgemm_kernels PRIVATE
         ${CMAKE_SOURCE_DIR}/ggml/include

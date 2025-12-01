@@ -13,7 +13,7 @@ using namespace nvcuda;
 #include <cuda_pipeline_primitives.h>
 
 #if CUDART_VERSION >= 12000
-extern "C" void ggml_deepgemm_paged_mqa_logits_sm90(
+extern "C" void ggml_deepgemm_paged_mqa_logits_sm100(
     uint32_t batch_size,
     uint64_t logits_stride,
     uint64_t block_table_stride,
@@ -1417,7 +1417,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
             size_t shmem_bytes = (size_t) smem_size;
 
             LAUNCH_PROFILE_KERNEL("PROFILE_DG_FP8", DG_FP8, stream, ([&](){
-                ggml_deepgemm_paged_mqa_logits_sm90(
+                ggml_deepgemm_paged_mqa_logits_sm100(
                     (uint32_t) batch_size,
                     (uint64_t) aligned_max_context_len,
                     (uint64_t) num_kv_blocks,

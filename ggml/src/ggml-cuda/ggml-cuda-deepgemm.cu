@@ -9,11 +9,11 @@
 #include <cuda.h>
 
 #include <cute/arch/copy_sm90_desc.hpp>
-#include <deep_gemm/impls/sm90_fp8_paged_mqa_logits.cuh>
+#include <deep_gemm/impls/sm100_fp8_paged_mqa_logits.cuh>
 
 using namespace deep_gemm;
 
-extern "C" void ggml_deepgemm_paged_mqa_logits_sm90(
+extern "C" void ggml_deepgemm_paged_mqa_logits_sm100(
     uint32_t batch_size,
     uint64_t logits_stride,
     uint64_t block_table_stride,
@@ -77,7 +77,7 @@ extern "C" void ggml_deepgemm_paged_mqa_logits_sm90(
         Kernel kernel = nullptr;
 
         if (head_dim == 64) {
-            kernel = sm90_fp8_paged_mqa_logits<
+            kernel = sm100_fp8_paged_mqa_logits<
                 kNextN, kNumHeads,
                 64u, 64u,
                 false,
@@ -85,7 +85,7 @@ extern "C" void ggml_deepgemm_paged_mqa_logits_sm90(
                 64u,
                 kNumSpecializedThreads, kNumMathThreadsConst>;
         } else { // head_dim == 128
-            kernel = sm90_fp8_paged_mqa_logits<
+            kernel = sm100_fp8_paged_mqa_logits<
                 kNextN, kNumHeads,
                 128u, 64u,
                 false,
