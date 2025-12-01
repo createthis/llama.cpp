@@ -45,6 +45,7 @@ if (CUDAToolkit_FOUND)
     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda-radix.h")
 
     file(GLOB   GGML_SOURCES_CUDA "*.cu")
+    list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "ggml-cuda-deepgemm\.cu$")
     list(APPEND GGML_SOURCES_CUDA "topk-radix.cu" indexer-fused.cu sparse-mla-decode.cu)
 
     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
@@ -72,14 +73,26 @@ if (CUDAToolkit_FOUND)
                              ${GGML_SOURCES_CUDA}
                             )
 
-    # DeepGEMM FP8 paged MQA logits (sm100) uses constexpr helpers in device code;
-    # enable relaxed constexpr just for the TU that includes the DeepGEMM kernels.
-    set_source_files_properties(indexer-fused.cu PROPERTIES
-        COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>"
-    )
-
-
     list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "mqa_attn_return_logits_kernel\\.cu$")
+
+    # DeepGEMM FP8 paged MQA logits (SM90/SM100-style) as a separate OBJECT library
+    add_library(deepgemm_kernels OBJECT
+        ${CMAKE_CURRENT_SOURCE_DIR}/ggml-cuda-deepgemm.cu
+    )
+    # Compile only for SM90A-style archs; this TU uses TMA/TMEM/WGMMA
+    set_property(TARGET deepgemm_kernels PROPERTY CUDA_ARCHITECTURES "90a")
+    set_property(TARGET deepgemm_kernels PROPERTY POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(deepgemm_kernels PRIVATE
+        ${CMAKE_SOURCE_DIR}/ggml/include
+        ${CMAKE_SOURCE_DIR}/ggml/src
+        ${CMAKE_SOURCE_DIR}/ggml/src/ggml-cuda
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/DeepGEMM
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/cutlass/include
+    )
+    target_compile_options(deepgemm_kernels PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+    # Inject the compiled objects into ggml-cuda
+    target_sources(ggml-cuda PRIVATE $<TARGET_OBJECTS:deepgemm_kernels>)
 
     # Build the Lightning Indexer kernel as its own OBJECT library so we can
     # give it a different CUDA arch than the rest of the project.

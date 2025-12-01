@@ -8,12 +8,36 @@ using namespace nvcuda;
 
 #include <cuda_runtime.h>
 #include <cuda.h>
-#include <cute/arch/copy_sm90_desc.hpp>
-#include <deep_gemm/impls/sm100_fp8_paged_mqa_logits.cuh>
 
+#include <cute/arch/copy_sm90_desc.hpp> // for cute::TmaDescriptor
 #include <cuda_pipeline_primitives.h>
 
 #if CUDART_VERSION >= 12000
+extern "C" void ggml_deepgemm_paged_mqa_logits_sm90(
+    uint32_t batch_size,
+    uint64_t logits_stride,
+    uint64_t block_table_stride,
+    const uint32_t * context_lens,
+    float * logits,
+    const uint32_t * block_table,
+    const uint32_t * schedule_meta,
+    cute::TmaDescriptor tma_q,
+    cute::TmaDescriptor tma_kv,
+    cute::TmaDescriptor tma_kv_scales,
+    cute::TmaDescriptor tma_w,
+    uint32_t next_n,
+    uint32_t num_heads,
+    uint32_t head_dim,
+    uint32_t block_kv,
+    bool     is_context_lens_2d,
+    uint32_t num_q_stages,
+    uint32_t num_kv_stages,
+    uint32_t split_kv,
+    uint32_t num_specialized_threads,
+    uint32_t num_math_threads,
+    cudaStream_t stream,
+    size_t shmem_bytes);
+
 static inline bool dg_fp8_encode_tma_2d(
     cute::TmaDescriptor &desc,
     CUtensorMapDataType type,
@@ -1211,7 +1235,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
 #if CUDART_VERSION >= 12000
         // DeepSeek V3.2-Exp: use DeepGEMM FP8 paged MQA logits kernel when shapes match
         const int block_kv = 64;
-        const int num_math_warp_groups = 4;
+        const int num_math_warp_groups = 1;
         const int num_specialized_threads = 128;
         const int num_math_threads = num_math_warp_groups * 128;
         if (H == 64 && (D == 64 || D == 128) && (Tc == 1 || Tc == 2) && kv_end % block_kv == 0) {
@@ -1241,31 +1265,15 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                 CUDA_CHECK(cudaMemcpyAsync(d_block_tbl, h_bt.data(), sizeof(unsigned int)*h_bt.size(), cudaMemcpyHostToDevice, stream));
             }
 
-            // Build schedule_meta on host mirroring DeepGEMM scheduler
-            int dev = ggml_cuda_get_device();
-            int num_sms = 0;
-            CUDA_CHECK(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev));
+            // Build schedule_meta for single-CTA execution (grid.x = 1)
+            // Equivalent to DeepGEMM's smxx_paged_mqa_logits_metadata for batch_size=1
+            const int split_kv = block_kv * num_math_warp_groups;
+            (void) split_kv; // silence unused warning for now
+            const int num_sms = 1;
             ggml_cuda_pool_alloc<unsigned int> __sched(pool, (size_t)(num_sms + 1) * 2);
             unsigned int *d_sched = __sched.get();
-            std::vector<unsigned int> h_sched((size_t)(num_sms + 1) * 2, 0);
-            {
-                const int aligned_batch_size = ((batch_size + 31) / 32) * 32;
-                const int split_kv = block_kv * num_math_warp_groups;
-                // For our single-q case, num_segs for q=0 is ceil_div(context_len, split_kv)
-                int context_len = kv_end;
-                int num_segs = (context_len + split_kv - 1) / split_kv;
-                unsigned int total_segs = (unsigned int) num_segs;
-                unsigned int q = total_segs / (unsigned int) num_sms;
-                unsigned int r = total_segs % (unsigned int) num_sms;
-                for (int sm = 0; sm <= num_sms; ++sm) {
-                    unsigned int seg_starts = (unsigned int) sm * q + (sm < (int)r ? (unsigned int) sm : (unsigned int) r);
-                    unsigned int q_idx = (seg_starts == 0 ? 0u : (unsigned int) batch_size);
-                    unsigned int kv_split_idx = (seg_starts == 0 ? 0u : (seg_starts - 1));
-                    h_sched[(size_t)sm*2 + 0] = q_idx;
-                    h_sched[(size_t)sm*2 + 1] = kv_split_idx;
-                }
-            }
-            CUDA_CHECK(cudaMemcpyAsync(d_sched, h_sched.data(), sizeof(unsigned int)*h_sched.size(), cudaMemcpyHostToDevice, stream));
+            unsigned int h_sched[4] = {0u, 0u, (unsigned int) batch_size, 0u};
+            CUDA_CHECK(cudaMemcpyAsync(d_sched, h_sched, sizeof(h_sched), cudaMemcpyHostToDevice, stream));
 
             // Allocate logits [batch*next_n, aligned_max_context_len]
             const int aligned_max_context_len = ((max_context_len + num_math_warp_groups*block_kv - 1) / (num_math_warp_groups*block_kv))*(num_math_warp_groups*block_kv);
@@ -1382,28 +1390,34 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                                  (uint32_t)(next_n * num_heads),
                                  sizeof(float));
 
-            // Launch DeepGEMM kernel
-            dim3 grid(num_sms, 1, 1);
-            dim3 block(num_specialized_threads + num_math_threads + 128, 1, 1);
+            // Launch DeepGEMM kernel via external wrapper TU
             const uint32_t kNextN = 2;
             const uint32_t kNumHeads = 64;
-            const uint32_t kHeadDim = 128;
             const uint32_t kNumQStages = 3;
             const uint32_t kNumKVStages = 3;
             const uint32_t SPLIT_KV = block_kv * num_math_warp_groups;
             const uint32_t kNumSpecializedThreads = 128;
             const uint32_t kNumMathThreads = num_math_warp_groups * 128;
-            size_t shmem_bytes = 0; // computed in-kernel
+            // Dynamic shared memory size, mirroring DeepGEMM host runtime
+            const int swizzle_alignment = head_dim * 8;
+            auto align_int = [](int x, int a) { return (x + a - 1) / a * a; };
+            const int smem_q_size_per_stage = next_n * num_heads * head_dim * 1; // __nv_fp8_e4m3
+            const int smem_weight_size_per_stage = next_n * num_heads * (int)sizeof(float);
+            const int aligned_smem_weight_size_per_stage = align_int(smem_weight_size_per_stage, swizzle_alignment);
+            const int smem_q_pipe_size = kNumQStages * (smem_q_size_per_stage + aligned_smem_weight_size_per_stage) +
+                                         align_int(kNumQStages * 8 * 2, swizzle_alignment);
+            const int smem_kv_size_per_stage = block_kv * head_dim * 1; // __nv_fp8_e4m3
+            const int smem_kv_scale_size_per_stage = block_kv * (int)sizeof(float);
+            const int aligned_smem_kv_scale_size_per_stage = align_int(smem_kv_scale_size_per_stage, swizzle_alignment);
+            const int smem_kv_pipe_size = kNumKVStages * (smem_kv_size_per_stage + aligned_smem_kv_scale_size_per_stage) +
+                                          align_int(kNumKVStages * 8 * 2, swizzle_alignment);
+            const int smem_umma_barriers = num_math_warp_groups * 2 * 8;
+            const int smem_tmem_ptr = 4;
+            const int smem_size = smem_q_pipe_size + num_math_warp_groups * smem_kv_pipe_size + smem_umma_barriers + smem_tmem_ptr;
+            size_t shmem_bytes = (size_t) smem_size;
 
             LAUNCH_PROFILE_KERNEL("PROFILE_DG_FP8", DG_FP8, stream, ([&](){
-                deep_gemm::sm100_fp8_paged_mqa_logits<
-                    kNextN, kNumHeads,
-                    kHeadDim, (uint32_t) block_kv,
-                    false,
-                    kNumQStages, kNumKVStages,
-                    SPLIT_KV,
-                    kNumSpecializedThreads, kNumMathThreads
-                ><<<grid, block, shmem_bytes, stream>>>(
+                ggml_deepgemm_paged_mqa_logits_sm90(
                     (uint32_t) batch_size,
                     (uint64_t) aligned_max_context_len,
                     (uint64_t) num_kv_blocks,
@@ -1414,7 +1428,19 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                     tma_q,
                     tma_kv,
                     tma_kv_scales,
-                    tma_w);
+                    tma_w,
+                    kNextN,
+                    kNumHeads,
+                    (uint32_t) head_dim,
+                    (uint32_t) block_kv,
+                    false,
+                    kNumQStages,
+                    kNumKVStages,
+                    SPLIT_KV,
+                    kNumSpecializedThreads,
+                    kNumMathThreads,
+                    stream,
+                    shmem_bytes);
             })(), D, H, Tc, kv_end);
 
             // Map logits [batch*next_n, max_context_len] back to Out [kv, Tc]
