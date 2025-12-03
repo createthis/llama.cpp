@@ -81,7 +81,7 @@ if (CUDAToolkit_FOUND)
     )
     # Compile this TU for SM100A; TCGen05 TMEM/WGMMA is only available on SM100/SM101/SM110.
     # The resulting binary remains forward-compatible with SM120 GPUs.
-    set_property(TARGET deepgemm_kernels PROPERTY CUDA_ARCHITECTURES "100a")
+    set_property(TARGET deepgemm_kernels PROPERTY CUDA_ARCHITECTURES "120a")
     set_property(TARGET deepgemm_kernels PROPERTY POSITION_INDEPENDENT_CODE ON)
     target_include_directories(deepgemm_kernels PRIVATE
         ${CMAKE_SOURCE_DIR}/ggml/include
