@@ -13898,6 +13898,11 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
 
                     // Apply sparse attention if available, otherwise use regular attention
                     if (use_sparse_attention) {{
+                        // Guard: Only use sparse attention if inp_attn and mctx are valid
+                        if (!inp_attn || !inp_attn->mctx) {
+                            use_sparse_attention = false;
+                            goto regular_attention_mla;
+                        }
                             const auto * mctx_cur = inp_attn->mctx;
                             ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, Kcur, inp_attn->get_k_idxs(), il));
                             ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
@@ -13969,6 +13974,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         LLAMA_LOG_DEBUG("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d\n",
                                       (int)top_k, il);
                     } else {
+                        regular_attention_mla:
                         // note: MLA with the absorption optimzation converts into MQA (ie: GQA with 1 group)
                         cur = build_attn(inp_attn,
                                 model.layers[il].wo, NULL,
@@ -14006,6 +14012,11 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
 
                     // Apply sparse attention if available, otherwise use regular attention
                     if (use_sparse_attention) {{
+                        // Guard: Only use sparse attention if inp_attn and mctx are valid
+                        if (!inp_attn || !inp_attn->mctx) {
+                            use_sparse_attention = false;
+                            goto regular_attention_mha;
+                        }
                             const auto * mctx_cur = inp_attn->mctx;
                             ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, Kcur, inp_attn->get_k_idxs(), il));
                             ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
@@ -14064,6 +14075,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         LLAMA_LOG_DEBUG("DeepSeek V3.2: Using sparse attention with top-%d tokens for layer %d\n",
                                       (int)top_k, il);
                     } else {
+                        regular_attention_mha:
                         // note: MLA without the absorption optimization converts into MHA (ie: GQA with full n_head groups)
                         cur = build_attn(inp_attn,
                                 model.layers[il].wo, NULL,
