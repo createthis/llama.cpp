@@ -31,7 +31,7 @@ llama_kv_cache_fp8::llama_kv_cache_fp8(
            llama_swa_type   swa_type,
     const layer_filter_cb & filter,
     const  layer_reuse_cb & reuse) :
-    model(model), hparams(model.hparams), v_trans(v_trans),
+    model(model), hparams(model.hparams), type_k(type_k), type_v(type_v), v_trans(v_trans),
     n_seq_max(n_seq_max), n_stream(unified ? 1u : n_seq_max),
     n_pad(n_pad), n_swa(n_swa), swa_type(swa_type) {
 
@@ -236,6 +236,12 @@ uint32_t llama_kv_cache_fp8::get_n_kv(const llama_kv_cache::slot_info & sinfo) c
 
 // Helpers to quantize/dequantize rows using ggml FP8 helpers
 
+extern "C" {
+    struct ggml_e4m3_t;
+    void ggml_e4m3_to_fp32_row(const ggml_e4m3_t * x, float * y, int64_t k);
+    void ggml_fp32_to_e4m3_row_ref(const float * x, ggml_e4m3_t * y, int64_t k);
+}
+
 static void fp32_to_e4m3_row(const float * src, ggml_e4m3_t * dst, int64_t k) {
     ggml_fp32_to_e4m3_row_ref(src, dst, k);
 }
@@ -420,7 +426,40 @@ void llama_kv_cache_fp8::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1
 
     auto & cells = v_cells[seq_to_stream[seq_id]];
 
-    cells.seq_add(seq_id, p0, p1, shift);
+    if (shift == 0) {
+        return;
+    }
+
+    uint32_t new_head = cells.size();
+
+    if (p0 < 0) {
+        p0 = 0;
+    }
+
+    if (p1 < 0) {
+        p1 = std::numeric_limits<llama_pos>::max();
+    }
+
+    if (p0 == p1) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < cells.size(); ++i) {
+        if (!cells.pos_in(i, p0, p1)) {
+            continue;
+        }
+
+        if (cells.seq_has(i, seq_id)) {
+            if (cells.pos_add(i, shift)) {
+                if (new_head == cells.size()) {
+                    new_head = i;
+                }
+            }
+        }
+    }
+
+    // we don't maintain a head per-stream here, but preserve behavior by
+    // leaving v_heads unchanged; this is fine for FP8 cache experiments.
 }
 
 void llama_kv_cache_fp8::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, int d) {
@@ -428,7 +467,31 @@ void llama_kv_cache_fp8::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1
 
     auto & cells = v_cells[seq_to_stream[seq_id]];
 
-    cells.seq_div(seq_id, p0, p1, d);
+    if (d == 1) {
+        return;
+    }
+
+    if (p0 < 0) {
+        p0 = 0;
+    }
+
+    if (p1 < 0) {
+        p1 = std::numeric_limits<llama_pos>::max();
+    }
+
+    if (p0 == p1) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < cells.size(); ++i) {
+        if (!cells.pos_in(i, p0, p1)) {
+            continue;
+        }
+
+        if (cells.seq_has(i, seq_id)) {
+            cells.pos_div(i, d);
+        }
+    }
 }
 
 llama_pos llama_kv_cache_fp8::seq_pos_min(llama_seq_id seq_id) const {
@@ -548,15 +611,13 @@ ggml_cgraph * llama_kv_cache_fp8::build_graph_shift(
     return nullptr;
 }
 
-void llama_kv_cache_fp8::state_write_meta(llama_io_write_i & io, const llama_kv_cache::cell_ranges_t & cr, llama_seq_id seq_id) const {
+void llama_kv_cache_fp8::state_write_meta(llama_io_write_i & io, llama_seq_id seq_id) const {
     GGML_UNUSED(io);
-    GGML_UNUSED(cr);
     GGML_UNUSED(seq_id);
 }
 
-void llama_kv_cache_fp8::state_write_data(llama_io_write_i & io, const llama_kv_cache::cell_ranges_t & cr) const {
+void llama_kv_cache_fp8::state_write_data(llama_io_write_i & io) const {
     GGML_UNUSED(io);
-    GGML_UNUSED(cr);
 }
 
 bool llama_kv_cache_fp8::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, llama_seq_id dest_seq_id) {

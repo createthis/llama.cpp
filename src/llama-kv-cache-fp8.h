@@ -1,7 +1,6 @@
 #pragma once
 
 #include "llama-kv-cache.h"
-#include "ggml-fp8.h"
 
 // Experimental FP8 KV cache for DeepSeek V3.2.
 //
@@ -84,6 +83,8 @@ public:
 private:
     const llama_model & model;
     const llama_hparams & hparams;
+    const ggml_type type_k;
+    const ggml_type type_v;
 
     struct kv_layer_fp8 {
         uint32_t il;
@@ -140,8 +141,10 @@ private:
                llm_graph_result * res,
                   llama_context * lctx) const;
 
-    void state_write_meta(llama_io_write_i & io, const llama_kv_cache::cell_ranges_t & cr, llama_seq_id seq_id = -1) const;
-    void state_write_data(llama_io_write_i & io, const llama_kv_cache::cell_ranges_t & cr) const;
+    // Serialization helpers intentionally omitted for now; the FP8 KV
+    // cache is not yet wired into state save/restore.
+    void state_write_meta(llama_io_write_i & io, llama_seq_id seq_id = -1) const;
+    void state_write_data(llama_io_write_i & io) const;
 
     bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, llama_seq_id dest_seq_id = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t strm, uint32_t cell_count);
