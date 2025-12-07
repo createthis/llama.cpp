@@ -37,6 +37,8 @@ llama_kv_cache_fp8::llama_kv_cache_fp8(
 
     GGML_ASSERT(kv_size % n_pad == 0);
 
+    const bool is_deepseek_v32 = (model.arch == LLM_ARCH_DEEPSEEK3_2);
+
     const uint32_t n_layer_kv = hparams.n_layer_kv();
 
     // create a context for each buffer type
@@ -118,32 +120,55 @@ llama_kv_cache_fp8::llama_kv_cache_fp8(
             throw std::runtime_error("failed to create ggml context for fp8 kv cache");
         }
 
-        ggml_tensor * k_fp8;
-        ggml_tensor * v_fp8;
-        ggml_tensor * k_scale;
-        ggml_tensor * v_scale;
+        ggml_tensor * k_blob  = nullptr;
+        ggml_tensor * k_fp8   = nullptr;
+        ggml_tensor * v_fp8   = nullptr;
+        ggml_tensor * k_scale = nullptr;
+        ggml_tensor * v_scale = nullptr;
 
-        // Backing storage is FP8 E4M3 with per-row scale (F32)
+        // Backing storage:
+        //  - For DeepSeek V3.2 (sparse MLA), use a single 656-byte record per
+        //    token for K-side (fp8_ds_mla-style layout) stored as raw bytes.
+        //  - For other architectures, fall back to FP8 E4M3 with per-row F32
+        //    scales for both K and V, as in the original experimental design.
         GGML_UNUSED(type_k);
         GGML_UNUSED(type_v);
 
-        k_fp8 = ggml_new_tensor_3d(ctx, GGML_TYPE_E4M3, n_embd_k_gqa, kv_size, n_stream);
-        v_fp8 = ggml_new_tensor_3d(ctx, GGML_TYPE_E4M3, n_embd_v_gqa, kv_size, n_stream);
+        if (is_deepseek_v32) {
+            // K-side FP8 ds_mla blob: [656, kv_size, n_stream] bytes
+            const int64_t entry_bytes = 656;
+            k_blob = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, entry_bytes, kv_size, n_stream);
+            ggml_format_name(k_blob, "cache_k_fp8_blob_l%d", il);
+        } else {
+            // Legacy per-element FP8 + per-row scale layout
+            k_fp8 = ggml_new_tensor_3d(ctx, GGML_TYPE_E4M3, n_embd_k_gqa, kv_size, n_stream);
+            v_fp8 = ggml_new_tensor_3d(ctx, GGML_TYPE_E4M3, n_embd_v_gqa, kv_size, n_stream);
+            k_scale = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, kv_size, n_stream);
+            v_scale = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, kv_size, n_stream);
 
-        k_scale = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, kv_size, n_stream);
-        v_scale = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, kv_size, n_stream);
-
-        ggml_format_name(k_fp8, "cache_k_fp8_l%d", il);
-        ggml_format_name(v_fp8, "cache_v_fp8_l%d", il);
-        ggml_format_name(k_scale, "cache_k_scale_l%d", il);
-        ggml_format_name(v_scale, "cache_v_scale_l%d", il);
+            ggml_format_name(k_fp8,   "cache_k_fp8_l%d",      il);
+            ggml_format_name(v_fp8,   "cache_v_fp8_l%d",      il);
+            ggml_format_name(k_scale, "cache_k_scale_l%d",    il);
+            ggml_format_name(v_scale, "cache_v_scale_l%d",    il);
+        }
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
 
-        for (uint32_t s = 0; s < n_stream; ++s) {
-            k_stream.push_back(ggml_view_2d(ctx, k_fp8, n_embd_k_gqa, kv_size, k_fp8->nb[1], s*k_fp8->nb[2]));
-            v_stream.push_back(ggml_view_2d(ctx, v_fp8, n_embd_v_gqa, kv_size, v_fp8->nb[1], s*v_fp8->nb[2]));
+        if (is_deepseek_v32) {
+            // For DeepSeek V3.2, create per-stream 2D views over [entry_bytes, kv_size]
+            for (uint32_t s = 0; s < n_stream; ++s) {
+                k_stream.push_back(ggml_view_2d(ctx, k_blob,
+                                                k_blob->ne[0], k_blob->ne[1],
+                                                k_blob->nb[1], s * k_blob->nb[2]));
+            }
+        } else {
+            for (uint32_t s = 0; s < n_stream; ++s) {
+                k_stream.push_back(ggml_view_2d(ctx, k_fp8, n_embd_k_gqa, kv_size,
+                                                k_fp8->nb[1], s * k_fp8->nb[2]));
+                v_stream.push_back(ggml_view_2d(ctx, v_fp8, n_embd_v_gqa, kv_size,
+                                                v_fp8->nb[1], s * v_fp8->nb[2]));
+            }
         }
 
         map_layer_ids[il] = layers.size();
@@ -151,6 +176,7 @@ llama_kv_cache_fp8::llama_kv_cache_fp8(
         layers.push_back({});
         auto & lyr = layers.back();
         lyr.il      = il;
+        lyr.k_blob  = k_blob;
         lyr.k_fp8   = k_fp8;
         lyr.v_fp8   = v_fp8;
         lyr.k_scale = k_scale;
@@ -527,7 +553,14 @@ size_t llama_kv_cache_fp8::total_size() const {
 size_t llama_kv_cache_fp8::size_k_bytes() const {
     size_t size_k_bytes = 0;
     for (const auto & layer : layers) {
-        size_k_bytes += ggml_nbytes(layer.k_fp8) + ggml_nbytes(layer.k_scale);
+        if (layer.k_blob != nullptr) {
+            size_k_bytes += ggml_nbytes(layer.k_blob);
+        } else if (layer.k_fp8 != nullptr) {
+            size_k_bytes += ggml_nbytes(layer.k_fp8);
+            if (layer.k_scale != nullptr) {
+                size_k_bytes += ggml_nbytes(layer.k_scale);
+            }
+        }
     }
     return size_k_bytes;
 }

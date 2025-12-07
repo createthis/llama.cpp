@@ -89,14 +89,23 @@ private:
     struct kv_layer_fp8 {
         uint32_t il;
 
-        // FP8 backing store
-        ggml_tensor * k_fp8;   // type GGML_TYPE_E4M3
-        ggml_tensor * v_fp8;   // type GGML_TYPE_E4M3
+        // For DeepSeek V3.2, K-side backing store is a single 656-byte record
+        // per token (fp8_ds_mla-style layout):
+        //   - 512 bytes FP8 NoPE latent
+        //   - 16  bytes (4 x FP32 tile scales)
+        //   - 128 bytes (64 x BF16 RoPE values)
+        // We store this as a raw byte tensor with shape [656, kv_size, n_stream]
+        // when model.arch == LLM_ARCH_DEEPSEEK3_2. For other architectures, we
+        // fall back to the older separated FP8+scale layout.
+        ggml_tensor * k_blob = nullptr; // type GGML_TYPE_I8, layout [656, kv_size, n_stream]
 
-        // Per-row scales for K/V: [kv_size, n_stream]
-        ggml_tensor * k_scale;
-        ggml_tensor * v_scale;
+        // Legacy FP8 K/V layout (used for non-DeepSeek V3.2 experiments):
+        ggml_tensor * k_fp8   = nullptr; // type GGML_TYPE_E4M3
+        ggml_tensor * v_fp8   = nullptr; // type GGML_TYPE_E4M3
+        ggml_tensor * k_scale = nullptr; // [kv_size, n_stream], F32
+        ggml_tensor * v_scale = nullptr; // [kv_size, n_stream], F32
 
+        // Per-stream views for convenience
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
     };
