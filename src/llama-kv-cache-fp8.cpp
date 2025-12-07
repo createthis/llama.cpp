@@ -664,7 +664,12 @@ size_t llama_kv_cache_fp8::size_k_bytes() const {
 size_t llama_kv_cache_fp8::size_v_bytes() const {
     size_t size_v_bytes = 0;
     for (const auto & layer : layers) {
-        size_v_bytes += ggml_nbytes(layer.v_fp8) + ggml_nbytes(layer.v_scale);
+        if (layer.v_fp8 != nullptr) {
+            size_v_bytes += ggml_nbytes(layer.v_fp8);
+        }
+        if (layer.v_scale != nullptr) {
+            size_v_bytes += ggml_nbytes(layer.v_scale);
+        }
     }
     return size_v_bytes;
 }
