@@ -1,4 +1,5 @@
 #include "llama-kv-cache-fp8.h"
+#include "ggml-backend.h"
 
 #include "llama-impl.h"
 #include "llama-io.h"
@@ -813,6 +814,11 @@ ggml_tensor * llama_kv_cache_fp8::get_k(ggml_context * ctx, int32_t il, uint32_t
     if (lyr == nullptr || lyr->k_blob == nullptr) {
         return nullptr;
     }
+    // If K blob is device-resident, we cannot safely dereference it on host during graph build.
+    // In that case, skip FP8-derived K and let callers fall back to the float KV cache.
+    if (lyr->k_blob->buffer && !ggml_backend_buffer_is_host(lyr->k_blob->buffer)) {
+        return nullptr;
+    }
 
     const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
     const uint32_t kv_size = get_size();
@@ -879,6 +885,11 @@ ggml_tensor * llama_kv_cache_fp8::cpy_k(ggml_context * ctx, ggml_tensor * k_cur,
 
     const kv_layer_fp8 * lyr = get_layer(il);
     if (lyr == nullptr || lyr->k_blob == nullptr) {
+        return nullptr;
+    }
+    // If K blob is device-resident, we cannot safely dereference it on host during graph build.
+    // In that case, skip FP8-derived K and let callers fall back to the float KV cache.
+    if (lyr->k_blob->buffer && !ggml_backend_buffer_is_host(lyr->k_blob->buffer)) {
         return nullptr;
     }
 

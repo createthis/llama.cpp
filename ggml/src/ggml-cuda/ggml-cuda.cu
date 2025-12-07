@@ -3803,6 +3803,19 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 if (op->ne[2] != 1 || op->ne[3] != 1) return false;
                 return ggml_is_contiguous(a);
             } break;
+        case GGML_OP_KV_DSMLA_PACK:
+            {
+                const struct ggml_tensor * k_lr  = op->src[0];
+                const struct ggml_tensor * k_idx = op->src[1];
+                const struct ggml_tensor * blob  = op->src[2];
+                if (!k_lr || !k_idx || !blob) return false;
+                if (k_lr->type  != GGML_TYPE_F32) return false;
+                if (k_idx->type != GGML_TYPE_I64) return false;
+                if (blob->type  != GGML_TYPE_I8)  return false;
+                if (!ggml_is_contiguous(k_lr)) return false;
+                if (k_lr->ne[1] != 1) return false;
+                return true;
+            } break;
         case GGML_OP_GLU:
             switch (ggml_get_glu_op(op)) {
                 case GGML_GLU_OP_REGLU:

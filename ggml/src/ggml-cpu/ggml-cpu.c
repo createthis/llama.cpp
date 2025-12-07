@@ -2359,6 +2359,11 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
             {
                 n_tasks = n_threads;
             } break;
+        case GGML_OP_KV_DSMLA_PACK:
+            {
+                // trivial metadata op for FP8 KV; handled only on CUDA backend
+                n_tasks = 1;
+            } break;
         case GGML_OP_NONE:
             {
                 n_tasks = 1;
