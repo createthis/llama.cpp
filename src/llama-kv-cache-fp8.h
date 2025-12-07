@@ -157,4 +157,7 @@ private:
 
     bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, llama_seq_id dest_seq_id = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t strm, uint32_t cell_count);
+
+    const kv_layer_fp8 * get_layer(int32_t il) const;
+
 };

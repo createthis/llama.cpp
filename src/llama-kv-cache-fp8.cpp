@@ -276,6 +276,102 @@ static void e4m3_to_fp32_row(const ggml_e4m3_t * src, float * dst, int64_t k) {
     ggml_e4m3_to_fp32_row(src, dst, k);
 }
 
+
+const llama_kv_cache_fp8::kv_layer_fp8 * llama_kv_cache_fp8::get_layer(int32_t il) const {
+    auto it = map_layer_ids.find(il);
+    if (it == map_layer_ids.end()) {
+        return nullptr;
+    }
+    int32_t idx = it->second;
+    GGML_ASSERT(idx >= 0 && (size_t) idx < layers.size());
+    return &layers[idx];
+}
+
+static void pack_fp8_ds_mla_entry(
+        const float * latent,   // [512]
+        const float * rope,     // [64]
+        void * dst_bytes) {
+    // Layout:
+    //   [0..511]   : 512 x FP8 E4M3 codes
+    //   [512..527] : 4 x FP32 scales
+    //   [528..655] : 64 x BF16 RoPE
+
+    uint8_t * dst = (uint8_t *) dst_bytes;
+
+    const int kv_lora_rank = 512;
+    const int rope_dim     = 64;
+    const int tile_size    = 128;
+    const int n_tiles      = kv_lora_rank / tile_size; // 4
+
+    float tile_scales[n_tiles];
+
+    // Compute per-tile scales
+    for (int t = 0; t < n_tiles; ++t) {
+        float amax = 0.0f;
+        const float * tile = latent + t * tile_size;
+        for (int i = 0; i < tile_size; ++i) {
+            float v = fabsf(tile[i]);
+            if (v > amax) amax = v;
+        }
+        // match vLLM: scale ~ amax / 448, guard against tiny amax
+        float scale = amax / 448.0f;
+        if (scale < 1e-4f) scale = 1e-4f;
+        tile_scales[t] = scale;
+    }
+
+    // Write scales after latent codes: view as float[4]
+    float * scale_dst = (float *)(dst + 512);
+    for (int t = 0; t < n_tiles; ++t) {
+        scale_dst[t] = tile_scales[t];
+    }
+
+    // Quantize latent to FP8 per tile
+    for (int t = 0; t < n_tiles; ++t) {
+        float inv_scale = 1.0f / tile_scales[t];
+        const float * tile = latent + t * tile_size;
+        ggml_e4m3_t * codes = (ggml_e4m3_t *)(dst + t * tile_size);
+        float tmp[tile_size];
+        for (int i = 0; i < tile_size; ++i) {
+            tmp[i] = tile[i] * inv_scale;
+        }
+        fp32_to_e4m3_row(tmp, codes, tile_size);
+    }
+
+    // Pack RoPE tail as BF16 at offset 528
+    ggml_bf16_t * rope_dst = (ggml_bf16_t *)(dst + 528);
+    ggml_fp32_to_bf16_row_ref(rope, rope_dst, rope_dim);
+}
+
+static void unpack_fp8_ds_mla_entry(
+        const void * src_bytes,
+        float * latent_out,   // [512]
+        float * rope_out) {   // [64]
+    const uint8_t * src = (const uint8_t *) src_bytes;
+
+    const int kv_lora_rank = 512;
+    const int rope_dim     = 64;
+    const int tile_size    = 128;
+    const int n_tiles      = kv_lora_rank / tile_size; // 4
+
+    const float * scale_src = (const float *)(src + 512);
+
+    // Dequantize latent
+    for (int t = 0; t < n_tiles; ++t) {
+        float scale = scale_src[t];
+        const ggml_e4m3_t * codes = (const ggml_e4m3_t *)(src + t * tile_size);
+        float tmp[tile_size];
+        e4m3_to_fp32_row(codes, tmp, tile_size);
+        float * tile_out = latent_out + t * tile_size;
+        for (int i = 0; i < tile_size; ++i) {
+            tile_out[i] = tmp[i] * scale;
+        }
+    }
+
+    // Unpack RoPE BF16 tail at offset 528
+    const ggml_bf16_t * rope_src = (const ggml_bf16_t *)(src + 528);
+    ggml_bf16_to_fp32_row(rope_src, rope_out, rope_dim);
+}
+
 // Clear / seq_* / state_* follow the patterns of llama_kv_cache but
 // operate on v_cells/v_heads only. For brevity we reuse the same
 // logic by delegating where possible.
@@ -672,12 +768,63 @@ bool llama_kv_cache_fp8::state_read_data(llama_io_read_i & io, uint32_t strm, ui
 // is not yet used in any graph. They will be filled in when wiring the
 // cache to DeepSeek V3.2.
 
+
+
 ggml_tensor * llama_kv_cache_fp8::get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const llama_kv_cache::slot_info & sinfo) const {
-    GGML_UNUSED(ctx);
-    GGML_UNUSED(il);
+    GGML_ASSERT(ctx != nullptr);
     GGML_UNUSED(n_kv);
-    GGML_UNUSED(sinfo);
-    return nullptr;
+
+    // Only support DeepSeek V3.2 fp8_ds_mla-style K blob for now.
+    if (model.arch != LLM_ARCH_DEEPSEEK3_2) {
+        return nullptr;
+    }
+
+    const kv_layer_fp8 * lyr = get_layer(il);
+    if (lyr == nullptr || lyr->k_blob == nullptr) {
+        return nullptr;
+    }
+
+    const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
+    const uint32_t kv_size = get_size();
+
+    // We expose a simple [D=576, H=1, n_kv, ns] layout for now:
+    //   - 512 dims: dequantized latent
+    //   - 64 dims : dequantized RoPE
+    const int64_t D_latent = 512;
+    const int64_t D_rope   = 64;
+    const int64_t D_total  = D_latent + D_rope;
+
+    ggml_tensor * out = ggml_new_tensor_4d(ctx, GGML_TYPE_F32,
+                                           D_total, 1, kv_size, ns);
+
+    // For each stream and KV index, unpack the 656-byte entry.
+    for (uint32_t s = 0; s < ns; ++s) {
+        uint32_t strm = sinfo.strm[s];
+        GGML_ASSERT(strm < lyr->k_blob->ne[2]);
+        for (uint32_t idx = 0; idx < kv_size; ++idx) {
+            // Compute byte offset into k_blob for (stream=strm, cell=idx)
+            size_t off = (size_t) idx * lyr->k_blob->nb[1] + (size_t) strm * lyr->k_blob->nb[2];
+            const uint8_t * src = (const uint8_t *) lyr->k_blob->data + off;
+
+            float latent[D_latent];
+            float rope[D_rope];
+            unpack_fp8_ds_mla_entry(src, latent, rope);
+
+            // Write into out: [D_total, 1, kv_size, ns]
+            for (int64_t d = 0; d < D_latent; ++d) {
+                ((float *) out->data)[d
+                    + D_total * (idx
+                    + (size_t) kv_size * s)] = latent[d];
+            }
+            for (int64_t d = 0; d < D_rope; ++d) {
+                ((float *) out->data)[(D_latent + d)
+                    + D_total * (idx
+                    + (size_t) kv_size * s)] = rope[d];
+            }
+        }
+    }
+
+    return out;
 }
 
 ggml_tensor * llama_kv_cache_fp8::get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const llama_kv_cache::slot_info & sinfo) const {
@@ -688,13 +835,61 @@ ggml_tensor * llama_kv_cache_fp8::get_v(ggml_context * ctx, int32_t il, uint32_t
     return nullptr;
 }
 
+
+
 ggml_tensor * llama_kv_cache_fp8::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const llama_kv_cache::slot_info & sinfo) const {
-    GGML_UNUSED(ctx);
-    GGML_UNUSED(k_cur);
-    GGML_UNUSED(k_idxs);
-    GGML_UNUSED(il);
-    GGML_UNUSED(sinfo);
-    return nullptr;
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(k_cur != nullptr);
+    GGML_ASSERT(k_idxs != nullptr);
+
+    // Only support DeepSeek V3.2 fp8_ds_mla-style K blob for now.
+    if (model.arch != LLM_ARCH_DEEPSEEK3_2) {
+        return nullptr;
+    }
+
+    const kv_layer_fp8 * lyr = get_layer(il);
+    if (lyr == nullptr || lyr->k_blob == nullptr) {
+        return nullptr;
+    }
+
+    const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
+    const uint32_t kv_size = get_size();
+
+    // Expect k_cur layout [D_total, 1, n_tokens] where D_total=512+64.
+    const int64_t D_total  = k_cur->ne[0];
+    const int64_t n_tokens = k_cur->ne[2];
+    const int64_t D_latent = 512;
+    const int64_t D_rope   = 64;
+    GGML_ASSERT(D_total == D_latent + D_rope);
+
+    GGML_ASSERT(k_idxs->type == GGML_TYPE_I64);
+    const int64_t * idx_data = (const int64_t *) k_idxs->data;
+
+    for (int64_t t = 0; t < n_tokens; ++t) {
+        int64_t global_idx = idx_data[t];
+        GGML_ASSERT(global_idx >= 0 && global_idx < (int64_t) (kv_size * n_stream));
+        uint32_t strm = (uint32_t) (global_idx / kv_size);
+        uint32_t cell = (uint32_t) (global_idx % kv_size);
+
+        GGML_ASSERT(strm < lyr->k_blob->ne[2]);
+        size_t off = (size_t) cell * lyr->k_blob->nb[1] + (size_t) strm * lyr->k_blob->nb[2];
+        uint8_t * dst = (uint8_t *) lyr->k_blob->data + off;
+
+        float latent[D_latent];
+        float rope[D_rope];
+        for (int64_t d = 0; d < D_latent; ++d) {
+            latent[d] = ((float *) k_cur->data)[d + D_total * t];
+        }
+        for (int64_t d = 0; d < D_rope; ++d) {
+            rope[d] = ((float *) k_cur->data)[(D_latent + d) + D_total * t];
+        }
+
+        pack_fp8_ds_mla_entry(latent, rope, dst);
+    }
+
+    // cpy_k normally returns the ggml node representing the copy; here we
+    // simply return k_cur to keep the graph valid for now.
+    return k_cur;
 }
 
 ggml_tensor * llama_kv_cache_fp8::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const llama_kv_cache::slot_info & sinfo) const {
