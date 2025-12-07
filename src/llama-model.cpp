@@ -13904,27 +13904,12 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
                             ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
 
-                            // Optional: DeepSeek V3.2 FP8 K-side KV cache write
+                            // Optional: DeepSeek V3.2 FP8 K-side KV cache pack (custom op)
                             if (model.kv_fp8_ds32) {
-                                const int64_t D_latent = kv_lora_rank;
-                                const int64_t D_rope   = n_rot;
-                                const int64_t D_total  = D_latent + D_rope;
-                                GGML_UNUSED(D_total);
                                 ggml_tensor * k_fp8_in = ggml_concat(ctx0, kv_cmpr, k_pe, 0); // [D_total,1,n_tokens]
-
-                                llama_kv_cache::slot_info sinfo_fp8;
-                                sinfo_fp8.s0 = 0;
-                                sinfo_fp8.s1 = 0;
-                                sinfo_fp8.strm = { 0 };
-                                sinfo_fp8.idxs = { std::vector<uint32_t>(model.kv_fp8_ds32->get_size()) };
-                                for (uint32_t i = 0; i < model.kv_fp8_ds32->get_size(); ++i) {
-                                    sinfo_fp8.idxs[0][i] = i;
-                                }
-
-                                ggml_tensor * k_idxs = inp_attn->get_k_idxs();
-                                ggml_build_forward_expand(
-                                    gf,
-                                    model.kv_fp8_ds32->cpy_k(ctx0, k_fp8_in, k_idxs, il, sinfo_fp8));
+                                ggml_tensor * k_idxs   = inp_attn->get_k_idxs();
+                                ggml_tensor * pack_node = model.kv_fp8_ds32->build_k_pack_node(ctx0, k_fp8_in, k_idxs, il);
+                                ggml_build_forward_expand(gf, pack_node);
                             }
                         }
 
@@ -14060,27 +14045,12 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
                             ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
 
-                            // Optional: DeepSeek V3.2 FP8 K-side KV cache write
+                            // Optional: DeepSeek V3.2 FP8 K-side KV cache pack (custom op)
                             if (model.kv_fp8_ds32) {
-                                const int64_t D_latent = kv_lora_rank;
-                                const int64_t D_rope   = n_rot;
-                                const int64_t D_total  = D_latent + D_rope;
-                                GGML_UNUSED(D_total);
                                 ggml_tensor * k_fp8_in = ggml_concat(ctx0, kv_cmpr, k_pe, 0); // [D_total,1,n_tokens]
-
-                                llama_kv_cache::slot_info sinfo_fp8;
-                                sinfo_fp8.s0 = 0;
-                                sinfo_fp8.s1 = 0;
-                                sinfo_fp8.strm = { 0 };
-                                sinfo_fp8.idxs = { std::vector<uint32_t>(model.kv_fp8_ds32->get_size()) };
-                                for (uint32_t i = 0; i < model.kv_fp8_ds32->get_size(); ++i) {
-                                    sinfo_fp8.idxs[0][i] = i;
-                                }
-
-                                ggml_tensor * k_idxs = inp_attn->get_k_idxs();
-                                ggml_build_forward_expand(
-                                    gf,
-                                    model.kv_fp8_ds32->cpy_k(ctx0, k_fp8_in, k_idxs, il, sinfo_fp8));
+                                ggml_tensor * k_idxs   = inp_attn->get_k_idxs();
+                                ggml_tensor * pack_node = model.kv_fp8_ds32->build_k_pack_node(ctx0, k_fp8_in, k_idxs, il);
+                                ggml_build_forward_expand(gf, pack_node);
                             }
                         }
 

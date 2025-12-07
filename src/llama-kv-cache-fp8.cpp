@@ -769,6 +769,60 @@ bool llama_kv_cache_fp8::state_read_data(llama_io_read_i & io, uint32_t strm, ui
     return false;
 }
 
+
+
+struct kv_dsmla_pack_userdata {
+    int32_t il;
+    int32_t kv_size;
+    int32_t n_stream;
+};
+
+static void kv_dsmla_pack_custom(ggml_tensor * dst, int ith, int nth, void * userdata) {
+    GGML_UNUSED(dst);
+    GGML_UNUSED(ith);
+    GGML_UNUSED(nth);
+    GGML_UNUSED(userdata);
+    // CPU stub: real work is performed in CUDA backend via specialized handler.
+}
+
+ggml_tensor * llama_kv_cache_fp8::build_k_pack_node(
+        ggml_context * ctx,
+        ggml_tensor * k_latent_rope,
+        ggml_tensor * k_idxs,
+        int32_t       il) const {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(k_latent_rope != nullptr);
+    GGML_ASSERT(k_idxs != nullptr);
+    GGML_ASSERT(k_idxs->type == GGML_TYPE_I64);
+
+    if (model.arch != LLM_ARCH_DEEPSEEK3_2) {
+        return k_latent_rope;
+    }
+
+    const kv_layer_fp8 * lyr = get_layer(il);
+    if (lyr == nullptr || lyr->k_blob == nullptr) {
+        return k_latent_rope;
+    }
+
+    kv_dsmla_pack_userdata * ud = new kv_dsmla_pack_userdata;
+    ud->il       = il;
+    ud->kv_size  = (int32_t) get_size();
+    ud->n_stream = (int32_t) get_n_stream();
+
+    ggml_tensor * args[3] = { k_latent_rope, k_idxs, lyr->k_blob };
+    ggml_tensor * node = ggml_custom_4d(
+        ctx,
+        GGML_TYPE_F32,
+        1, 1, 1, 1,
+        args,
+        3,
+        kv_dsmla_pack_custom,
+        GGML_N_TASKS_MAX,
+        ud);
+
+    return node;
+}
+
 // Accessors for K/V are left unimplemented for now since the FP8 cache
 // is not yet used in any graph. They will be filled in when wiring the
 // cache to DeepSeek V3.2.

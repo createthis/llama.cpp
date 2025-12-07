@@ -80,6 +80,8 @@ public:
     void set_input_kq_mask(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
+    ggml_tensor * build_k_pack_node(ggml_context * ctx, ggml_tensor * k_latent_rope, ggml_tensor * k_idxs, int32_t il) const;
+
 private:
     const llama_model & model;
     const llama_hparams & hparams;
