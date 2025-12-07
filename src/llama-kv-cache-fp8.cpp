@@ -771,20 +771,6 @@ bool llama_kv_cache_fp8::state_read_data(llama_io_read_i & io, uint32_t strm, ui
 
 
 
-struct kv_dsmla_pack_userdata {
-    int32_t il;
-    int32_t kv_size;
-    int32_t n_stream;
-};
-
-static void kv_dsmla_pack_custom(ggml_tensor * dst, int ith, int nth, void * userdata) {
-    GGML_UNUSED(dst);
-    GGML_UNUSED(ith);
-    GGML_UNUSED(nth);
-    GGML_UNUSED(userdata);
-    // CPU stub: real work is performed in CUDA backend via specialized handler.
-}
-
 ggml_tensor * llama_kv_cache_fp8::build_k_pack_node(
         ggml_context * ctx,
         ggml_tensor * k_latent_rope,
@@ -804,22 +790,7 @@ ggml_tensor * llama_kv_cache_fp8::build_k_pack_node(
         return k_latent_rope;
     }
 
-    kv_dsmla_pack_userdata * ud = new kv_dsmla_pack_userdata;
-    ud->il       = il;
-    ud->kv_size  = (int32_t) get_size();
-    ud->n_stream = (int32_t) get_n_stream();
-
-    ggml_tensor * args[3] = { k_latent_rope, k_idxs, lyr->k_blob };
-    ggml_tensor * node = ggml_custom_4d(
-        ctx,
-        GGML_TYPE_F32,
-        1, 1, 1, 1,
-        args,
-        3,
-        kv_dsmla_pack_custom,
-        GGML_N_TASKS_MAX,
-        ud);
-
+    ggml_tensor * node = ggml_kv_dsmla_pack(ctx, k_latent_rope, k_idxs, lyr->k_blob);
     return node;
 }
 
