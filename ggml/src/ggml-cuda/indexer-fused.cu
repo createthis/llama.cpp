@@ -1028,11 +1028,13 @@ __global__ void k_indexer_logits_wmma16_bf16(
 }
 
 // WMMA 16x16 with head grouping: supports H multiple of 16
+// Updated to consume FP8-encoded K with per-row scales provided by the host.
 __global__ void k_indexer_logits_wmma16_f32_hgrp(
-    const float * __restrict__ Q, // [D, Tc*H]
-    const float * __restrict__ K, // [D, kv]
-    const float * __restrict__ W, // [H, Tc]
-    const float * __restrict__ k_scale, // [kv]
+    const float  * __restrict__ Q,      // [D, Tc*H] (F32)
+    const uint8_t* __restrict__ K_fp8,  // [kv, D] row-major FP8 codes
+    const float  * __restrict__ K_sf_g, // [kv] per-row scale (amax/448)
+    const float  * __restrict__ W,      // [H, Tc]
+    const float  * __restrict__ k_scale,// [kv]
     int D, int H, int Tc, int kv,
     const int * __restrict__ starts,
     const int * __restrict__ ends,
@@ -1043,37 +1045,21 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
     const int k0 = blockIdx.y * 16;
     if (t0 >= Tc || k0 >= kv) return;
 
-    // Per-row K scale (amax/448) for 16-row tile
+    // Per-row K scale (amax/448) for 16-row tile, loaded from global K_sf_g
     __shared__ float K_sf[16];
     int lane = threadIdx.x & 31;
-    if (lane < 16) K_sf[lane] = 1.0f;
-    __syncthreads();
-
-    for (int mi = 0; mi < 16; ++mi) {
-        int kv_idx = k0 + mi;
-        float local_max = 0.0f;
-        if (kv_idx < kv) {
-            for (int d0 = lane; d0 < D; d0 += 32) {
-                float v = K[(size_t)d0 + (size_t)D * (size_t)kv_idx];
-                float av = fabsf(v);
-                if (av > local_max) local_max = av;
-            }
+    if (lane < 16) {
+        int kv_idx = k0 + lane;
+        float sf = 1.0f;
+        if (kv_idx < kv && K_sf_g) {
+            sf = K_sf_g[kv_idx];
         }
-        // warp reduce
-        for (int off = 16; off > 0; off >>= 1) {
-            float other = __shfl_down_sync(0xffffffff, local_max, off);
-            if (other > local_max) local_max = other;
-        }
-        if (lane == 0 && kv_idx < kv) {
-            float maxv = local_max;
-            if (maxv < 1e-4f) maxv = 1e-4f;
-            K_sf[mi] = maxv / 448.0f;
-        }
-        __syncwarp();
+        if (sf < 1e-4f) sf = 1e-4f;
+        K_sf[lane] = sf;
     }
     __syncthreads();
 
-    __shared__ __half A_sh[16*16]; // row-major K tile (FP8-quantized then decoded)
+    __shared__ __half A_sh[16*16]; // row-major K tile (FP8-decoded, scaled later)
     __shared__ __half B_sh[16*16]; // col-major Q tile (FP8-quantized then decoded)
     __shared__ float  C_sh[16*16]; // accumulator dump
     __shared__ float  S_acc[16];   // accumulate per kv row
@@ -1088,17 +1074,15 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
         // Iterate K dimension in 16-slices
         for (int d0 = 0; d0 < D; d0 += 16) {
             int lane2 = threadIdx.x & 31;
-            // Load A_sh: rows are kv rows, cols are k-slice, with FP8 quant/dequant and per-row scale
+            // Load A_sh from FP8 K codes: rows are kv rows, cols are k-slice
             for (int idx = lane2; idx < 16*16; idx += 32) {
-                int mi = idx / 16; // row
-                int di = idx % 16; // col
+                int mi = idx / 16; // row within tile
+                int di = idx % 16; // col within tile
                 int kv_idx = k0 + mi;
                 __half v = __float2half_rn(0.0f);
-                if (kv_idx < kv && d0 + di < D) {
-                    float f = K[(size_t)(d0 + di) + (size_t)D * (size_t)kv_idx];
-                    float sf = K_sf[mi];
-                    float scaled = f / sf;
-                    uint8_t code = f32_to_fp8e4m3(scaled);
+                if (kv_idx < kv && d0 + di < D && K_fp8) {
+                    size_t off = (size_t)kv_idx * (size_t)D + (size_t)(d0 + di);
+                    uint8_t code = K_fp8[off];
                     float dec = fp8e4m3_to_f32(code);
                     v = __float2half_rn(dec);
                 }
@@ -1713,7 +1697,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         if (H % 16 == 0) {
             if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma_hgrp grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
             LAUNCH_PROFILE_KERNEL("PROFILE_WMMA_HGRP_ONLY", WMMA_HGRP_ONLY, stream, ([&](){
-                        k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, dOut);
+                        k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(dQ, /*K_fp8*/ nullptr, /*K_sf_g*/ nullptr, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, dOut);
                         })(), D, H, Tc, kv_end);
 
         } else if (H <= 16 && (16 % H) == 0) {
