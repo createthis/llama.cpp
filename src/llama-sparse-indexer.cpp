@@ -280,6 +280,27 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     if (mctx && gf) {
         ggml_tensor * Kindexer_cur_3d = ggml_reshape_3d(ctx, Kindexer_cur, Kindexer_cur->ne[0], 1, n_tokens);
         ggml_build_forward_expand(gf, mctx->cpy_k_indexer(ctx, Kindexer_cur_3d, k_idxs, layer_idx));
+
+        // Optional: DeepSeek V3.2 FP8 indexer cache quantization
+        const char * env_fp8 = getenv("LLAMA_FP8_INDEXER_CACHE");
+        if (env_fp8 && atoi(env_fp8) != 0 && mctx->is_arch_deepseek_v3_2()) {
+            ggml_tensor * kidx_fp8 = mctx->get_k_indexer_fp8_raw(ctx, layer_idx);
+            if (kidx_fp8) {
+                int32_t quant_bs = 0, block_size = 0, cache_stride = 0;
+                mctx->get_k_indexer_fp8_layout(layer_idx, quant_bs, block_size, cache_stride);
+                ggml_tensor * K_t = ggml_transpose(ctx, Kindexer_cur); // [n_tokens, D_index]
+                K_t = ggml_cont(ctx, K_t);
+                ggml_tensor * fp8_q = ggml_indexer_k_cache_fp8(
+                        ctx,
+                        K_t,
+                        k_idxs,
+                        kidx_fp8,
+                        quant_bs,
+                        block_size,
+                        cache_stride);
+                ggml_build_forward_expand(gf, fp8_q);
+            }
+        }
     }
     // Build q_indexer and weights
     ggml_tensor * qsrc = nullptr;

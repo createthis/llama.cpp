@@ -1132,7 +1132,6 @@ ggml_tensor * llama_kv_cache::get_k_indexer_fp8_raw(ggml_context * ctx, int32_t 
     const uint64_t kv_size = get_size();
     const uint64_t cache_stride = (uint64_t) layers[ikv].k_indexer_fp8_cache_stride;
     const uint64_t ns = n_stream;
-    (void)ctx;
     // Layout: [cache_stride, kv_size, n_stream] with row-major bytes.
     // Return as 3D view over the underlying tensor so callers can pass raw pointer to CUDA helpers.
     return ggml_view_3d(ctx, kidx_fp8,
@@ -1140,6 +1139,19 @@ ggml_tensor * llama_kv_cache::get_k_indexer_fp8_raw(ggml_context * ctx, int32_t 
             ggml_row_size(kidx_fp8->type, cache_stride),
             ggml_row_size(kidx_fp8->type, cache_stride) * kv_size,
             0);
+}
+
+bool llama_kv_cache::has_k_indexer_fp8(int32_t il) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    return layers[ikv].k_indexer_fp8 != nullptr;
+}
+
+void llama_kv_cache::get_k_indexer_fp8_layout(int32_t il, int32_t & quant_bs, int32_t & block_size, int32_t & cache_stride) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    const auto & lyr = layers[ikv];
+    quant_bs     = lyr.k_indexer_fp8_quant_bs;
+    block_size   = lyr.k_indexer_fp8_block_size;
+    cache_stride = lyr.k_indexer_fp8_cache_stride;
 }
 
 
@@ -2093,6 +2105,14 @@ bool llama_kv_cache_context::is_arch_deepseek_v3_2() const {
     return kv->is_arch_deepseek_v3_2();
 }
 
+bool llama_kv_cache_context::has_k_indexer_fp8(int32_t il) const {
+    return kv->has_k_indexer_fp8(il);
+}
+
+void llama_kv_cache_context::get_k_indexer_fp8_layout(int32_t il, int32_t & quant_bs, int32_t & block_size, int32_t & cache_stride) const {
+    kv->get_k_indexer_fp8_layout(il, quant_bs, block_size, cache_stride);
+}
+
 void llama_kv_cache_context::set_input_kq_mask_full_2d(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const {
     kv->set_input_kq_mask_full_2d(dst, ubatch, causal_attn);
 }
@@ -2147,6 +2167,10 @@ ggml_tensor * llama_kv_cache_context::get_k_indexer_full(ggml_context * ctx, int
     // Full-width indexer K view for DeepSeek V3.2
     const auto & sinfo = sinfos[i_cur];
     return kv->get_k_indexer_full(ctx, il, sinfo);
+}
+
+ggml_tensor * llama_kv_cache_context::get_k_indexer_fp8_raw(ggml_context * ctx, int32_t il) const {
+    return kv->get_k_indexer_fp8_raw(ctx, il);
 }
 
 ggml_tensor * llama_kv_cache_context::cpy_k_indexer(ggml_context * ctx, ggml_tensor * kidx_cur, ggml_tensor * k_idxs, int32_t il) const {

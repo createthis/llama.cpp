@@ -21,8 +21,6 @@ class llama_kv_cache : public llama_memory_i {
 public:
     static uint32_t get_padding(const llama_cparams & cparams);
 
-    // Return true if the underlying model architecture is DeepSeek V3.2 (sparse attention)
-    bool is_arch_deepseek_v3_2() const;
 
     struct stream_copy_info {
 
@@ -146,6 +144,11 @@ public:
     //
 
     uint32_t get_n_kv(const slot_info & sinfo) const;
+
+    // DeepSeek V3.2: architecture check helper
+    bool is_arch_deepseek_v3_2() const;
+    bool has_k_indexer_fp8(int32_t il) const;
+    void get_k_indexer_fp8_layout(int32_t il, int32_t & quant_bs, int32_t & block_size, int32_t & cache_stride) const;
 
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
@@ -344,6 +347,8 @@ public:
 
 
     bool is_arch_deepseek_v3_2() const;
+    bool has_k_indexer_fp8(int32_t il) const;
+    void get_k_indexer_fp8_layout(int32_t il, int32_t & quant_bs, int32_t & block_size, int32_t & cache_stride) const;
 
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
