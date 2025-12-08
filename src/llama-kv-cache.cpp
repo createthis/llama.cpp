@@ -1122,6 +1122,27 @@ ggml_tensor * llama_kv_cache::get_k_indexer_full(ggml_context * ctx, int32_t il,
             ggml_row_size(kidx->type, kidx->ne[0]) * kv_size * sinfo.s0);
 }
 
+
+ggml_tensor * llama_kv_cache::get_k_indexer_fp8_raw(ggml_context * ctx, int32_t il) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    ggml_tensor * kidx_fp8 = layers[ikv].k_indexer_fp8;
+    if (!kidx_fp8) {
+        return nullptr;
+    }
+    const uint64_t kv_size = get_size();
+    const uint64_t cache_stride = (uint64_t) layers[ikv].k_indexer_fp8_cache_stride;
+    const uint64_t ns = n_stream;
+    (void)ctx;
+    // Layout: [cache_stride, kv_size, n_stream] with row-major bytes.
+    // Return as 3D view over the underlying tensor so callers can pass raw pointer to CUDA helpers.
+    return ggml_view_3d(ctx, kidx_fp8,
+            cache_stride, kv_size, ns,
+            ggml_row_size(kidx_fp8->type, cache_stride),
+            ggml_row_size(kidx_fp8->type, cache_stride) * kv_size,
+            0);
+}
+
+
 ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const {
     GGML_UNUSED(sinfo);
 

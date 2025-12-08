@@ -156,6 +156,7 @@ public:
     ggml_tensor * get_k_indexer_full(ggml_context * ctx, int32_t il, const slot_info & sinfo) const;
 
     // Full-width KV accessors for sparse paths (ignore micro-window)
+    ggml_tensor * get_k_indexer_fp8_raw(ggml_context * ctx, int32_t il) const; // DeepSeek V3.2 FP8 sidecar (raw bytes)
     ggml_tensor * get_k_full(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v_full(ggml_context * ctx, int32_t il) const;
 
@@ -215,9 +216,15 @@ private:
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
 
-        // DeepSeek V3.2: Lightning Indexer K cache per layer
+        // DeepSeek V3.2: Lightning Indexer K cache per layer (F32) and optional FP8 sidecar
         ggml_tensor * k_indexer = nullptr; // [D_index, kv_size, n_stream]
         std::vector<ggml_tensor *> k_indexer_stream; // views per stream
+
+        // Optional FP8 indexer cache (DeepSeek V3.2)
+        ggml_tensor * k_indexer_fp8 = nullptr; // [cache_stride, kv_size, n_stream] with raw bytes
+        int32_t      k_indexer_fp8_quant_bs = 0;        // quantization block size (e.g. 128)
+        int32_t      k_indexer_fp8_block_size = 0;      // tokens per cache block (initially kv_size)
+        int32_t      k_indexer_fp8_cache_stride = 0;    // bytes per token (head_dim + scales region)
     };
 
     bool v_trans = true;  // the value tensor is transposed
@@ -343,6 +350,7 @@ public:
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_k_indexer(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_k_indexer_full(ggml_context * ctx, int32_t il) const; // DeepSeek V3.2 only
+    ggml_tensor * get_k_indexer_fp8_raw(ggml_context * ctx, int32_t il) const; // DeepSeek V3.2 FP8 sidecar (raw bytes)
     // Full-width KV accessors for sparse paths (ignore micro-window)
     void set_input_kq_mask_full_2d(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
 
