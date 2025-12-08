@@ -2144,6 +2144,9 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_INDEXER_FUSED:
             n_tasks = 1;
             break;
+        case GGML_OP_INDEXER_K_CACHE_FP8:
+            n_tasks = 1;
+            break;
 
         case GGML_OP_CPY:
         case GGML_OP_DUP:

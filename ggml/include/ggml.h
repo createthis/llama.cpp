@@ -568,6 +568,8 @@ extern "C" {
         GGML_OP_SPARSE_MLA_DECODE,
         GGML_OP_GLU,
 
+        GGML_OP_INDEXER_K_CACHE_FP8,
+
         GGML_OP_COUNT,
     };
 
@@ -785,6 +787,16 @@ extern "C" {
             struct ggml_tensor  * k_scale,
             struct ggml_tensor  * starts,
             struct ggml_tensor  * ends);
+
+    GGML_API struct ggml_tensor * ggml_indexer_k_cache_fp8(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * k_in,
+            struct ggml_tensor  * slot_map,
+            struct ggml_tensor  * kv_cache8,
+            int                   quant_bs,
+            int                   cache_block_size,
+            int                   cache_stride);
+
 
     GGML_API bool ggml_is_contiguous_1(const struct ggml_tensor * tensor); // contiguous for dims >= 1
     GGML_API bool ggml_is_contiguous_2(const struct ggml_tensor * tensor); // contiguous for dims >= 2

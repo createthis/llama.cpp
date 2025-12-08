@@ -2634,6 +2634,38 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 }
             }
             break;
+        case GGML_OP_INDEXER_K_CACHE_FP8:
+            {
+                ggml_tensor * k_in     = dst->src[0];
+                ggml_tensor * slot_map = dst->src[1];
+                ggml_tensor * kv_cache8= dst->src[2];
+
+                GGML_ASSERT(k_in && slot_map && kv_cache8);
+                GGML_ASSERT(k_in->buffer     && ggml_backend_buffer_is_cuda(k_in->buffer));
+                GGML_ASSERT(slot_map->buffer && ggml_backend_buffer_is_cuda(slot_map->buffer));
+                GGML_ASSERT(kv_cache8->buffer&& ggml_backend_buffer_is_cuda(kv_cache8->buffer));
+
+                const int num_tokens       = (int) k_in->ne[0];
+                const int head_dim         = (int) k_in->ne[1];
+                const int quant_bs         = ggml_get_op_params_i32(dst, 0);
+                const int cache_block_size = ggml_get_op_params_i32(dst, 1);
+                const int cache_stride     = ggml_get_op_params_i32(dst, 2);
+
+                const float       * dK       = (const float *)      k_in->data;
+                const long long   * dSlotMap = (const long long *)  slot_map->data;
+                unsigned char     * dKvCache = (unsigned char *)    kv_cache8->data;
+
+                ggml_cuda_indexer_k_cache_fp8_quantize(ctx,
+                        dK,
+                        dKvCache,
+                        dSlotMap,
+                        num_tokens,
+                        head_dim,
+                        quant_bs,
+                        cache_block_size,
+                        cache_stride);
+            }
+            break;
         case GGML_OP_INDEXER_FUSED:
             {
                 // inputs: Q[D, Tc*H], K[D, kv], W[H, Tc], k_scale[kv]
@@ -3630,6 +3662,17 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     return false;
             }
             break;
+        case GGML_OP_INDEXER_K_CACHE_FP8:
+            {
+                const struct ggml_tensor * k_in     = op->src[0];
+                const struct ggml_tensor * slot_map = op->src[1];
+                const struct ggml_tensor * kv_cache8= op->src[2];
+                if (!k_in || !slot_map || !kv_cache8) return false;
+                if (k_in->type != GGML_TYPE_F32) return false;
+                if (slot_map->type != GGML_TYPE_I64) return false;
+                if (kv_cache8->type != GGML_TYPE_I8) return false;
+                return true;
+            }
         case GGML_OP_INDEXER_FUSED:
             {
                 const struct ggml_tensor * q = op->src[0];

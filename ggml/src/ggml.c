@@ -1054,9 +1054,11 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "SPARSE_TOPK_RADIX",
     "INDEXER_FUSED",
     "GLU",
+
+    "INDEXER_K_CACHE_FP8",
 };
 
-static_assert(GGML_OP_COUNT == 93, "GGML_OP_COUNT != 92");
+static_assert(GGML_OP_COUNT == 94, "GGML_OP_COUNT != 94");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1162,7 +1164,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 93, "GGML_OP_COUNT != 92");
+static_assert(GGML_OP_COUNT == 94, "GGML_OP_COUNT != 94");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -7370,6 +7372,41 @@ GGML_API struct ggml_tensor * ggml_indexer_logits_fused_ex(
     (void)D;
     return out;
 }
+
+// ggml_indexer_k_cache_fp8
+// Custom op that represents quantization of indexer K into an FP8 cache.
+// Inputs:
+//   k_in      : [num_tokens, head_dim] (row-major view for CUDA helper)
+//   slot_map  : [num_tokens] (I64 slot indices)
+//   kv_cache8 : [cache_stride, kv_size, n_stream] (I8 raw bytes)
+// Op params (i32):
+//   0: quant_bs
+//   1: cache_block_size
+//   2: cache_stride
+GGML_API struct ggml_tensor * ggml_indexer_k_cache_fp8(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * k_in,
+        struct ggml_tensor  * slot_map,
+        struct ggml_tensor  * kv_cache8,
+        int                   quant_bs,
+        int                   cache_block_size,
+        int                   cache_stride) {
+    GGML_ASSERT(k_in->ne[2] == 1 && k_in->ne[3] == 1);
+    GGML_ASSERT(slot_map->type == GGML_TYPE_I64);
+    GGML_ASSERT(kv_cache8->type == GGML_TYPE_I8);
+
+    int64_t dims[1] = {1};
+    struct ggml_tensor * out = ggml_new_tensor(ctx, GGML_TYPE_F32, 1, dims);
+    out->op      = GGML_OP_INDEXER_K_CACHE_FP8;
+    out->src[0]  = k_in;
+    out->src[1]  = slot_map;
+    out->src[2]  = kv_cache8;
+    ggml_set_op_params_i32(out, 0, quant_bs);
+    ggml_set_op_params_i32(out, 1, cache_block_size);
+    ggml_set_op_params_i32(out, 2, cache_stride);
+    return out;
+}
+
 
 
 
