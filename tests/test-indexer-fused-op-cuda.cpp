@@ -169,8 +169,8 @@ int main() {
     // as the ground truth for this test, regardless of kernel selection.
     bool use_fp8_ref = true;
 
-    int D=128, H=16, Tc=2, kv=4096, end=kv/4;
-    if (tl_fp8_env && std::atoi(tl_fp8_env) != 0) {
+    int D=128, H=64, Tc=2, kv=4096, end=kv/4;
+    if (tl_fp8_env && std::atoi(tl_fp8_env) != 0 && 0) {
       D=64;
       H=4;
     }
@@ -211,7 +211,7 @@ int main() {
     ggml_tensor * starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, Tc);
     ggml_tensor * ends   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, Tc);
     // Use ex variant to pass windows
-    ggml_tensor * out = ggml_indexer_logits_fused_ex(ctx, q2d, k2d, w2d, ks, starts, ends);
+    ggml_tensor * out = ggml_indexer_logits_fused_ex(ctx, q2d, k2d, w2d, ks, starts, ends, nullptr, 0, 0, 0);
 
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, out);

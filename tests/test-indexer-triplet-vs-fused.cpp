@@ -211,7 +211,7 @@ int main() {
     ggml_tensor * w2d_fused = ggml_new_tensor_2d(ctx_fused, GGML_TYPE_F32, H_index, T);
     ggml_tensor * ks  = ggml_new_tensor_1d(ctx_fused, GGML_TYPE_F32, N_kv);
 
-    ggml_tensor * out = ggml_indexer_logits_fused_ex(ctx_fused, q2d, k2d, w2d_fused, ks, nullptr, nullptr);
+    ggml_tensor * out = ggml_indexer_logits_fused_ex(ctx_fused, q2d, k2d, w2d_fused, ks, nullptr, nullptr, nullptr, 0, 0, 0);
     ggml_cgraph * gf_fused = ggml_new_graph(ctx_fused);
     ggml_build_forward_expand(gf_fused, out);
 

@@ -223,7 +223,11 @@ static ggml_tensor * build_indexer_fused_logits_ex(
     ggml_tensor * win_starts,
     ggml_tensor * win_ends,
     int64_t t0,
-    int64_t Tc) {
+    int64_t Tc,
+    ggml_tensor * k_indexer_fp8_sidecar,
+    int32_t quant_bs,
+    int32_t cache_block_size,
+    int32_t cache_stride) {
     ggml_tensor * starts_tile = nullptr;
     ggml_tensor * ends_tile   = nullptr;
     if (have_windows && win_ends) {
@@ -238,7 +242,10 @@ static ggml_tensor * build_indexer_fused_logits_ex(
             ends_tile = ggml_cont(ctx, ends_tile);
         }
     }
-    return ggml_indexer_logits_fused_ex(ctx, q_tile2d, k_slice, w_slice, ks_head, starts_tile, ends_tile);
+    return ggml_indexer_logits_fused_ex(ctx, q_tile2d, k_slice, w_slice, ks_head,
+                                        starts_tile, ends_tile,
+                                        k_indexer_fp8_sidecar,
+                                        quant_bs, cache_block_size, cache_stride);
 }
 static ggml_tensor * build_indexer_fused_logits(
     ggml_context * ctx,
@@ -499,7 +506,12 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                     fflush(stdout);
                 }
                 if (use_fused_device) {
-                    scores_tc = build_indexer_fused_logits_ex(ctx, q_tile2d, k_slice, w_slice, ks_head, have_windows, win_starts, win_ends, t0, Tc);
+                    // For now, no FP8 sidecar is threaded; pass nullptr and zeros.
+                    scores_tc = build_indexer_fused_logits_ex(ctx, q_tile2d, k_slice, w_slice, ks_head,
+                                                               have_windows, win_starts, win_ends,
+                                                               t0, Tc,
+                                                               /*k_indexer_fp8_sidecar=*/nullptr,
+                                                               /*quant_bs=*/0, /*cache_block_size=*/0, /*cache_stride=*/0);
                 } else {
                     scores_tc = build_indexer_fused_logits(ctx, q_tile2d, k_slice, w_slice, ks_head);
                 }
