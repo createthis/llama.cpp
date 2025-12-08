@@ -1696,11 +1696,46 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         dim3 grid((Tc + tokens_per_tile - 1) / tokens_per_tile, (kv_end + 15) / 16, 1);
         if (H % 16 == 0) {
             if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma_hgrp grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
+            // Optional: build FP8 K+scale scratch for WMMA HGRP when no DeepGEMM/TL path is active
+            unsigned char *dKfp8 = nullptr;
+            float *dKsf = nullptr;
+            bool have_fp8_k = false;
+            if (!use_dg_fp8) {
+                ggml_cuda_pool & pool = ctx.pool(ggml_cuda_get_device());
+                ggml_cuda_pool_alloc<unsigned char> __Kfp8(pool, (size_t)kv_end * (size_t)D);
+                ggml_cuda_pool_alloc<float> __Ksf(pool, (size_t)kv_end);
+                dKfp8 = __Kfp8.get();
+                dKsf  = __Ksf.get();
+                // Row-major staging for K: [kv_end, D]
+                ggml_cuda_pool_alloc<float> __Krm(pool, (size_t)kv_end * (size_t)D);
+                float *dKrm = __Krm.get();
+                dim3 tbT(32, 8);
+                dim3 gdK((kv_end + tbT.x - 1)/tbT.x, (D + tbT.y - 1)/tbT.y);
+                k_colmajor_DN_to_rowmajor_ND<<<gdK, tbT, 0, stream>>>(dK, D, kv_end, dKrm);
+                int rowsK = kv_end;
+                int colsK = D;
+                int threadsA = 256;
+                int blocksA = (rowsK + threadsA - 1) / threadsA;
+                ggml_cuda_pool_alloc<float> __Kamax(pool, (size_t)rowsK);
+                ggml_cuda_pool_alloc<float> __KsfInv(pool, (size_t)rowsK);
+                float *dKamax = __Kamax.get();
+                float *dKsfInv = __KsfInv.get();
+                k_rowmajor_f32_rowwise_absmax<<<blocksA, threadsA, 0, stream>>>(dKrm, rowsK, colsK, dKamax);
+                k_fp8_compute_row_scales<<<blocksA, threadsA, 0, stream>>>(dKamax, rowsK, dKsf, dKsfInv);
+                size_t total = (size_t)rowsK * (size_t)colsK;
+                dim3 tb(256);
+                dim3 gd((unsigned)((total + tb.x - 1)/tb.x));
+                k_rowmajor_f32_to_fp8_e4m3_rowwise_scaled<<<gd, tb, 0, stream>>>(dKrm, rowsK, colsK, dKsfInv, dKfp8);
+                have_fp8_k = true;
+            }
+            const float *K_sf_g = have_fp8_k ? dKsf : nullptr;
+            const unsigned char *K_fp8 = have_fp8_k ? dKfp8 : nullptr;
             LAUNCH_PROFILE_KERNEL("PROFILE_WMMA_HGRP_ONLY", WMMA_HGRP_ONLY, stream, ([&](){
-                        k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(dQ, /*K_fp8*/ nullptr, /*K_sf_g*/ nullptr, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, dOut);
+                        k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(dQ, K_fp8, K_sf_g, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, dOut);
                         })(), D, H, Tc, kv_end);
 
         } else if (H <= 16 && (16 % H) == 0) {
+
             if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
             LAUNCH_PROFILE_KERNEL("PROFILE_WMMA_ONLY", WMMA_ONLY, stream, ([&]{
                         k_indexer_logits_wmma16_bf16<<<grid, block, 0, stream>>>(dQ, dK, dW, dKS, D, H, Tc, kv_end, dStarts_dev, dEnds_dev, dOut);
