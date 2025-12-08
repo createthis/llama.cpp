@@ -79,7 +79,9 @@ int main() {
         /*inp_pos*/ nullptr, /*n_rot*/ 0, /*rope_type*/ 0, /*n_ctx_orig*/ 0,
         /*freq_base*/ 0.0f, /*freq_scale*/ 1.0f, /*ext_factor*/ 0.0f, /*attn_factor*/ 1.0f,
         /*beta_fast*/ 1.0f, /*beta_slow*/ 1.0f,
-        cb, /*gf*/ nullptr, /*sched*/ nullptr, /*backend_cpu*/ nullptr);
+        cb, /*gf*/ nullptr, /*sched*/ nullptr, /*backend_cpu*/ nullptr,
+        /*k_indexer_fp8_sidecar=*/nullptr,
+        /*quant_bs=*/0, /*cache_block_size=*/0, /*cache_stride=*/0);
 
     if (topk_indices) {
         printf("OK: topk_indices shape = [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n",

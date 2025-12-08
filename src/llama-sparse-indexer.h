@@ -80,7 +80,11 @@ struct sparse_attn_indexer {
         const function<void(ggml_tensor *, const char *, int)> & cb,
         ggml_cgraph * gf,
         ggml_backend_sched_t sched,
-        ggml_backend_t backend_cpu);
+        ggml_backend_t backend_cpu,
+        ggml_tensor * k_indexer_fp8_sidecar,
+        int32_t quant_bs,
+        int32_t cache_block_size,
+        int32_t cache_stride);
 };
 
 } // namespace llama

@@ -468,7 +468,11 @@ ggml_tensor * sparse_attn_indexer::build_kvaware_topk_indices(
     const function<void(ggml_tensor *, const char *, int)> & cb,
     ggml_cgraph * gf,
     ggml_backend_sched_t sched,
-    ggml_backend_t backend_cpu)
+    ggml_backend_t backend_cpu,
+    ggml_tensor * k_indexer_fp8_sidecar,
+    int32_t quant_bs,
+    int32_t cache_block_size,
+    int32_t cache_stride)
 {
     const char * ENV_SPARSE_DEBUG = getenv("LLAMA_SPARSE_DEBUG");
     const bool dbg = (ENV_SPARSE_DEBUG && atoi(ENV_SPARSE_DEBUG) != 0);
@@ -501,8 +505,18 @@ ggml_tensor * sparse_attn_indexer::build_kvaware_topk_indices(
     if (top_k <= 0) {
         top_k = std::max<int64_t>(64, std::min<int64_t>(1024, Kindexer_cache->ne[1]));
     }
+
+    // Optional FP8 indexer sidecar (DeepSeek V3.2)
+    if (mctx && mctx->is_arch_deepseek_v3_2() && mctx->has_k_indexer_fp8(layer_idx)) {
+        k_indexer_fp8_sidecar = mctx->get_k_indexer_fp8_raw(const_cast<ggml_context*>(ctx), layer_idx);
+        if (k_indexer_fp8_sidecar) {
+            mctx->get_k_indexer_fp8_layout(layer_idx, quant_bs, cache_block_size, cache_stride);
+        }
+    }
+
     ggml_tensor * kvaware_indices = llama::sparse_attn_topk::select_topk_tokens_indexer_kvaware(
-        ctx, trip.q_indexer, Kindexer_cache, trip.idx_weights, kq_mask, top_k, cb, gf, sched, backend_cpu);
+        ctx, trip.q_indexer, Kindexer_cache, trip.idx_weights, kq_mask, top_k, cb, gf, sched, backend_cpu,
+        k_indexer_fp8_sidecar, quant_bs, cache_block_size, cache_stride);
     if (dbg) {
         printf("SPARSE INDEXER: Final topk_indices [k,T]=[%" PRId64 ", %" PRId64 "]\n",
                kvaware_indices->ne[0], kvaware_indices->ne[1]);

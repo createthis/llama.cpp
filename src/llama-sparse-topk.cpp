@@ -271,7 +271,11 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
     const std::function<void(ggml_tensor *, const char *, int)> & cb,
     ggml_cgraph * gf,
     ggml_backend_sched_t sched,
-    ggml_backend_t /*backend_cpu*/) {
+    ggml_backend_t /*backend_cpu*/,
+    ggml_tensor * k_indexer_fp8_sidecar,
+    int32_t quant_bs,
+    int32_t cache_block_size,
+    int32_t cache_stride) {
     const int64_t D    = q_indexer->ne[0];
     const int64_t H    = q_indexer->ne[1];
     const int64_t T    = q_indexer->ne[2];
@@ -506,12 +510,11 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                     fflush(stdout);
                 }
                 if (use_fused_device) {
-                    // For now, no FP8 sidecar is threaded; pass nullptr and zeros.
                     scores_tc = build_indexer_fused_logits_ex(ctx, q_tile2d, k_slice, w_slice, ks_head,
                                                                have_windows, win_starts, win_ends,
                                                                t0, Tc,
-                                                               /*k_indexer_fp8_sidecar=*/nullptr,
-                                                               /*quant_bs=*/0, /*cache_block_size=*/0, /*cache_stride=*/0);
+                                                               k_indexer_fp8_sidecar,
+                                                               quant_bs, cache_block_size, cache_stride);
                 } else {
                     scores_tc = build_indexer_fused_logits(ctx, q_tile2d, k_slice, w_slice, ks_head);
                 }
