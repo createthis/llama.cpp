@@ -21,7 +21,6 @@ add_library(llama
             llama-impl.cpp
             llama-io.cpp
             llama-kv-cache.cpp
-            llama-kv-indexer-fp8.cpp
             llama-kv-cache-iswa.cpp
             llama-memory.cpp
             llama-memory-hybrid.cpp

@@ -165,6 +165,29 @@ llama_kv_cache::llama_kv_cache(
 
             lyr.k_indexer = kidx;
             lyr.k_indexer_stream = std::move(kidx_stream);
+
+            // Optional FP8 sidecar for DeepSeek V3.2 lightning indexer K cache
+            const char * env_fp8 = getenv("LLAMA_FP8_INDEXER_CACHE");
+            const bool enable_fp8 = (env_fp8 && atoi(env_fp8) != 0);
+            if (enable_fp8 && model.arch == LLM_ARCH_DEEPSEEK3_2) {
+                // Layout matches vLLM DeepseekV32IndexerCache:
+                //   per-block bytes = cache_block_size * (head_dim + head_dim/quant_bs * 4)
+                const int32_t quant_bs = 128; // DeepSeek V3.2 indexer quantization block size
+                const int32_t block_size = (int32_t) kv_size;
+                const int32_t scales_per_token = (int32_t) ((index_head_dim + quant_bs - 1) / quant_bs);
+                const int32_t cache_stride = (int32_t) (index_head_dim + (int64_t) scales_per_token * 4);
+
+                ggml_tensor * kidx_fp8 = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, cache_stride, kv_size, n_stream);
+                ggml_format_name(kidx_fp8, "cache_k_indexer_fp8_l%d", il);
+
+                lyr.k_indexer_fp8              = kidx_fp8;
+                lyr.k_indexer_fp8_quant_bs     = quant_bs;
+                lyr.k_indexer_fp8_block_size   = block_size;
+                lyr.k_indexer_fp8_cache_stride = cache_stride;
+
+                LLAMA_LOG_INFO("%s: layer %3d: enabling FP8 indexer cache: D_index=%lld kv=%u n_stream=%u quant_bs=%d cache_stride=%d\n",
+                               __func__, il, (long long) index_head_dim, kv_size, n_stream, quant_bs, cache_stride);
+            }
         }
     }
 
