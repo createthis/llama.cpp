@@ -1696,7 +1696,11 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         dim3 grid((Tc + tokens_per_tile - 1) / tokens_per_tile, (kv_end + 15) / 16, 1);
         if (H % 16 == 0) {
             if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma_hgrp grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
-            // Optional: build FP8 K+scale scratch for WMMA HGRP when no DeepGEMM path is active
+            // Optional: build FP8 K+scale buffers for WMMA HGRP.
+            // If an FP8 indexer sidecar is available (DeepSeek V3.2 with LLAMA_FP8_INDEXER_CACHE),
+            // the fused wrapper will pass in a pre-populated K_fp8+scales tile instead of rebuilding
+            // from F32 K here. For now, this device wrapper only knows whether sidecar is present
+            // via the op params; the actual gather happens in ggml_cuda_indexer_logits_fused_device.
             unsigned char *dKfp8 = nullptr;
             float *dKsf = nullptr;
             bool have_fp8_k = false;

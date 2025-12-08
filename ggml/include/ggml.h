@@ -786,7 +786,11 @@ extern "C" {
             struct ggml_tensor  * w2d,
             struct ggml_tensor  * k_scale,
             struct ggml_tensor  * starts,
-            struct ggml_tensor  * ends);
+            struct ggml_tensor  * ends,
+            struct ggml_tensor  * k_indexer_fp8_sidecar,
+            int                   quant_bs,
+            int                   cache_block_size,
+            int                   cache_stride);
 
     GGML_API struct ggml_tensor * ggml_indexer_k_cache_fp8(
             struct ggml_context * ctx,

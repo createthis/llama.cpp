@@ -7347,7 +7347,11 @@ GGML_API struct ggml_tensor * ggml_indexer_logits_fused_ex(
         struct ggml_tensor  * w2d,
         struct ggml_tensor  * k_scale,
         struct ggml_tensor  * starts,
-        struct ggml_tensor  * ends) {
+        struct ggml_tensor  * ends,
+        struct ggml_tensor  * k_indexer_fp8_sidecar,
+        int                   quant_bs,
+        int                   cache_block_size,
+        int                   cache_stride) {
     GGML_ASSERT(q2d->type == GGML_TYPE_F32 || q2d->type == GGML_TYPE_F16 || q2d->type == GGML_TYPE_BF16);
     GGML_ASSERT(k2d->type == GGML_TYPE_F32 || k2d->type == GGML_TYPE_F16 || k2d->type == GGML_TYPE_BF16);
     GGML_ASSERT(w2d->type == GGML_TYPE_F32);
@@ -7369,6 +7373,11 @@ GGML_API struct ggml_tensor * ggml_indexer_logits_fused_ex(
     out->src[3]  = k_scale;
     out->src[4]  = starts;
     out->src[5]  = ends;
+    out->src[6]  = k_indexer_fp8_sidecar;
+    // op params [0..2]: quant_bs, cache_block_size, cache_stride
+    ggml_set_op_params_i32(out, 0, quant_bs);
+    ggml_set_op_params_i32(out, 1, cache_block_size);
+    ggml_set_op_params_i32(out, 2, cache_stride);
     (void)D;
     return out;
 }

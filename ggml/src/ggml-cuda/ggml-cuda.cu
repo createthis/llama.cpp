@@ -2693,6 +2693,12 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 const int * dEnds   = nullptr;
                 if (dst->src[4] && dst->src[4]->type == GGML_TYPE_I32) dStarts = (const int *)dst->src[4]->data;
                 if (dst->src[5] && dst->src[5]->type == GGML_TYPE_I32) dEnds   = (const int *)dst->src[5]->data;
+                // Optional FP8 indexer sidecar parameters for DeepSeek V3.2
+                ggml_tensor * k_sidecar = dst->src[6];
+                const bool have_fp8_sidecar = (k_sidecar != nullptr);
+                const int quant_bs         = ggml_get_op_params_i32(dst, 0);
+                const int cache_block_size = ggml_get_op_params_i32(dst, 1);
+                const int cache_stride     = ggml_get_op_params_i32(dst, 2);
 // Optional profiling for fused indexer
                 auto * __prof_env2 = getenv("LLAMA_SPARSE_PROF");
                 auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
