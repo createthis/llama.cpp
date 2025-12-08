@@ -1163,6 +1163,10 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                                                        const float * dKS,
                                                        const int * dStarts, const int * dEnds,
                                                        int D, int H, int Tc, int kv_end,
+                                                       const unsigned char * dKvCache,
+                                                       int quant_bs,
+                                                       int cache_block_size,
+                                                       int cache_stride,
                                                        float * dOut) {
     cudaStream_t stream = ctx.stream();
     // Ensure starts/ends are device-resident copies (handles host or device sources)
@@ -1209,7 +1213,9 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
 
     const char *dg_env = getenv("LLAMA_DG_FP8");
     const bool use_dg_fp8 = (dg_env && *dg_env && atoi(dg_env) != 0);
-    if (sparse_debug_on()) printf("[INDEXER_DISPATCH] use_wmma=%d D=%d H=%d Tc=%d kv=%d BLOCK_Q=%d BLOCK_N=%d D_TILE=%d\n", (int)use_wmma, D, H, Tc, kv_end, BLOCK_Q, BLOCK_N, D_TILE);
+    if (sparse_debug_on()) printf("[INDEXER_DISPATCH] use_wmma=%d D=%d H=%d Tc=%d kv=%d BLOCK_Q=%d BLOCK_N=%d D_TILE=%d sidecar=%p quant_bs=%d block=%d stride=%d\n",
+            (int)use_wmma, D, H, Tc, kv_end, BLOCK_Q, BLOCK_N, D_TILE,
+            (const void *) dKvCache, quant_bs, cache_block_size, cache_stride);
     // Optional: TL port path in device wrapper
     const char * __prof_env = getenv("LLAMA_SPARSE_PROF");
     auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
@@ -1697,15 +1703,25 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         if (H % 16 == 0) {
             if (sparse_debug_on()) printf("[INDEXER_DISPATCH] launch=wmma_hgrp grid=(%d,%d) block=(%d,%d)\n", grid.x, grid.y, block.x, block.y);
             // Optional: build FP8 K+scale buffers for WMMA HGRP.
-            // If an FP8 indexer sidecar is available (DeepSeek V3.2 with LLAMA_FP8_INDEXER_CACHE),
-            // the fused wrapper will pass in a pre-populated K_fp8+scales tile instead of rebuilding
-            // from F32 K here. For now, this device wrapper only knows whether sidecar is present
-            // via the op params; the actual gather happens in ggml_cuda_indexer_logits_fused_device.
+            // Prefer using DeepSeek V3.2 FP8 indexer cache sidecar when available.
             unsigned char *dKfp8 = nullptr;
             float *dKsf = nullptr;
             bool have_fp8_k = false;
-            if (!use_dg_fp8) {
-                ggml_cuda_pool & pool = ctx.pool(ggml_cuda_get_device());
+            ggml_cuda_pool & pool = ctx.pool(ggml_cuda_get_device());
+            if (dKvCache && quant_bs > 0 && cache_block_size >= kv_end && !use_dg_fp8) {
+                // Gather FP8 K + per-row scales from indexer FP8 cache sidecar.
+                ggml_cuda_pool_alloc<unsigned char> __Kfp8(pool, (size_t)kv_end * (size_t)D);
+                ggml_cuda_pool_alloc<float>         __Ksf (pool, (size_t)kv_end);
+                dKfp8 = __Kfp8.get();
+                dKsf  = __Ksf.get();
+                int stream_id = 0;
+                int kv_start  = 0;
+                int kv_len    = kv_end;
+                ggml_cuda_indexer_k_cache_fp8_gather_wmma_hgrp(
+                    ctx, dKvCache, D, quant_bs, cache_block_size, cache_stride,
+                    stream_id, kv_start, kv_len, dKfp8, dKsf);
+                have_fp8_k = true;
+            } else if (!use_dg_fp8) {
                 ggml_cuda_pool_alloc<unsigned char> __Kfp8(pool, (size_t)kv_end * (size_t)D);
                 ggml_cuda_pool_alloc<float>         __Ksf (pool, (size_t)kv_end);
                 dKfp8 = __Kfp8.get();

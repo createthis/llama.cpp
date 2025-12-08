@@ -54,7 +54,10 @@ void ggml_cuda_mask_window_ends_device(struct ggml_backend_cuda_context & ctx,
                                        const float * dMask, int N_kv, int T,
                                        int * dEnds);
 
-// Device-resident entry: takes device pointers and current CUDA context
+// Device-resident entry: takes device pointers and current CUDA context.
+// Optional FP8 indexer sidecar (DeepSeek V3.2) can be provided via dKvCache
+// plus its layout parameters; if dKvCache is null, the kernel will quantize
+// K from dK on the fly.
 void ggml_cuda_indexer_logits_fused_device(struct ggml_backend_cuda_context & ctx,
                                            const float * dQ,
                                            const float * dK,
@@ -62,6 +65,10 @@ void ggml_cuda_indexer_logits_fused_device(struct ggml_backend_cuda_context & ct
                                            const float * dKS,
                                            const int * dStarts, const int * dEnds,
                                            int D, int H, int Tc, int kv_end,
+                                           const unsigned char * dKvCache,
+                                           int quant_bs,
+                                           int cache_block_size,
+                                           int cache_stride,
                                            float * dOut);
 
 // Derive per-token KV window ends from device-resident mask and copy to host buffer

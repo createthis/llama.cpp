@@ -2699,6 +2699,10 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 const int quant_bs         = ggml_get_op_params_i32(dst, 0);
                 const int cache_block_size = ggml_get_op_params_i32(dst, 1);
                 const int cache_stride     = ggml_get_op_params_i32(dst, 2);
+                const unsigned char * dKvCache = nullptr;
+                if (have_fp8_sidecar && quant_bs > 0 && cache_block_size > 0 && cache_stride > 0) {
+                    dKvCache = (const unsigned char *) k_sidecar->data;
+                }
 // Optional profiling for fused indexer
                 auto * __prof_env2 = getenv("LLAMA_SPARSE_PROF");
                 auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
@@ -2734,10 +2738,23 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
 
 #ifndef NDEBUG
                 printf("[GGML_OP_INDEXER_FUSED] D=%d H=%d Tc=%d kv=%d TcH=%d\n", D, H, Tc, kv, TcH);
-                printf("[GGML_OP_INDEXER_FUSED] ptrs dQ=%p dK=%p dW=%p dKS=%p dOut=%p\n", (void*)qf.get(), (void*)kf.get(), w2d_c->data, ks_c->data, dst->data);
+                printf("[GGML_OP_INDEXER_FUSED] ptrs dQ=%p dK=%p dW=%p dKS=%p dOut=%p sidecar=%p quant_bs=%d block=%d stride=%d\n",
+                       (void*)qf.get(), (void*)kf.get(), w2d_c->data, ks_c->data, dst->data,
+                       (void*)dKvCache, quant_bs, cache_block_size, cache_stride);
                 fflush(stdout);
 #endif
-                ggml_cuda_indexer_logits_fused_device(ctx, (const float *)qf.get(), (const float *)kf.get(), (const float *)w2d_c->data, (const float *)ks_c->data, dStarts, dEnds, D, H, Tc, kv, (float *)dst->data);
+                ggml_cuda_indexer_logits_fused_device(ctx,
+                                                       (const float *) qf.get(),
+                                                       (const float *) kf.get(),
+                                                       (const float *) w2d_c->data,
+                                                       (const float *) ks_c->data,
+                                                       dStarts, dEnds,
+                                                       D, H, Tc, kv,
+                                                       dKvCache,
+                                                       quant_bs,
+                                                       cache_block_size,
+                                                       cache_stride,
+                                                       (float *) dst->data);
                 CUDA_CHECK(cudaGetLastError());
                 if (__do_prof2) {
                     cudaEventRecord(__i1, ctx.stream());
