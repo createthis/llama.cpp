@@ -288,7 +288,9 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
             if (kidx_fp8) {
                 int32_t quant_bs = 0, block_size = 0, cache_stride = 0;
                 mctx->get_k_indexer_fp8_layout(layer_idx, quant_bs, block_size, cache_stride);
-                ggml_tensor * K_t = ggml_transpose(ctx, Kindexer_cur); // [n_tokens, D_index]
+                // Ensure K is treated as 2D [D_index, n_tokens] before transposing to [n_tokens, D_index]
+                ggml_tensor * K_flat = ggml_reshape_2d(ctx, Kindexer_cur, D_index, n_tokens);
+                ggml_tensor * K_t = ggml_transpose(ctx, K_flat); // [n_tokens, D_index]
                 K_t = ggml_cont(ctx, K_t);
                 ggml_tensor * fp8_q = ggml_indexer_k_cache_fp8(
                         ctx,
