@@ -109,3 +109,78 @@ extern "C" void ggml_cuda_indexer_k_cache_fp8_quantize(
     ggml_cuda_fp8_indexer::k_indexer_fp8_quant_and_cache_kernel<<<grid, block, 0, stream>>>(
         dK, dKvCache, dSlotMap, head_dim, quant_bs, cache_block_size, cache_stride);
 }
+
+
+// Gather a contiguous KV slice for one stream from the FP8 indexer cache into
+// a row-major [kv_len, head_dim] FP8 matrix and per-quant-block FP32 scales.
+// This is a low-level helper used by indexer-fused WMMA kernels.
+__global__ void k_indexer_fp8_gather_wmma_hgrp_kernel(
+    const uint8_t * __restrict__ kv_cache, // [num_blocks, cache_block_size, cache_stride]
+    int head_dim,
+    int quant_bs,
+    int cache_block_size,
+    int cache_stride,
+    int stream_id,
+    int kv_start,
+    int kv_len,
+    uint8_t * __restrict__ k_fp8_out,   // [kv_len, head_dim]
+    float   * __restrict__ scale_out) { // [kv_len, head_dim/quant_bs]
+    int row = blockIdx.x * blockDim.x + threadIdx.x; // 0..kv_len-1
+    if (row >= kv_len) return;
+    int col = blockIdx.y * blockDim.y + threadIdx.y; // 0..head_dim-1
+    // Compute source token index within stream block
+    const int token_idx = kv_start + row;
+    if (token_idx >= cache_block_size) return; // safety; callers should enforce
+    const int64_t block_idx   = stream_id;
+    const int64_t block_base  = block_idx * (int64_t)cache_block_size * cache_stride;
+    const int64_t vals_base   = block_base + (int64_t)token_idx * head_dim;
+    const int64_t scales_base = block_base + (int64_t)cache_block_size * head_dim;
+    // Write FP8 values
+    if (col < head_dim) {
+        const int64_t src_off = vals_base + col;
+        const int64_t dst_off = (int64_t)row * head_dim + col;
+        k_fp8_out[dst_off] = kv_cache[src_off];
+    }
+    // Write FP32 scale for this quant block (only when col is first lane of block)
+    int blocks_per_row = (head_dim + quant_bs - 1) / quant_bs;
+    if (col < blocks_per_row) {
+        int col0 = col * quant_bs;
+        if (col0 < head_dim) {
+            const int64_t block_linear   = (int64_t)token_idx * head_dim + col0;
+            const int64_t scale_block_ix = block_linear / quant_bs;
+            const int64_t scale_byte_off = scales_base + scale_block_ix * 4;
+            const int64_t dst_scale_off  = (int64_t)row * blocks_per_row + col;
+            scale_out[dst_scale_off] = *reinterpret_cast<const float*>(&kv_cache[scale_byte_off]);
+        }
+    }
+}
+
+extern "C" void ggml_cuda_indexer_k_cache_fp8_gather_wmma_hgrp(
+    ggml_backend_cuda_context & ctx,
+    const unsigned char * dKvCache,
+    int head_dim,
+    int quant_bs,
+    int cache_block_size,
+    int cache_stride,
+    int stream_id,
+    int kv_start,
+    int kv_len,
+    unsigned char * dK_fp8_out,
+    float * dScale_out) {
+    cudaStream_t stream = ctx.stream();
+    if (kv_len <= 0 || head_dim <= 0) return;
+    dim3 block(16, 16);
+    dim3 grid((kv_len + block.x - 1)/block.x,
+              (head_dim + block.y - 1)/block.y);
+    k_indexer_fp8_gather_wmma_hgrp_kernel<<<grid, block, 0, stream>>>(
+        dKvCache,
+        head_dim,
+        quant_bs,
+        cache_block_size,
+        cache_stride,
+        stream_id,
+        kv_start,
+        kv_len,
+        dK_fp8_out,
+        dScale_out);
+}

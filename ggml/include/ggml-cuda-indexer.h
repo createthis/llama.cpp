@@ -20,6 +20,34 @@ void ggml_cuda_indexer_k_cache_fp8_quantize(
     int cache_block_size,
     int cache_stride);
 
+// Gather a contiguous KV range for one stream from the FP8 indexer K cache
+// into a row-major FP8 K matrix plus per-quant-block FP32 scales.
+//
+// Inputs:
+//   dKvCache         : [num_blocks, cache_block_size, cache_stride] (I8)
+//   head_dim         : indexer head dimension D
+//   quant_bs         : quantization block size used when writing the cache
+//   cache_block_size : tokens per block (kv_size)
+//   cache_stride     : bytes per token (D + scales_per_token*4)
+//   stream_id        : which block/stream to gather from
+//   kv_start, kv_len : slice [kv_start, kv_start+kv_len) within that stream
+//
+// Outputs:
+//   dK_fp8_out  : [kv_len, head_dim] row-major FP8 codes
+//   dScale_out  : [kv_len, head_dim/quant_bs] FP32 scales (one per quant block)
+void ggml_cuda_indexer_k_cache_fp8_gather_wmma_hgrp(
+    struct ggml_backend_cuda_context & ctx,
+    const unsigned char * dKvCache,
+    int head_dim,
+    int quant_bs,
+    int cache_block_size,
+    int cache_stride,
+    int stream_id,
+    int kv_start,
+    int kv_len,
+    unsigned char * dK_fp8_out,
+    float * dScale_out);
+
 // Derive per-token KV window ends from device-resident mask [N_kv, T]
 // mask values <= -1e29 are treated as masked; ends[t] = last i where mask[i,t] > -1e29, or 0 if none
 void ggml_cuda_mask_window_ends_device(struct ggml_backend_cuda_context & ctx,
