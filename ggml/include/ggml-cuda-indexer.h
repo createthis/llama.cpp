@@ -7,6 +7,19 @@ extern "C" {
 // Forward-declare the CUDA context type; definition is in common.cuh
 struct ggml_backend_cuda_context;
 
+
+// DeepSeek V3.2: FP8 indexer K cache quantization helper (CUDA backend)
+void ggml_cuda_indexer_k_cache_fp8_quantize(
+    struct ggml_backend_cuda_context & ctx,
+    const float * dK,           // [num_tokens, head_dim]
+    unsigned char * dKvCache,   // [num_blocks, cache_block_size, cache_stride]
+    const long long * dSlotMap, // [num_tokens]
+    int num_tokens,
+    int head_dim,
+    int quant_bs,
+    int cache_block_size,
+    int cache_stride);
+
 // Derive per-token KV window ends from device-resident mask [N_kv, T]
 // mask values <= -1e29 are treated as masked; ends[t] = last i where mask[i,t] > -1e29, or 0 if none
 void ggml_cuda_mask_window_ends_device(struct ggml_backend_cuda_context & ctx,

@@ -45,6 +45,7 @@ if (CUDAToolkit_FOUND)
     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda-radix.h")
 
     file(GLOB   GGML_SOURCES_CUDA "*.cu")
+    list(APPEND GGML_SOURCES_CUDA "fp8_indexer_cache.cu")
     list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "ggml-cuda-deepgemm\.cu$")
     list(APPEND GGML_SOURCES_CUDA "topk-radix.cu" indexer-fused.cu sparse-mla-decode.cu)
 

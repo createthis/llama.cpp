@@ -251,6 +251,7 @@ if (GGML_CUDA)
     llama_build_and_test(test-sparse-topk-radix-stress-cuda.cpp)
     llama_build_and_test(test-sparse-topk-op-cuda.cpp)
     llama_build_and_test(test-indexer-fused-op-cuda.cpp)
+    llama_build_and_test(test-indexer-k-cache-fp8.cpp)
     find_package(CUDAToolkit)
     llama_build_and_test(test-fp8-e4m3-cutlass-vs-cpu.cpp)
     target_include_directories(test-fp8-e4m3-cutlass-vs-cpu PRIVATE
