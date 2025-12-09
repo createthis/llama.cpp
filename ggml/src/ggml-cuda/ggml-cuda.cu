@@ -47,6 +47,27 @@
 #include "ggml-cuda/tsembd.cuh"
 #include "ggml-cuda/topk-moe.cuh"
 #include "ggml-cuda/topk-radix.cuh"
+
+extern "C" void ggml_cuda_topk_per_row(
+    ggml_backend_cuda_context & ctx,
+    const float * dLogits,
+    const int * dRowStarts,
+    const int * dRowEnds,
+    int num_rows,
+    int stride0,
+    int stride1,
+    int * dOutIndices);
+
+extern "C" void ggml_cuda_topk_per_row_decode(
+    ggml_backend_cuda_context & ctx,
+    const float * dLogits,
+    const int * dSeqLens,
+    int next_n,
+    int num_rows,
+    int stride0,
+    int stride1,
+    int * dOutIndices);
+
 #include "ggml-cuda/unary.cuh"
 #include "ggml-cuda/upscale.cuh"
 #include "ggml-cuda/wkv.cuh"
@@ -2587,17 +2608,44 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     }
                 } else {
                     GGML_ASSERT(scores->type == GGML_TYPE_F32);
+                    const char * use_vllm = getenv("LLAMA_SPARSE_TOPK_VLLM");
+                    bool use_vllm_topk = (use_vllm && atoi(use_vllm) != 0 && T == 1 && k <= 2048 && !tl_starts && !tl_ends);
                     if (__do_prof) {
                         cudaEvent_t __e0, __e1;
                         cudaEventCreate(&__e0);
                         cudaEventCreate(&__e1);
                         cudaEventRecord(__e0, ctx.stream());
                         {
-                            const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
-                            if (use_tl && *use_tl) {
-                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data, tl_starts, tl_ends);
+                            if (use_vllm_topk) {
+                                ggml_cuda_pool & pool = ctx.pool(ggml_cuda_get_device());
+                                const int KMAX = 2048;
+                                ggml_cuda_pool_alloc<int> rowStarts(pool, (size_t)T);
+                                ggml_cuda_pool_alloc<int> rowEnds  (pool, (size_t)T);
+                                ggml_cuda_pool_alloc<int> tmpIdx   (pool, (size_t)KMAX * (size_t)T);
+                                int hStarts = 0;
+                                int hEnds   = N;
+                                CUDA_CHECK(cudaMemcpyAsync(rowStarts.get(), &hStarts, sizeof(int), cudaMemcpyHostToDevice, ctx.stream()));
+                                CUDA_CHECK(cudaMemcpyAsync(rowEnds.get(),   &hEnds,   sizeof(int), cudaMemcpyHostToDevice, ctx.stream()));
+                                ggml_cuda_topk_per_row(ctx,
+                                                       (const float *) scores->data,
+                                                       rowStarts.get(),
+                                                       rowEnds.get(),
+                                                       T,
+                                                       N,
+                                                       1,
+                                                       tmpIdx.get());
+                                // copy first k indices per column from tmpIdx [KMAX,T] to dst [k,T]
+                                CUDA_CHECK(cudaMemcpy2DAsync((void *) dst->data, (size_t) k * sizeof(int),
+                                                             (const void *) tmpIdx.get(), (size_t) KMAX * sizeof(int),
+                                                             (size_t) k * sizeof(int), (size_t) T,
+                                                             cudaMemcpyDeviceToDevice, ctx.stream()));
                             } else {
-                                ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+                                const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
+                                if (use_tl && *use_tl) {
+                                    ggml_cuda_topk_tilelang_port_device(ctx, (const float *) scores->data, N, T, k, (int *) dst->data, tl_starts, tl_ends);
+                                } else {
+                                    ggml_cuda_topk_radix_indices_device(ctx, (const float *) scores->data, N, T, k, (int *) dst->data);
+                                }
                             }
                         }
                         __err_kernel = cudaGetLastError();
@@ -2610,18 +2658,48 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                         __sum += __ms;
                         __cnt++;
                         if (__prof_each_env && *__prof_each_env) {
-                            fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
+                            if (use_vllm_topk) {
+                                fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX_VLLM N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
+                            } else {
+                                fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
+                            }
                         } else {
                             if (__cnt % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0)); __sum = 0.0; }
                         }
                         cudaEventDestroy(__e0);
                         cudaEventDestroy(__e1);
                     } else {
-                        const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
-                        if (use_tl && *use_tl) {
-                            ggml_cuda_topk_tilelang_port_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data, tl_starts, tl_ends);
+                        const char * use_vllm2 = getenv("LLAMA_SPARSE_TOPK_VLLM");
+                        bool use_vllm_topk2 = (use_vllm2 && atoi(use_vllm2) != 0 && T == 1 && k <= 2048 && !tl_starts && !tl_ends);
+                        if (use_vllm_topk2) {
+                            ggml_cuda_pool & pool = ctx.pool(ggml_cuda_get_device());
+                            const int KMAX = 2048;
+                            ggml_cuda_pool_alloc<int> rowStarts(pool, (size_t)T);
+                            ggml_cuda_pool_alloc<int> rowEnds  (pool, (size_t)T);
+                            ggml_cuda_pool_alloc<int> tmpIdx   (pool, (size_t)KMAX * (size_t)T);
+                            int hStarts = 0;
+                            int hEnds   = N;
+                            CUDA_CHECK(cudaMemcpyAsync(rowStarts.get(), &hStarts, sizeof(int), cudaMemcpyHostToDevice, ctx.stream()));
+                            CUDA_CHECK(cudaMemcpyAsync(rowEnds.get(),   &hEnds,   sizeof(int), cudaMemcpyHostToDevice, ctx.stream()));
+                            ggml_cuda_topk_per_row(ctx,
+                                                   (const float *) scores->data,
+                                                   rowStarts.get(),
+                                                   rowEnds.get(),
+                                                   T,
+                                                   N,
+                                                   1,
+                                                   tmpIdx.get());
+                            CUDA_CHECK(cudaMemcpy2DAsync((void *) dst->data, (size_t) k * sizeof(int),
+                                                         (const void *) tmpIdx.get(), (size_t) KMAX * sizeof(int),
+                                                         (size_t) k * sizeof(int), (size_t) T,
+                                                         cudaMemcpyDeviceToDevice, ctx.stream()));
                         } else {
-                            ggml_cuda_topk_radix_indices_device(ctx, (const float *)scores->data, N, T, k, (int *)dst->data);
+                            const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
+                            if (use_tl && *use_tl) {
+                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *) scores->data, N, T, k, (int *) dst->data, tl_starts, tl_ends);
+                            } else {
+                                ggml_cuda_topk_radix_indices_device(ctx, (const float *) scores->data, N, T, k, (int *) dst->data);
+                            }
                         }
                         __err_kernel = cudaGetLastError();
                     }
