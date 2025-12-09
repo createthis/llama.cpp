@@ -1717,9 +1717,11 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                 int stream_id = 0;
                 int kv_start  = 0;
                 int kv_len    = kv_end;
-                ggml_cuda_indexer_k_cache_fp8_gather_wmma_hgrp(
-                    ctx, dKvCache, D, quant_bs, cache_block_size, cache_stride,
-                    stream_id, kv_start, kv_len, dKfp8, dKsf);
+                LAUNCH_PROFILE_KERNEL("PROFILE_FP8_GATHER", FP8_GATHER, stream, ([&](){
+                            ggml_cuda_indexer_k_cache_fp8_gather_wmma_hgrp(
+                                ctx, dKvCache, D, quant_bs, cache_block_size, cache_stride,
+                                stream_id, kv_start, kv_len, dKfp8, dKsf);
+                            })(), D, H, Tc, kv_end);
                 have_fp8_k = true;
             } else if (!use_dg_fp8) {
                 ggml_cuda_pool_alloc<unsigned char> __Kfp8(pool, (size_t)kv_end * (size_t)D);
