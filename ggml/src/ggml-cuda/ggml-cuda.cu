@@ -2703,6 +2703,30 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 if (have_fp8_sidecar && quant_bs > 0 && cache_block_size > 0 && cache_stride > 0) {
                     dKvCache = (const unsigned char *) k_sidecar->data;
                 }
+                // Decide if we can skip building float32 K when using FP8 indexer sidecar + WMMA HGRP
+                bool use_wmma = false;
+                bool do_not_use_wmma = false;
+                {
+                    const char *s = getenv("LLAMA_INDEXER_USE_WMMA");
+                    if (s && atoi(s) != 0) use_wmma = true;
+                    if (s && atoi(s) == 0) do_not_use_wmma = true;
+                }
+                if (!use_wmma) {
+                    size_t work = (size_t) Tc * (size_t) kv;
+                    if (D % 16 == 0 && ((((H <= 16) && ((16 % H) == 0)) || ((H % 16) == 0))) && work >= 16384 && !do_not_use_wmma) {
+                        use_wmma = true;
+                    }
+                }
+                const char *dg_env = getenv("LLAMA_DG_FP8");
+                const bool use_dg_fp8 = (dg_env && *dg_env && atoi(dg_env) != 0);
+                const char *tl_port = getenv("LLAMA_INDEXER_TL_PORT");
+                const bool use_tl_port = (tl_port && *tl_port && atoi(tl_port) != 0);
+                bool skip_k_convert = false;
+                if (dKvCache && quant_bs > 0 && cache_block_size >= kv && cache_stride > 0 &&
+                    use_wmma && (H % 16 == 0) && (D % 16 == 0) && ((size_t) Tc * (size_t) kv > 4096) &&
+                    !use_dg_fp8 && !use_tl_port) {
+                    skip_k_convert = true;
+                }
 // Optional profiling for fused indexer
                 auto * __prof_env2 = getenv("LLAMA_SPARSE_PROF");
                 auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
@@ -2727,11 +2751,13 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     CUDA_CHECK(cudaMemcpyAsync((void *)qf.get(), (const void *)q2d_c->data,
                                                sizeof(float)*(size_t)D*TcH, cudaMemcpyDeviceToDevice, ctx.stream()));
                 }
-                if (to_k) {
-                    to_k((const void *)k2d_c->data, (float *)kf.get(), (size_t)D*kv,  ctx.stream());
-                } else {
-                    CUDA_CHECK(cudaMemcpyAsync((void *)kf.get(), (const void *)k2d_c->data,
-                                               sizeof(float)*(size_t)D*kv, cudaMemcpyDeviceToDevice, ctx.stream()));
+                if (!skip_k_convert) {
+                    if (to_k) {
+                        to_k((const void *)k2d_c->data, (float *)kf.get(), (size_t)D*kv,  ctx.stream());
+                    } else {
+                        CUDA_CHECK(cudaMemcpyAsync((void *)kf.get(), (const void *)k2d_c->data,
+                                                   sizeof(float)*(size_t)D*kv, cudaMemcpyDeviceToDevice, ctx.stream()));
+                    }
                 }
                 // Launch naive device kernel (implemented in indexer-fused.cu) directly writing to dst
                 if (__do_prof2) { cudaEventRecord(__i0, ctx.stream()); }
@@ -2743,9 +2769,10 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                        (void*)dKvCache, quant_bs, cache_block_size, cache_stride);
                 fflush(stdout);
 #endif
+                const float *dK_f32 = skip_k_convert ? nullptr : (const float *) kf.get();
                 ggml_cuda_indexer_logits_fused_device(ctx,
                                                        (const float *) qf.get(),
-                                                       (const float *) kf.get(),
+                                                       dK_f32,
                                                        (const float *) w2d_c->data,
                                                        (const float *) ks_c->data,
                                                        dStarts, dEnds,
