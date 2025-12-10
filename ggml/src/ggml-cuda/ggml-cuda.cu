@@ -93,6 +93,13 @@ extern "C" void ggml_cuda_sparse_mla_decode_device(ggml_backend_cuda_context & c
     const float * q, const float * k, const float * v, const int32_t * topk,
     int D, int Hq, int Hkv, int Dv, int Nkv, int K, float kq_scale, float softcap, float * out);
 
+// Optional FlashMLA sparse FP8 decode entry point (SM100), vendored from vLLM/FlashMLA.
+// This is experimental and currently only wired for DeepSeek V3.2 MLA decode single-token path.
+extern "C" void ggml_cuda_sparse_mla_decode_flashmla_sm100(
+    ggml_backend_cuda_context & ctx,
+    const float * q, const float * k, const float * v, const int32_t * topk,
+    int D, int Hq, int Hkv, int Dv, int Nkv, int K, float kq_scale, float softcap, float * out);
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -2973,10 +2980,30 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 auto * __prof_env3 = getenv("LLAMA_SPARSE_PROF");
                 cudaEvent_t __m0, __m1; bool __do_prof3 = false; float __ms3 = 0.0f;
                 if (__prof_env3 && *__prof_env3) { cudaEventCreate(&__m0); cudaEventCreate(&__m1); __do_prof3 = true; cudaEventRecord(__m0, ctx.stream()); }
-                ggml_cuda_sparse_mla_decode_device(ctx, (const float*)qtmp.get(), (const float*)ktmp.get(), (const float*)vtmp.get(), (const int32_t*)idx->data,
-                                                   Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
+
+                const char * flashmla_env = getenv("LLAMA_SPARSE_MLA_FLASHMLA");
+                bool use_flashmla = (flashmla_env && atoi(flashmla_env) != 0);
+                // First experimental wiring: only for single-token decode on DeepSeek V3.2 shapes.
+                bool can_use_flashmla = use_flashmla && (Hkv == 1) && (idx->ne[1] == 1) && (q2d->ne[2] == 1) && (q2d->ne[3] == 1);
+                if (can_use_flashmla) {
+                    ggml_cuda_sparse_mla_decode_flashmla_sm100(
+                        ctx,
+                        (const float*)qtmp.get(),
+                        (const float*)ktmp.get(),
+                        (const float*)vtmp.get(),
+                        (const int32_t*)idx->data,
+                        Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
+                } else {
+                    ggml_cuda_sparse_mla_decode_device(
+                        ctx,
+                        (const float*)qtmp.get(),
+                        (const float*)ktmp.get(),
+                        (const float*)vtmp.get(),
+                        (const int32_t*)idx->data,
+                        Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
+                }
                 CUDA_CHECK(cudaGetLastError());
-                if (__do_prof3) { cudaEventRecord(__m1, ctx.stream()); cudaEventSynchronize(__m1); cudaEventElapsedTime(&__ms3, __m0, __m1); cudaEventDestroy(__m0); cudaEventDestroy(__m1); static int __cnt_mla = 0; static double __sum_mla = 0.0; __sum_mla += __ms3; __cnt_mla++; if (__cnt_mla % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d avg_ms=%.3f over 50 calls\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__sum_mla/50.0)); __sum_mla = 0.0; } }
+                if (__do_prof3) { cudaEventRecord(__m1, ctx.stream()); cudaEventSynchronize(__m1); cudaEventElapsedTime(&__ms3, __m0, __m1); cudaEventDestroy(__m0); cudaEventDestroy(__m1); static int __cnt_mla = 0; static double __sum_mla = 0.0; __sum_mla += __ms3; __cnt_mla++; if (__cnt_mla % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE avg_ms=%.3f over 50 calls\n", (float)(__sum_mla/50.0)); __sum_mla = 0.0; } }
             }
             break;
 
