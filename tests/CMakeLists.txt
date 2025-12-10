@@ -227,6 +227,8 @@ target_link_libraries(${TEST_TARGET} PRIVATE llama)
 llama_build_and_test(test-alloc.cpp)
 target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
 
+# FP8 KV DSMLA roundtrip test for DeepSeek V3.2
+llama_build_and_test(test-fp8-kv-dsmla.cpp)
 
 # Unit test for sparse_attn_indexer::idx_compute_scores_tile
 llama_build_and_test(test-indexer-scores-tile.cpp)

@@ -1056,9 +1056,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 
     "INDEXER_K_CACHE_FP8",
+    "KV_DSMLA_PACK",
 };
 
-static_assert(GGML_OP_COUNT == 94, "GGML_OP_COUNT != 94");
+static_assert(GGML_OP_COUNT == 95, "GGML_OP_COUNT != 95");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1162,9 +1163,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sparse_topk_radix(x)",
     "indexer_fused(x)",
     "glu(x)",
+    "kv_dsmla_pack(x)",
 };
 
-static_assert(GGML_OP_COUNT == 94, "GGML_OP_COUNT != 94");
+static_assert(GGML_OP_COUNT == 95, "GGML_OP_COUNT != 95");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -7443,6 +7445,27 @@ GGML_API struct ggml_tensor * ggml_sparse_mla_decode_fused(
 }
 
 
+
+
+// DeepSeek V3.2 FP8 KV pack op: k_latent_rope [D_total,1,n_tokens], k_idxs [n_tokens], k_blob [entry_bytes,kv_size,n_stream]
+GGML_API struct ggml_tensor * ggml_kv_dsmla_pack(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * k_latent_rope,
+        struct ggml_tensor  * k_idxs,
+        struct ggml_tensor  * k_blob) {
+    GGML_ASSERT(k_latent_rope->type == GGML_TYPE_F32);
+    GGML_ASSERT(k_idxs->type        == GGML_TYPE_I64);
+    GGML_ASSERT(k_blob->type        == GGML_TYPE_I8);
+    GGML_ASSERT(k_latent_rope->ne[1] == 1);
+    GGML_ASSERT(k_idxs->ne[0] == k_latent_rope->ne[2]);
+
+    struct ggml_tensor * out = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    out->op     = GGML_OP_KV_DSMLA_PACK;
+    out->src[0] = k_latent_rope;
+    out->src[1] = k_idxs;
+    out->src[2] = k_blob;
+    return out;
+}
 
 GGML_API struct ggml_tensor * ggml_sparse_topk_radix_ex(
         struct ggml_context * ctx,
