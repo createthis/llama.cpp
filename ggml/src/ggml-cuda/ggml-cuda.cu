@@ -3025,16 +3025,16 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     __cnt_mla++;
                     if (__prof_each_env && *__prof_each_env) {
                         if (use_flashmla) {
-                            fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE_FLASHMLA ms=%.3f\n", (float)(__ms3));
+                            fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE_FLASHMLA D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d ms=%.3f\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__ms3));
                         } else {
-                            fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE ms=%.3f\n", (float)(__ms3));
+                            fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d ms=%.3f\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__ms3));
                         }
                     } else {
                         if (__cnt_mla % 50 == 0) {
                             if (use_flashmla) {
-                                fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE_FLASHMLA avg_ms=%.3f over 50 calls\n", (float)(__sum_mla/50.0));
+                                fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE_FLASHMLA D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d avg_ms=%.3f over 50 calls\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__sum_mla/50.0));
                             } else {
-                                fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE avg_ms=%.3f over 50 calls\n", (float)(__sum_mla/50.0));
+                                fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d avg_ms=%.3f over 50 calls\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__sum_mla/50.0));
                             }
                             __sum_mla = 0.0;
                         }
