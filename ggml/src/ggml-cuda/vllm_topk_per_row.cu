@@ -565,6 +565,23 @@ extern "C" void ggml_cuda_topk_per_row(
         dLogits, dRowStarts, dRowEnds, dOutIndices, stride0, stride1, topK, 0);
 }
 
+extern "C" void ggml_cuda_topk_per_row_radix(
+    ggml_backend_cuda_context & ctx,
+    const float * dLogits,
+    const int * dRowStarts,
+    const int * dRowEnds,
+    int num_rows,
+    int stride0,
+    int stride1,
+    int * dOutIndices,
+    int topK) {
+    constexpr int kNumThreadsPerBlock = 512;
+    cudaStream_t stream = ctx.stream();
+    size_t smem_bytes = (size_t) topK * sizeof(int32_t);
+    ggml_cuda_vllm_topk::topKPerRowPrefill<kNumThreadsPerBlock, true><<<num_rows, kNumThreadsPerBlock, smem_bytes, stream>>>(
+        dLogits, dRowStarts, dRowEnds, dOutIndices, stride0, stride1, topK, 0);
+}
+
 extern "C" void ggml_cuda_topk_per_row_decode(
     ggml_backend_cuda_context & ctx,
     const float * dLogits,

@@ -59,6 +59,17 @@ extern "C" void ggml_cuda_topk_per_row(
     int * dOutIndices,
     int topK);
 
+extern "C" void ggml_cuda_topk_per_row_radix(
+    ggml_backend_cuda_context & ctx,
+    const float * dLogits,
+    const int * dRowStarts,
+    const int * dRowEnds,
+    int num_rows,
+    int stride0,
+    int stride1,
+    int * dOutIndices,
+    int topK);
+
 extern "C" void ggml_cuda_topk_per_row_decode(
     ggml_backend_cuda_context & ctx,
     const float * dLogits,
@@ -2644,7 +2655,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                                 }
                                 CUDA_CHECK(cudaMemcpyAsync(rowStarts.get(), hRowStarts.data(), sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
                                 CUDA_CHECK(cudaMemcpyAsync(rowEnds.get(),   hRowEnds.data(),   sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
-                                ggml_cuda_topk_per_row(ctx,
+                                ggml_cuda_topk_per_row_radix(ctx,
                                                        (const float *) scores->data,
                                                        rowStarts.get(),
                                                        rowEnds.get(),
@@ -2722,7 +2733,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                             }
                             CUDA_CHECK(cudaMemcpyAsync(rowStarts.get(), hRowStarts.data(), sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
                             CUDA_CHECK(cudaMemcpyAsync(rowEnds.get(),   hRowEnds.data(),   sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
-                            ggml_cuda_topk_per_row(ctx,
+                            ggml_cuda_topk_per_row_radix(ctx,
                                                    (const float *) scores->data,
                                                    rowStarts.get(),
                                                    rowEnds.get(),
