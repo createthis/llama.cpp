@@ -56,7 +56,8 @@ extern "C" void ggml_cuda_topk_per_row(
     int num_rows,
     int stride0,
     int stride1,
-    int * dOutIndices);
+    int * dOutIndices,
+    int topK);
 
 extern "C" void ggml_cuda_topk_per_row_decode(
     ggml_backend_cuda_context & ctx,
@@ -66,7 +67,8 @@ extern "C" void ggml_cuda_topk_per_row_decode(
     int num_rows,
     int stride0,
     int stride1,
-    int * dOutIndices);
+    int * dOutIndices,
+    int topK);
 
 #include "ggml-cuda/unary.cuh"
 #include "ggml-cuda/upscale.cuh"
@@ -2649,7 +2651,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                                                        T,
                                                        N,
                                                        1,
-                                                       tmpIdx.get());
+                                                       tmpIdx.get(),
+                                                       k);
                                 // copy first k indices per column from tmpIdx [KMAX,T] to dst [k,T]
                                 CUDA_CHECK(cudaMemcpy2DAsync((void *) dst->data, (size_t) k * sizeof(int),
                                                              (const void *) tmpIdx.get(), (size_t) KMAX * sizeof(int),
@@ -2726,7 +2729,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                                                    T,
                                                    N,
                                                    1,
-                                                   tmpIdx.get());
+                                                   tmpIdx.get(),
+                                                   k);
                             CUDA_CHECK(cudaMemcpy2DAsync((void *) dst->data, (size_t) k * sizeof(int),
                                                          (const void *) tmpIdx.get(), (size_t) KMAX * sizeof(int),
                                                          (size_t) k * sizeof(int), (size_t) T,
