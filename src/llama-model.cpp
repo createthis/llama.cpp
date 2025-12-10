@@ -13920,7 +13920,14 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                 int64_t n_kv_cache = (int64_t) Kcache->ne[2];
                                 ggml_tensor * Kindexer_full = mctx_cur2->get_k_indexer_full(ctx0, il);
                                 int64_t n_kv_indexer = Kindexer_full ? (int64_t) Kindexer_full->ne[1] : n_kv_cache;
-                                int64_t available_kv = std::min(used_kv, std::min(n_kv_cache, n_kv_indexer));
+
+                                const char *env_topk_vllm = getenv("LLAMA_SPARSE_TOPK_VLLM");
+                                bool use_topk_vllm = (env_topk_vllm && atoi(env_topk_vllm) != 0);
+
+                                int64_t available_kv = use_topk_vllm
+                                    ? std::min(n_kv_cache, n_kv_indexer)
+                                    : std::min(used_kv, std::min(n_kv_cache, n_kv_indexer));
+
                                 top_k = std::min<int64_t>(top_k, available_kv);
                             }
 
@@ -14030,7 +14037,14 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                 int64_t n_kv_cache = (int64_t) Kcache->ne[2];
                                 ggml_tensor * Kindexer_full = mctx_cur2->get_k_indexer_full(ctx0, il);
                                 int64_t n_kv_indexer = Kindexer_full ? (int64_t) Kindexer_full->ne[1] : n_kv_cache;
-                                int64_t available_kv = std::min(used_kv, std::min(n_kv_cache, n_kv_indexer));
+
+                                const char *env_topk_vllm = getenv("LLAMA_SPARSE_TOPK_VLLM");
+                                bool use_topk_vllm = (env_topk_vllm && atoi(env_topk_vllm) != 0);
+
+                                int64_t available_kv = use_topk_vllm
+                                    ? std::min(n_kv_cache, n_kv_indexer)
+                                    : std::min(used_kv, std::min(n_kv_cache, n_kv_indexer));
+
                                 top_k = std::min<int64_t>(top_k, available_kv);
                             }
                             ggml_tensor * kvaware_indices = llama::sparse_attn_indexer::build_kvaware_topk_indices(
