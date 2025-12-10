@@ -559,10 +559,23 @@ extern "C" void ggml_cuda_topk_per_row(
     int * dOutIndices,
     int topK) {
     constexpr int kNumThreadsPerBlock = 512;
+    constexpr int kSortingAlgorithmThreshold = 12288;
     cudaStream_t stream = ctx.stream();
     size_t smem_bytes = (size_t) topK * sizeof(int32_t);
-    ggml_cuda_vllm_topk::topKPerRowPrefill<kNumThreadsPerBlock, false><<<num_rows, kNumThreadsPerBlock, smem_bytes, stream>>>(
-        dLogits, dRowStarts, dRowEnds, dOutIndices, stride0, stride1, topK, 0);
+
+    // First up to kSortingAlgorithmThreshold rows: insertion-sort final stage
+    int numInsertionBlocks = num_rows < kSortingAlgorithmThreshold ? num_rows : kSortingAlgorithmThreshold;
+    if (numInsertionBlocks > 0) {
+        ggml_cuda_vllm_topk::topKPerRowPrefill<kNumThreadsPerBlock, false><<<numInsertionBlocks, kNumThreadsPerBlock, smem_bytes, stream>>>(
+            dLogits, dRowStarts, dRowEnds, dOutIndices, stride0, stride1, topK, 0);
+    }
+
+    // Remaining rows (if any): radix-sort final stage
+    if (num_rows > kSortingAlgorithmThreshold) {
+        int numRadixBlocks = num_rows - kSortingAlgorithmThreshold;
+        ggml_cuda_vllm_topk::topKPerRowPrefill<kNumThreadsPerBlock, true><<<numRadixBlocks, kNumThreadsPerBlock, smem_bytes, stream>>>(
+            dLogits, dRowStarts, dRowEnds, dOutIndices, stride0, stride1, topK, kSortingAlgorithmThreshold);
+    }
 }
 
 extern "C" void ggml_cuda_topk_per_row_radix(
@@ -593,8 +606,21 @@ extern "C" void ggml_cuda_topk_per_row_decode(
     int * dOutIndices,
     int topK) {
     constexpr int kNumThreadsPerBlock = 512;
+    constexpr int kSortingAlgorithmThreshold = 12288;
     cudaStream_t stream = ctx.stream();
     size_t smem_bytes = (size_t) topK * sizeof(int32_t);
-    ggml_cuda_vllm_topk::topKPerRowDecode<kNumThreadsPerBlock, false><<<num_rows, kNumThreadsPerBlock, smem_bytes, stream>>>(
-        dLogits, dSeqLens, dOutIndices, stride0, stride1, topK, next_n);
+
+    // Derive numColumns from stride0 when rows are contiguous (stride1 == 1).
+    // If layout is non-contiguous, fall back to insertion-sort variant.
+    int numColumns = (stride1 == 1) ? stride0 : 0;
+
+    if (numColumns > 0 && numColumns >= kSortingAlgorithmThreshold) {
+        // Large vocab/KV: enable radix-sort final stage
+        ggml_cuda_vllm_topk::topKPerRowDecode<kNumThreadsPerBlock, true><<<num_rows, kNumThreadsPerBlock, smem_bytes, stream>>>(
+            dLogits, dSeqLens, dOutIndices, stride0, stride1, topK, next_n);
+    } else {
+        // Small vocab/KV or unknown layout: use insertion-sort final stage
+        ggml_cuda_vllm_topk::topKPerRowDecode<kNumThreadsPerBlock, false><<<num_rows, kNumThreadsPerBlock, smem_bytes, stream>>>(
+            dLogits, dSeqLens, dOutIndices, stride0, stride1, topK, next_n);
+    }
 }
