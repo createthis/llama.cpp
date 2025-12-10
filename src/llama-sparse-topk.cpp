@@ -410,7 +410,14 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
     }
 
     const int64_t k = std::min<int64_t>(top_k, N_kv);
-    int64_t TILE_T = use_fp16 ? 512 : 256; // heuristic default; overridable via env
+    int64_t TILE_T;
+    const char *env_vllm = getenv("LLAMA_SPARSE_TOPK_VLLM");
+    if (env_vllm && atoi(env_vllm) != 0) {
+        // When using VLLM-backed top-k, default to a larger tile size tuned for that path.
+        TILE_T = 2048;
+    } else {
+        TILE_T = use_fp16 ? 512 : 256; // heuristic default
+    }
     if (const char *env = getenv("LLAMA_SPARSE_TOPK_TILE_T")) {
         long v = strtol(env, nullptr, 10);
         if (v > 0 && v <= 8192) TILE_T = v;
