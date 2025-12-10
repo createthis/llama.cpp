@@ -2980,6 +2980,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     CUDA_CHECK(cudaMemcpyAsync((void*)vtmp.get(), vc->data, sizeof(float)*(size_t)Dv*Hkv*Nkv, cudaMemcpyDeviceToDevice, ctx.stream()));
                 }
                 auto * __prof_env3 = getenv("LLAMA_SPARSE_PROF");
+                auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
                 cudaEvent_t __m0, __m1;
                 bool __do_prof3 = false;
                 float __ms3 = 0.0f;
@@ -3022,9 +3023,21 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     static double __sum_mla = 0.0;
                     __sum_mla += __ms3;
                     __cnt_mla++;
-                    if (__cnt_mla % 50 == 0) {
-                        fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE avg_ms=%.3f over 50 calls\n", (float)(__sum_mla/50.0));
-                        __sum_mla = 0.0;
+                    if (__prof_each_env && *__prof_each_env) {
+                        if (use_flashmla) {
+                            fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE_FLASHMLA ms=%.3f\n", (float)(__ms3));
+                        } else {
+                            fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE ms=%.3f\n", (float)(__ms3));
+                        }
+                    } else {
+                        if (__cnt_mla % 50 == 0) {
+                            if (use_flashmla) {
+                                fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE_FLASHMLA avg_ms=%.3f over 50 calls\n", (float)(__sum_mla/50.0));
+                            } else {
+                                fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE avg_ms=%.3f over 50 calls\n", (float)(__sum_mla/50.0));
+                            }
+                            __sum_mla = 0.0;
+                        }
                     }
                 }
             }
