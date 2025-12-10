@@ -2976,10 +2976,19 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 ggml_cuda_pool_alloc<float> vtmp(ctx.pool(ggml_cuda_get_device()), (size_t)Dv*Hkv*Nkv);
                 const to_fp32_cuda_t to_v = ggml_get_to_fp32_cuda(vc->type);
                 if (to_v) { to_v((const void *)vc->data, (float *)vtmp.get(), (size_t)Dv*Hkv*Nkv, ctx.stream()); }
-                else { CUDA_CHECK(cudaMemcpyAsync((void*)vtmp.get(), vc->data, sizeof(float)*(size_t)Dv*Hkv*Nkv, cudaMemcpyDeviceToDevice, ctx.stream())); }
+                else {
+                    CUDA_CHECK(cudaMemcpyAsync((void*)vtmp.get(), vc->data, sizeof(float)*(size_t)Dv*Hkv*Nkv, cudaMemcpyDeviceToDevice, ctx.stream()));
+                }
                 auto * __prof_env3 = getenv("LLAMA_SPARSE_PROF");
-                cudaEvent_t __m0, __m1; bool __do_prof3 = false; float __ms3 = 0.0f;
-                if (__prof_env3 && *__prof_env3) { cudaEventCreate(&__m0); cudaEventCreate(&__m1); __do_prof3 = true; cudaEventRecord(__m0, ctx.stream()); }
+                cudaEvent_t __m0, __m1;
+                bool __do_prof3 = false;
+                float __ms3 = 0.0f;
+                if (__prof_env3 && *__prof_env3) {
+                    cudaEventCreate(&__m0);
+                    cudaEventCreate(&__m1);
+                    __do_prof3 = true;
+                    cudaEventRecord(__m0, ctx.stream());
+                }
 
                 const char * flashmla_env = getenv("LLAMA_SPARSE_MLA_FLASHMLA");
                 bool use_flashmla = (flashmla_env && atoi(flashmla_env) != 0);
@@ -3003,7 +3012,21 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                         Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
                 }
                 CUDA_CHECK(cudaGetLastError());
-                if (__do_prof3) { cudaEventRecord(__m1, ctx.stream()); cudaEventSynchronize(__m1); cudaEventElapsedTime(&__ms3, __m0, __m1); cudaEventDestroy(__m0); cudaEventDestroy(__m1); static int __cnt_mla = 0; static double __sum_mla = 0.0; __sum_mla += __ms3; __cnt_mla++; if (__cnt_mla % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE avg_ms=%.3f over 50 calls\n", (float)(__sum_mla/50.0)); __sum_mla = 0.0; } }
+                if (__do_prof3) {
+                    cudaEventRecord(__m1, ctx.stream());
+                    cudaEventSynchronize(__m1);
+                    cudaEventElapsedTime(&__ms3, __m0, __m1);
+                    cudaEventDestroy(__m0);
+                    cudaEventDestroy(__m1);
+                    static int __cnt_mla = 0;
+                    static double __sum_mla = 0.0;
+                    __sum_mla += __ms3;
+                    __cnt_mla++;
+                    if (__cnt_mla % 50 == 0) {
+                        fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE avg_ms=%.3f over 50 calls\n", (float)(__sum_mla/50.0));
+                        __sum_mla = 0.0;
+                    }
+                }
             }
             break;
 
