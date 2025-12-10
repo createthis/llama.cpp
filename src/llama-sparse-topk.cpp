@@ -348,6 +348,14 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
     if (const char *env = getenv("LLAMA_SPARSE_TOPK_WINDOWS_DEVICE")) {
         prefer_device_windows = atoi(env) != 0;
     }
+    // When using VLLM top-k (LLAMA_SPARSE_TOPK_VLLM), favor host-backed window
+    // tensors so the CUDA backend can safely read tl_starts/tl_ends to build
+    // rowStarts/rowEnds for ggml_cuda_topk_per_row.
+    if (const char *env_vllm = getenv("LLAMA_SPARSE_TOPK_VLLM")) {
+        if (atoi(env_vllm) != 0) {
+            prefer_device_windows = false;
+        }
+    }
 
     ggml_tensor * win_starts = nullptr;
     (void)win_starts;

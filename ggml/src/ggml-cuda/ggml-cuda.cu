@@ -2609,9 +2609,10 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 } else {
                     GGML_ASSERT(scores->type == GGML_TYPE_F32);
                     const char * use_vllm = getenv("LLAMA_SPARSE_TOPK_VLLM");
-                    // Allow VLLM top-k even when per-row windows (tl_starts/tl_ends) are provided;
-                    // we will pass these windows through to the kernel via rowStarts/rowEnds.
-                    bool use_vllm_topk = (use_vllm && atoi(use_vllm) != 0 && T == 1 && k == 2048);
+                    const int KMAX = 2048;
+                    // Allow VLLM top-k for any T when k <= KMAX. Per-column windows (tl_starts/tl_ends)
+                    // are mapped into rowStarts/rowEnds on the host.
+                    bool use_vllm_topk = (use_vllm && atoi(use_vllm) != 0 && k <= KMAX);
                     if (__do_prof) {
                         cudaEvent_t __e0, __e1;
                         cudaEventCreate(&__e0);
@@ -2692,9 +2693,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                         cudaEventDestroy(__e1);
                     } else {
                         const char * use_vllm2 = getenv("LLAMA_SPARSE_TOPK_VLLM");
-                        // Allow VLLM top-k even when per-row windows are provided;
-                        // windows are passed via rowStarts/rowEnds.
-                        bool use_vllm_topk2 = (use_vllm2 && atoi(use_vllm2) != 0 && T == 1 && k == 2048);
+                        const int KMAX = 2048;
+                        // Allow VLLM top-k for any T when k <= KMAX. Windows are passed via rowStarts/rowEnds.
+                        bool use_vllm_topk2 = (use_vllm2 && atoi(use_vllm2) != 0 && k <= KMAX);
                         if (use_vllm_topk2) {
                             ggml_cuda_pool & pool = ctx.pool(ggml_cuda_get_device());
                             const int KMAX = 2048;
