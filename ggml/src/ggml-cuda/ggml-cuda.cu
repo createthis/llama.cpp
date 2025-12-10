@@ -2591,9 +2591,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                         }
                         static int __cnt = 0; static double __sum = 0.0; __sum += __ms; __cnt++;
                         if (__prof_each_env && *__prof_each_env) {
-                            fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
+                            fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX1 N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
                         } else {
-                            if (__cnt % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0)); __sum = 0.0; }
+                            if (__cnt % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX1 N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0)); __sum = 0.0; }
                         }
                     } else {
                         {
@@ -2609,7 +2609,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 } else {
                     GGML_ASSERT(scores->type == GGML_TYPE_F32);
                     const char * use_vllm = getenv("LLAMA_SPARSE_TOPK_VLLM");
-                    bool use_vllm_topk = (use_vllm && atoi(use_vllm) != 0 && T == 1 && k == 2048 && !tl_starts && !tl_ends);
+                    // Allow VLLM top-k even when per-row windows (tl_starts/tl_ends) are provided;
+                    // we will pass these windows through to the kernel via rowStarts/rowEnds.
+                    bool use_vllm_topk = (use_vllm && atoi(use_vllm) != 0 && T == 1 && k == 2048);
                     if (__do_prof) {
                         cudaEvent_t __e0, __e1;
                         cudaEventCreate(&__e0);
@@ -2622,10 +2624,23 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                                 ggml_cuda_pool_alloc<int> rowStarts(pool, (size_t)T);
                                 ggml_cuda_pool_alloc<int> rowEnds  (pool, (size_t)T);
                                 ggml_cuda_pool_alloc<int> tmpIdx   (pool, (size_t)KMAX * (size_t)T);
-                                int hStarts = 0;
-                                int hEnds   = N;
-                                CUDA_CHECK(cudaMemcpyAsync(rowStarts.get(), &hStarts, sizeof(int), cudaMemcpyHostToDevice, ctx.stream()));
-                                CUDA_CHECK(cudaMemcpyAsync(rowEnds.get(),   &hEnds,   sizeof(int), cudaMemcpyHostToDevice, ctx.stream()));
+                                // Map tl_starts/tl_ends per column into rowStarts/rowEnds; fall back to [0,N) when absent.
+                                std::vector<int> hRowStarts(T), hRowEnds(T);
+                                if (tl_starts || tl_ends) {
+                                    for (int t = 0; t < T; ++t) {
+                                        int s0 = tl_starts ? tl_starts[t] : 0;
+                                        int e0 = tl_ends   ? tl_ends[t]   : N;
+                                        if (s0 < 0) s0 = 0; if (s0 > N) s0 = N;
+                                        if (e0 < 0) e0 = 0; if (e0 > N) e0 = N;
+                                        if (e0 < s0) e0 = s0;
+                                        hRowStarts[t] = s0;
+                                        hRowEnds[t]   = e0;
+                                    }
+                                } else {
+                                    for (int t = 0; t < T; ++t) { hRowStarts[t] = 0; hRowEnds[t] = N; }
+                                }
+                                CUDA_CHECK(cudaMemcpyAsync(rowStarts.get(), hRowStarts.data(), sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
+                                CUDA_CHECK(cudaMemcpyAsync(rowEnds.get(),   hRowEnds.data(),   sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
                                 ggml_cuda_topk_per_row(ctx,
                                                        (const float *) scores->data,
                                                        rowStarts.get(),
@@ -2659,28 +2674,50 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                         __cnt++;
                         if (__prof_each_env && *__prof_each_env) {
                             if (use_vllm_topk) {
-                                fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX_VLLM N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
+                                fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX2_VLLM N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
                             } else {
-                                fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
+                                fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX2 N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
                             }
                         } else {
-                            if (__cnt % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0)); __sum = 0.0; }
+                            if (__cnt % 50 == 0) {
+                                if (use_vllm_topk) {
+                                    fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX2_VLLM N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0));
+                                } else {
+                                    fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX2 N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0));
+                                }
+                                __sum = 0.0;
+                            }
                         }
                         cudaEventDestroy(__e0);
                         cudaEventDestroy(__e1);
                     } else {
                         const char * use_vllm2 = getenv("LLAMA_SPARSE_TOPK_VLLM");
-                        bool use_vllm_topk2 = (use_vllm2 && atoi(use_vllm2) != 0 && T == 1 && k == 2048 && !tl_starts && !tl_ends);
+                        // Allow VLLM top-k even when per-row windows are provided;
+                        // windows are passed via rowStarts/rowEnds.
+                        bool use_vllm_topk2 = (use_vllm2 && atoi(use_vllm2) != 0 && T == 1 && k == 2048);
                         if (use_vllm_topk2) {
                             ggml_cuda_pool & pool = ctx.pool(ggml_cuda_get_device());
                             const int KMAX = 2048;
                             ggml_cuda_pool_alloc<int> rowStarts(pool, (size_t)T);
                             ggml_cuda_pool_alloc<int> rowEnds  (pool, (size_t)T);
                             ggml_cuda_pool_alloc<int> tmpIdx   (pool, (size_t)KMAX * (size_t)T);
-                            int hStarts = 0;
-                            int hEnds   = N;
-                            CUDA_CHECK(cudaMemcpyAsync(rowStarts.get(), &hStarts, sizeof(int), cudaMemcpyHostToDevice, ctx.stream()));
-                            CUDA_CHECK(cudaMemcpyAsync(rowEnds.get(),   &hEnds,   sizeof(int), cudaMemcpyHostToDevice, ctx.stream()));
+                            // Map tl_starts/tl_ends into rowStarts/rowEnds; default to [0,N) when absent.
+                            std::vector<int> hRowStarts(T), hRowEnds(T);
+                            if (tl_starts || tl_ends) {
+                                for (int t = 0; t < T; ++t) {
+                                    int s0 = tl_starts ? tl_starts[t] : 0;
+                                    int e0 = tl_ends   ? tl_ends[t]   : N;
+                                    if (s0 < 0) s0 = 0; if (s0 > N) s0 = N;
+                                    if (e0 < 0) e0 = 0; if (e0 > N) e0 = N;
+                                    if (e0 < s0) e0 = s0;
+                                    hRowStarts[t] = s0;
+                                    hRowEnds[t]   = e0;
+                                }
+                            } else {
+                                for (int t = 0; t < T; ++t) { hRowStarts[t] = 0; hRowEnds[t] = N; }
+                            }
+                            CUDA_CHECK(cudaMemcpyAsync(rowStarts.get(), hRowStarts.data(), sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
+                            CUDA_CHECK(cudaMemcpyAsync(rowEnds.get(),   hRowEnds.data(),   sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
                             ggml_cuda_topk_per_row(ctx,
                                                    (const float *) scores->data,
                                                    rowStarts.get(),
