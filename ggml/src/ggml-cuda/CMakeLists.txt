@@ -82,7 +82,6 @@ if (CUDAToolkit_FOUND)
     # FlashMLA sparse FP8 MLA decode (SM100/SM120) as an OBJECT library (experimental)
     add_library(flashmla_sparse_kernels OBJECT
         ${CMAKE_CURRENT_SOURCE_DIR}/vendors/flashmla/smxx/get_mla_metadata.cu
-        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/flashmla/sm100/decode/sparse_fp8/splitkv_mla.cu
     )
     # Compile these kernels for SM120A (Blackwell / TCGen05), same as DeepGEMM and lightning kernels.
     set_property(TARGET flashmla_sparse_kernels PROPERTY CUDA_ARCHITECTURES "120a")
@@ -100,7 +99,7 @@ if (CUDAToolkit_FOUND)
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --expt-extended-lambda --use_fast_math>)
     target_sources(ggml-cuda PRIVATE $<TARGET_OBJECTS:flashmla_sparse_kernels>)
 
-# DeepGEMM FP8 paged MQA logits (SM100-style) as a separate OBJECT library
+    # DeepGEMM FP8 paged MQA logits (SM100-style) as a separate OBJECT library
     add_library(deepgemm_kernels OBJECT
         ${CMAKE_CURRENT_SOURCE_DIR}/ggml-cuda-deepgemm.cu
     )

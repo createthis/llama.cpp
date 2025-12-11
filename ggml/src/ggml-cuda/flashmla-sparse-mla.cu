@@ -1,10 +1,11 @@
 #include "common.cuh"
 #include "../../include/ggml-cuda-indexer.h"
 
-#include "vendors/flashmla/params.h"
-#include "vendors/flashmla/smxx/get_mla_metadata.h"
-#include "vendors/flashmla/smxx/mla_combine.h"
-#include "vendors/flashmla/sm100/decode/sparse_fp8/splitkv_mla.h"
+// FlashMLA sparse MLA metadata helper is currently SM100-only. For now we
+// exclude it from the SM120 build and always fall back to the GGML sparse MLA
+// decode kernel. Once we have an SM120-compatible implementation we can
+// re-enable this include and wire it appropriately.
+// #include "vendors/flashmla/smxx/get_mla_metadata.h"
 
 extern "C" void ggml_cuda_sparse_mla_decode_device(
     ggml_backend_cuda_context & ctx,
