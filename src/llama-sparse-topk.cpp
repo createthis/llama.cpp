@@ -692,33 +692,12 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
         // Compute top-k indices via CUDA radix selection
         const int64_t k_tile = std::min<int64_t>(k, scores_clamped->ne[0]);
         ggml_tensor * topk_tc = nullptr;
-        if (have_windows && win_ends) {
-            // slice starts/ends for this tile [t0, t0+Tc)
-            ggml_tensor * starts_tile = nullptr;
-            ggml_tensor * ends_tile   = nullptr;
-            if (win_starts) {
-                size_t off_s = (size_t)t0 * win_starts->nb[0];
-                starts_tile = ggml_view_1d(ctx, win_starts, Tc, off_s);
-                starts_tile = ggml_cont(ctx, starts_tile);
-            }
-            if (win_ends) {
-                size_t off_e = (size_t)t0 * win_ends->nb[0];
-                ends_tile   = ggml_view_1d(ctx, win_ends,   Tc, off_e);
-                ends_tile   = ggml_cont(ctx, ends_tile);
-            }
-            if (dbg) {
-                printf("[TOPK] using start and end\n");
-                fflush(stdout);
-            }
-            topk_tc = ggml_sparse_topk_radix_ex(ctx, scores_clamped, (int)k_tile, starts_tile, ends_tile);
-        } else {
-            if (dbg) {
-                printf("[TOPK] not using start and end, have_windows=%s win_ends=%s\n", 
-                        have_windows ? "true" : "false", win_ends ? "true" : "false");
-                fflush(stdout);
-            }
-            topk_tc = ggml_sparse_topk_radix(ctx, scores_clamped, (int)k_tile);
-        }
+#if defined(__APPLE__)
+        // Force CPU fallback for top-k since Metal backend is missing SPARSE_TOPK_RADIX
+        topk_tc = sparse_attn_topk::topk_radix_indices(ctx, scores_clamped, (int)k_tile);
+#else
+        topk_tc = ggml_sparse_topk_radix(ctx, scores_clamped, (int)k_tile);
+#endif
         if (dbg && t0 == 0) {
             cb(topk_tc, "idxkv_topk_radix", -1);
             int64_t kk = std::min<int64_t>(k_tile, (int64_t)16);
