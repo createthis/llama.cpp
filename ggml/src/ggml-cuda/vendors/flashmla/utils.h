@@ -51,7 +51,7 @@ do { \
 #else
 
 // We define the following macros to detect the CUDA architecture, so that we can enable/disable certains kernels that depends on specific architectures.
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 1000)
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 #define IS_SM100 1
 #else
 #define IS_SM100 0

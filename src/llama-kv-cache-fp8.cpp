@@ -261,6 +261,13 @@ uint32_t llama_kv_cache_fp8::get_n_kv(const llama_kv_cache::slot_info & sinfo) c
     return result;
 }
 
+
+
+ggml_tensor * llama_kv_cache_fp8::get_k_blob(int32_t il) const {
+    const kv_layer_fp8 * lyr = get_layer(il);
+    return lyr ? lyr->k_blob : nullptr;
+}
+
 // Helpers to quantize/dequantize rows using ggml FP8 helpers
 
 extern "C" {
@@ -662,7 +669,14 @@ size_t llama_kv_cache_fp8::size_k_bytes() const {
     return size_k_bytes;
 }
 
-size_t llama_kv_cache_fp8::size_v_bytes() const {
+size_t llama_kv_cache_fp8::
+
+ggml_tensor * llama_kv_cache_fp8::get_k_blob(int32_t il) const {
+    const kv_layer_fp8 * lyr = get_layer(il);
+    return lyr ? lyr->k_blob : nullptr;
+}
+
+size_v_bytes() const {
     size_t size_v_bytes = 0;
     for (const auto & layer : layers) {
         if (layer.v_fp8 != nullptr) {

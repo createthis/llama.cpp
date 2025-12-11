@@ -98,6 +98,7 @@ extern "C" void ggml_cuda_sparse_mla_decode_device(ggml_backend_cuda_context & c
 extern "C" void ggml_cuda_sparse_mla_decode_flashmla_sm100(
     ggml_backend_cuda_context & ctx,
     const float * q, const float * k, const float * v, const int32_t * topk,
+    const unsigned char * kv_blob,
     int D, int Hq, int Hkv, int Dv, int Nkv, int K, float kq_scale, float softcap, float * out);
 
 #include <algorithm>
@@ -3143,13 +3144,18 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 bool use_flashmla = (flashmla_env && atoi(flashmla_env) != 0);
                 // First experimental wiring: only for single-token decode on DeepSeek V3.2 shapes.
                 bool can_use_flashmla = use_flashmla && (Hkv == 1) && (idx->ne[1] == 1) && (q2d->ne[2] == 1) && (q2d->ne[3] == 1);
-                if (can_use_flashmla) {
+                const unsigned char * kv_blob = nullptr;
+                if (dst->src[4] && dst->src[4]->type == GGML_TYPE_I8) {
+                    kv_blob = (const unsigned char *) dst->src[4]->data;
+                }
+                if (can_use_flashmla && kv_blob) {
                     ggml_cuda_sparse_mla_decode_flashmla_sm100(
                         ctx,
                         (const float*)qtmp.get(),
                         (const float*)ktmp.get(),
                         (const float*)vtmp.get(),
                         (const int32_t*)idx->data,
+                        kv_blob,
                         Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
                 } else {
                     ggml_cuda_sparse_mla_decode_device(

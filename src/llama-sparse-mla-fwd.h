@@ -26,6 +26,7 @@ struct sparse_mla_fwd {
         float kq_scale,
         ggml_tensor * kq_mask,
         float attn_softcap,
+        ggml_tensor * kv_dsmla_blob,
         const function<void(ggml_tensor *, const char *, int)> & cb);
 };
 

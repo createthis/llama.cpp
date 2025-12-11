@@ -66,6 +66,7 @@ public:
 
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const llama_kv_cache::slot_info & sinfo) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const llama_kv_cache::slot_info & sinfo) const;
+    ggml_tensor * get_k_blob(int32_t il) const;
 
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const llama_kv_cache::slot_info & sinfo) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const llama_kv_cache::slot_info & sinfo) const;

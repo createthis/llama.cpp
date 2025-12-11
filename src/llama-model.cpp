@@ -13946,6 +13946,11 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             }
                             ggml_tensor * KQmask2 = inp_attn->get_kq_mask_full_2d();
 
+                            ggml_tensor * kv_blob = nullptr;
+                            if (model.kv_fp8_ds32) {
+                                kv_blob = model.kv_fp8_ds32->get_k_blob(il);
+                            }
+
                             const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
                             top_k = env_topk ? std::max<int64_t>(1, atoll(env_topk)) : 2048;
                             ggml_build_forward_expand(gf, KQmask2);
@@ -13972,7 +13977,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                 /*k_indexer_fp8_sidecar=*/nullptr,
                                 /*quant_bs=*/0, /*cache_block_size=*/0, /*cache_stride=*/0);
                             cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
-                                ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, cb_wrapper);
+                                ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, kv_blob, cb_wrapper);
                             // Sanity checks for MLA sparse attention output vs expected V-dim (kv_lora_rank)
                             if (cur->ne[0] != (int64_t) kv_lora_rank) {
                                 printf("[SPARSE-DBG-MLA] L%d: sparse attn out Dv=%" PRId64 " but kv_lora_rank=%u (mismatch)\n", il, cur->ne[0], kv_lora_rank);
@@ -14121,7 +14126,7 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                 /*k_indexer_fp8_sidecar=*/nullptr,
                                 /*quant_bs=*/0, /*cache_block_size=*/0, /*cache_stride=*/0);
                             cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
-                                ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, cb_wrapper);
+                                ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, kv_blob, cb_wrapper);
                             // Sanity checks for MHA sparse attention output vs expected V-dim (n_embd_head_v)
                             if (cur->ne[0] != (int64_t) n_embd_head_v) {
                                 printf("[SPARSE-DBG-MHA] L%d: sparse attn out Dv=%" PRId64 " but n_embd_head_v=%" PRId64 " (mismatch)\n", il, (int64_t) cur->ne[0], (int64_t) n_embd_head_v);

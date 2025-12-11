@@ -50,7 +50,7 @@ int main() {
     ggml_tensor * out = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
         ctx, q_cur, k_cache, v_cache, topk_idx,
         /*n_tokens=*/T, /*top_k=*/top_k, /*kq_scale=*/1.0f,
-        /*kq_mask=*/nullptr, /*attn_softcap=*/0.0f, cb);
+        /*kq_mask=*/nullptr, /*attn_softcap=*/0.0f, /*kv_dsmla_blob=*/nullptr, cb);
 
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, out);
