@@ -14071,6 +14071,11 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                         // Use sparse attention with top-k tokens (KV-aware)
                         {
                             const auto * mctx_cur2 = inp_attn->mctx;
+                            ggml_tensor * kv_blob = nullptr;
+                            if (model.kv_fp8_ds32) {
+                                kv_blob = model.kv_fp8_ds32->get_k_blob(il);
+                            }
+
                             // Use full-width KV cache for sparse MLA to match indexer indices
                             ggml_tensor * Vcache = mctx_cur2->get_v_full(ctx0, il);
                             ggml_tensor * Kcache = nullptr;

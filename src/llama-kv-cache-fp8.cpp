@@ -268,6 +268,19 @@ ggml_tensor * llama_kv_cache_fp8::get_k_blob(int32_t il) const {
     return lyr ? lyr->k_blob : nullptr;
 }
 
+size_t llama_kv_cache_fp8::size_v_bytes() const {
+    size_t size_v_bytes = 0;
+    for (const auto & layer : layers) {
+        if (layer.v_fp8 != nullptr) {
+            size_v_bytes += ggml_nbytes(layer.v_fp8);
+        }
+        if (layer.v_scale != nullptr) {
+            size_v_bytes += ggml_nbytes(layer.v_scale);
+        }
+    }
+    return size_v_bytes;
+}
+
 // Helpers to quantize/dequantize rows using ggml FP8 helpers
 
 extern "C" {
@@ -667,26 +680,6 @@ size_t llama_kv_cache_fp8::size_k_bytes() const {
         }
     }
     return size_k_bytes;
-}
-
-size_t llama_kv_cache_fp8::
-
-ggml_tensor * llama_kv_cache_fp8::get_k_blob(int32_t il) const {
-    const kv_layer_fp8 * lyr = get_layer(il);
-    return lyr ? lyr->k_blob : nullptr;
-}
-
-size_v_bytes() const {
-    size_t size_v_bytes = 0;
-    for (const auto & layer : layers) {
-        if (layer.v_fp8 != nullptr) {
-            size_v_bytes += ggml_nbytes(layer.v_fp8);
-        }
-        if (layer.v_scale != nullptr) {
-            size_v_bytes += ggml_nbytes(layer.v_scale);
-        }
-    }
-    return size_v_bytes;
 }
 
 bool llama_kv_cache_fp8::is_masked_swa(llama_pos p0, llama_pos p1) const {
