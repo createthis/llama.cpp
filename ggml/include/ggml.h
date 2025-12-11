@@ -567,6 +567,7 @@ extern "C" {
         GGML_OP_INDEXER_FUSED,
         GGML_OP_SPARSE_MLA_DECODE,
         GGML_OP_GLU,
+        GGML_OP_KV_DSMLA_PACK,
 
         GGML_OP_COUNT,
     };
@@ -762,6 +763,12 @@ extern "C" {
 
 
     // Variant that accepts optional per-column windows [start,end)
+
+    GGML_API struct ggml_tensor * ggml_kv_dsmla_pack(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * k_latent_rope,
+            struct ggml_tensor  * k_idxs,
+            struct ggml_tensor  * k_blob);
     GGML_API struct ggml_tensor * ggml_sparse_topk_radix_ex(
             struct ggml_context * ctx,
             struct ggml_tensor  * scores,

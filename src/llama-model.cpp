@@ -7,6 +7,7 @@
 #include "llama-model-loader.h"
 
 #include "llama-kv-cache.h"
+#include "llama-kv-cache-fp8.h"
 #include "llama-kv-cache-iswa.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
@@ -13902,14 +13903,47 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, Kcur, inp_attn->get_k_idxs(), il));
                             ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
                             ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
+
+                            // Optional: DeepSeek V3.2 FP8 K-side KV cache pack (custom op)
+                            if (model.kv_fp8_ds32) {
+                                ggml_tensor * k_fp8_in = ggml_concat(ctx0, kv_cmpr, k_pe, 0); // [D_total,1,n_tokens]
+                                ggml_tensor * k_idxs   = inp_attn->get_k_idxs();
+                                ggml_tensor * pack_node = model.kv_fp8_ds32->build_k_pack_node(ctx0, k_fp8_in, k_idxs, il);
+                                ggml_build_forward_expand(gf, pack_node);
+                            }
                         }
 
                         // Use sparse attention with top-k tokens (KV-aware)
                         {
                             const auto * mctx_cur2 = inp_attn->mctx;
                             // Use full-width KV cache for sparse MLA to match indexer indices
-                            ggml_tensor * Kcache = mctx_cur2->get_k_full(ctx0, il);
                             ggml_tensor * Vcache = mctx_cur2->get_v_full(ctx0, il);
+                            ggml_tensor * Kcache = nullptr;
+                            if (model.kv_fp8_ds32) {
+                                llama_kv_cache::slot_info sinfo_fp8;
+                                sinfo_fp8.s0 = 0;
+                                sinfo_fp8.s1 = 0;
+                                sinfo_fp8.strm = { 0 };
+                                sinfo_fp8.idxs = { std::vector<uint32_t>(model.kv_fp8_ds32->get_size()) };
+                                for (uint32_t i = 0; i < model.kv_fp8_ds32->get_size(); ++i) {
+                                    sinfo_fp8.idxs[0][i] = i;
+                                }
+                                uint32_t n_kv_fp8 = model.kv_fp8_ds32->get_size();
+                                ggml_tensor * K_fp8_full = model.kv_fp8_ds32->get_k(ctx0, il, n_kv_fp8, sinfo_fp8);
+                                if (K_fp8_full && K_fp8_full->ne[3] == 1) {
+                                    Kcache = ggml_view_3d(
+                                        ctx0, K_fp8_full,
+                                        K_fp8_full->ne[0],
+                                        1,
+                                        K_fp8_full->ne[2],
+                                        K_fp8_full->nb[0],
+                                        K_fp8_full->nb[2],
+                                        0);
+                                }
+                            }
+                            if (!Kcache) {
+                                Kcache = mctx_cur2->get_k_full(ctx0, il);
+                            }
                             ggml_tensor * KQmask2 = inp_attn->get_kq_mask_full_2d();
 
                             const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
@@ -14010,14 +14044,47 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                             ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, Kcur, inp_attn->get_k_idxs(), il));
                             ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
                             ggml_build_forward_expand(gf, inp_attn->get_kq_mask());
+
+                            // Optional: DeepSeek V3.2 FP8 K-side KV cache pack (custom op)
+                            if (model.kv_fp8_ds32) {
+                                ggml_tensor * k_fp8_in = ggml_concat(ctx0, kv_cmpr, k_pe, 0); // [D_total,1,n_tokens]
+                                ggml_tensor * k_idxs   = inp_attn->get_k_idxs();
+                                ggml_tensor * pack_node = model.kv_fp8_ds32->build_k_pack_node(ctx0, k_fp8_in, k_idxs, il);
+                                ggml_build_forward_expand(gf, pack_node);
+                            }
                         }
 
                         // Use sparse attention with top-k tokens (KV-aware)
                         {
                             const auto * mctx_cur2 = inp_attn->mctx;
                             // Use full-width KV cache for sparse MLA to match indexer indices
-                            ggml_tensor * Kcache = mctx_cur2->get_k_full(ctx0, il);
                             ggml_tensor * Vcache = mctx_cur2->get_v_full(ctx0, il);
+                            ggml_tensor * Kcache = nullptr;
+                            if (model.kv_fp8_ds32) {
+                                llama_kv_cache::slot_info sinfo_fp8;
+                                sinfo_fp8.s0 = 0;
+                                sinfo_fp8.s1 = 0;
+                                sinfo_fp8.strm = { 0 };
+                                sinfo_fp8.idxs = { std::vector<uint32_t>(model.kv_fp8_ds32->get_size()) };
+                                for (uint32_t i = 0; i < model.kv_fp8_ds32->get_size(); ++i) {
+                                    sinfo_fp8.idxs[0][i] = i;
+                                }
+                                uint32_t n_kv_fp8 = model.kv_fp8_ds32->get_size();
+                                ggml_tensor * K_fp8_full = model.kv_fp8_ds32->get_k(ctx0, il, n_kv_fp8, sinfo_fp8);
+                                if (K_fp8_full && K_fp8_full->ne[3] == 1) {
+                                    Kcache = ggml_view_3d(
+                                        ctx0, K_fp8_full,
+                                        K_fp8_full->ne[0],
+                                        1,
+                                        K_fp8_full->ne[2],
+                                        K_fp8_full->nb[0],
+                                        K_fp8_full->nb[2],
+                                        0);
+                                }
+                            }
+                            if (!Kcache) {
+                                Kcache = mctx_cur2->get_k_full(ctx0, il);
+                            }
                             ggml_tensor * KQmask2 = inp_attn->get_kq_mask_full_2d();
 
                             const char *env_topk = getenv("LLAMA_SPARSE_TOPK");
@@ -19645,6 +19712,9 @@ struct llm_build_grovemoe : public llm_graph_context {
 };
 
 llama_memory_i * llama_model::create_memory(const llama_memory_params & params, llama_cparams & cparams) const {
+    const char * LLAMA_DEEPSEEK32_FP8_K = getenv("LLAMA_DEEPSEEK32_FP8_K");
+    const bool use_fp8_k_ds32 = (arch == LLM_ARCH_DEEPSEEK3_2 && LLAMA_DEEPSEEK32_FP8_K && atoi(LLAMA_DEEPSEEK32_FP8_K) != 0);
+
     llama_memory_i * res;
 
     switch (arch) {
@@ -19779,7 +19849,28 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 hparams.n_swa,
                                 hparams.swa_type,
                                 nullptr,
-                                nullptr);
+                                reuse);
+
+                        if (use_fp8_k_ds32) {
+                            LLAMA_LOG_INFO("%s: enabling DeepSeek V3.2 FP8 K cache (experimental)\n", __func__);
+                            const uint32_t kv_fp8_size = n_ctx_per_stream;
+                            const uint32_t kv_fp8_n_seq_max = cparams.n_seq_max;
+                            const uint32_t kv_fp8_n_pad = padding;
+                            const_cast<llama_model *>(this)->kv_fp8_ds32 = std::make_unique<llama_kv_cache_fp8>(
+                                *this,
+                                GGML_TYPE_F16,
+                                GGML_TYPE_F16,
+                                !cparams.flash_attn,
+                                cparams.offload_kqv,
+                                cparams.kv_unified,
+                                kv_fp8_size,
+                                kv_fp8_n_seq_max,
+                                kv_fp8_n_pad,
+                                hparams.n_swa,
+                                hparams.swa_type,
+                                nullptr,
+                                reuse);
+                        }
                     }
                 }
             }
