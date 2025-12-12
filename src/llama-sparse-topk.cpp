@@ -527,7 +527,8 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                     scores_tc = build_indexer_fused_logits(ctx, q_tile2d, k_slice, w_slice, ks_head);
                 }
 
-                if (dbg && t0 == 0) {
+                // Disabled in production builds: CPU reference indexer scores cause segfault when tensors lack host data
+                if (false && dbg && t0 == 0) {
                     ggml_tensor * ref_scores = llama::sparse_attn_indexer::idx_compute_scores_tile(ctx, q3d, k_indexer_f16, weights, k_scale_2d, D, H, Tc, kv_end, t0);
                     ggml_tensor * ref_head = ggml_view_2d(ctx, ref_scores, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), ref_scores->nb[1], 0);
                     cb(ref_head, "idxkv_scores_ref_head", -1);
