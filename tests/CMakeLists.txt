@@ -273,6 +273,12 @@ endif()
 llama_build_and_test(test-sparse-mla-decode-cuda.cpp)
 llama_build_and_test(test-sparse-mla-fused-glue.cpp)
 
+# DeepSeek V3.2 indexer DSA equation vs naive CPU reference
+llama_build_and_test(test-indexer-dsa-cpu.cpp)
+
+# Multi-token sparse MLA glue math test (non-fused path, CPU)
+llama_build_and_test(test-sparse-mla-glue-ds32.cpp)
+
 
 if (GGML_CUDA)
     llama_build_and_test(test-indexer-triplet-vs-fused.cpp)
