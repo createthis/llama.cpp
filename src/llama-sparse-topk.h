@@ -9,6 +9,23 @@ namespace llama {
 
 using std::function;
 
+using indexer_fused_hook_t = ggml_tensor * (*)(
+    ggml_context * ctx,
+    ggml_tensor * q_tile2d,
+    ggml_tensor * k_slice,
+    ggml_tensor * w_slice,
+    ggml_tensor * k_scale_head,
+    ggml_tensor * k_indexer_fp8_sidecar,
+    int64_t       t0,
+    int64_t       Tc,
+    int64_t       kv_start,
+    int64_t       kv_end,
+    int32_t       quant_bs,
+    int32_t       cache_block_size,
+    int32_t       cache_stride);
+
+void set_indexer_fused_hook(indexer_fused_hook_t hook);
+
 // Top-k selector implementation for DeepSeek V3.2
 struct sparse_attn_topk {
     // Lightning Indexer KV-aware selection

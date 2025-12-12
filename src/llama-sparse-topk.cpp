@@ -194,6 +194,12 @@ static void radix_topk_custom(ggml_tensor * dst, int ith, int nth, void * userda
 
 namespace llama {
 
+static indexer_fused_hook_t g_indexer_fused_hook = nullptr;
+
+void set_indexer_fused_hook(indexer_fused_hook_t hook) {
+    g_indexer_fused_hook = hook;
+}
+
 static inline int find_last_unmasked(const float * col, int N, size_t nb0) {
     // col is [N] as a column with row stride nb0; return last index+1 where value > -1e29
     for (int i = N-1; i >= 0; --i) {
@@ -525,6 +531,25 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                                                                quant_bs, cache_block_size, cache_stride);
                 } else {
                     scores_tc = build_indexer_fused_logits(ctx, q_tile2d, k_slice, w_slice, ks_head);
+                }
+
+                // Optional fused-glue hook for debugging/testing the fused indexer inputs
+                if (g_indexer_fused_hook) {
+                    ggml_tensor * hooked = g_indexer_fused_hook(
+                        ctx,
+                        q_tile2d,
+                        k_slice,
+                        w_slice,
+                        ks_head,
+                        k_indexer_fp8_sidecar,
+                        t0,
+                        Tc,
+                        /*kv_start=*/0,
+                        kv_end,
+                        quant_bs,
+                        cache_block_size,
+                        cache_stride);
+                    (void) hooked;
                 }
 
                 // Disabled in production builds: CPU reference indexer scores cause segfault when tensors lack host data
