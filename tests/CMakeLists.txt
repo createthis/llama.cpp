@@ -265,6 +265,7 @@ if (GGML_CUDA)
 endif()
 
 llama_build_and_test(test-sparse-mla-decode-cuda.cpp)
+llama_build_and_test(test-sparse-mla-fused-glue.cpp)
 
 
 if (GGML_CUDA)

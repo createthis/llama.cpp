@@ -11,6 +11,20 @@ namespace llama {
 
 using std::function;
 
+using sparse_mla_fused_hook_t = ggml_tensor * (*) (
+    ggml_context * ctx,
+    ggml_tensor * out2d,
+    ggml_tensor * q2d,
+    ggml_tensor * k_cache,
+    ggml_tensor * v_cache,
+    ggml_tensor * v_gather_src,
+    ggml_tensor * idx1d,
+    float kq_scale,
+    float softcap,
+    ggml_tensor * kv_dsmla_blob);
+
+void set_sparse_mla_fused_hook(sparse_mla_fused_hook_t hook);
+
 // Sparse Multi-Query Attention Forward implementation for DeepSeek V3.2
 // Corresponds to tilelang's sparse_mla_fwd.py
 struct sparse_mla_fwd {
