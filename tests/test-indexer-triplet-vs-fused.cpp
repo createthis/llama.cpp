@@ -118,14 +118,58 @@ int main() {
     const int64_t D_index = q_indexer->ne[0];
     const int64_t H_index = q_indexer->ne[1];
     const int64_t T       = q_indexer->ne[2];
-    const int64_t N_kv    = k_indexer->ne[1];
+    int64_t       N_kv    = k_indexer->ne[1];
+
+    // Optionally expand K indexer cache in this test to a larger N_kv
+    // for better coverage, by appending synthetic KV columns.
+    const int64_t N_kv_target = 512;
+    if (N_kv < N_kv_target) {
+        ggml_tensor * k_big = ggml_new_tensor_2d(cpu_ctx.ctx, GGML_TYPE_F32, D_index, N_kv_target);
+        // Copy existing columns
+        for (int64_t s = 0; s < N_kv; ++s) {
+            for (int64_t d = 0; d < D_index; ++d) {
+                char * base = (char *) k_indexer->data;
+                size_t off = (size_t) d * k_indexer->nb[0]
+                           + (size_t) s * k_indexer->nb[1];
+                float v = *(float *)(base + off);
+                char * b2 = (char *) k_big->data;
+                size_t off2 = (size_t) d * k_big->nb[0]
+                            + (size_t) s * k_big->nb[1];
+                *(float *)(b2 + off2) = v;
+            }
+        }
+        // Fill new columns with random data
+        for (int64_t s = N_kv; s < N_kv_target; ++s) {
+            for (int64_t d = 0; d < D_index; ++d) {
+                float v = (float) rand() / RAND_MAX;
+                char * b2 = (char *) k_big->data;
+                size_t off2 = (size_t) d * k_big->nb[0]
+                            + (size_t) s * k_big->nb[1];
+                *(float *)(b2 + off2) = v;
+            }
+        }
+        k_indexer = k_big;
+        N_kv = N_kv_target;
+    }
 
     printf("[IDX_TRIPLET] D=%" PRId64 " H=%" PRId64 " T=%" PRId64 " N_kv=%" PRId64 "\n",
            D_index, H_index, T, N_kv);
 
-    // Build k_scale_2d as ones so it does not alter comparison
+    // Build k_scale_2d as RMS over D_index for each KV column, matching
+    // sparse_attn_topk::select_topk_tokens_indexer_kvaware.
     ggml_tensor * ks_vec = ggml_new_tensor_1d(cpu_ctx.ctx, GGML_TYPE_F32, N_kv);
-    std::vector<float> ks_host((size_t) N_kv, 1.0f);
+    std::vector<float> ks_host((size_t) N_kv);
+    for (int64_t s = 0; s < N_kv; ++s) {
+        float sumsq = 0.0f;
+        for (int64_t d = 0; d < D_index; ++d) {
+            char * base = (char *) k_indexer->data;
+            size_t off = (size_t) d * k_indexer->nb[0]
+                       + (size_t) s * k_indexer->nb[1];
+            float v = *(float *)(base + off);
+            sumsq += v * v;
+        }
+        ks_host[(size_t) s] = sqrtf(sumsq / (float) D_index);
+    }
     memcpy(ks_vec->data, ks_host.data(), ks_host.size() * sizeof(float));
     ggml_tensor * k_scale_2d = ggml_reshape_2d(cpu_ctx.ctx, ks_vec, N_kv, 1);
 
@@ -302,7 +346,7 @@ int main() {
         }
     }
 
-    // Direct CPU Eq. (1) from q_indexer / k_indexer / idx_weights for small kv,t
+    // Direct CPU Eq. (1) from q_indexer / k_indexer / idx_weights over all kv,t
     {
         auto load3 = [](ggml_tensor * t, int64_t i0, int64_t i1, int64_t i2) {
             char * base = (char *) t->data;
@@ -317,30 +361,53 @@ int main() {
                        + (size_t) i1 * t->nb[1];
             return *(float *) (base + off);
         };
-        int max_kv_print = (int) (N_kv < 4 ? N_kv : 4);
-        int max_t_print  = (int) (T    < 4 ? T    : 4);
-        printf("[IDX_TRIPLET_EQ1] sample grid (kv x T) from direct formula:\n");
-        for (int kv_i = 0; kv_i < max_kv_print; ++kv_i) {
-            printf("kv=%d:", kv_i);
-            for (int t = 0; t < max_t_print; ++t) {
-                float acc_direct = 0.0f;
-                for (int h = 0; h < H_index; ++h) {
-                    // dot(q_{t,h}, k_s)
+
+        // Recompute per-row K_sf[s] as in idx_compute_scores_tile
+        std::vector<float> Ks_f((size_t) N_kv);
+        for (int64_t s = 0; s < N_kv; ++s) {
+            float maxv = 0.0f;
+            for (int64_t d = 0; d < D_index; ++d) {
+                float v = load2(k_indexer, d, s);
+                float av = fabsf(v);
+                if (av > maxv) maxv = av;
+            }
+            if (maxv < 1e-4f) maxv = 1e-4f;
+            Ks_f[(size_t) s] = maxv / 448.0f;
+        }
+
+        // k_scale proxy KS[s] from k_scale_2d (which we built as ones above)
+        std::vector<float> KS = ks_host;
+
+        std::vector<float> scores_eq1((size_t) N_kv * (size_t) T, 0.0f);
+        for (int64_t t = 0; t < T; ++t) {
+            for (int64_t s = 0; s < N_kv; ++s) {
+                float acc = 0.0f;
+                for (int64_t h = 0; h < H_index; ++h) {
                     float dot = 0.0f;
-                    for (int d = 0; d < D_index; ++d) {
+                    for (int64_t d = 0; d < D_index; ++d) {
                         float qv = load3(q_indexer, d, h, t);
-                        float kv = load2(k_indexer, d, kv_i);
+                        float kv = load2(k_indexer, d, s);
                         dot += qv * kv;
                     }
                     if (dot < 0.0f) dot = 0.0f;
                     float w = load2(idx_weights, h, t);
-                    acc_direct += dot * w;
+                    acc += dot * w;
                 }
-                printf(" [%d,%d]=%8.3f", kv_i, t, acc_direct);
+                float scale = KS[(size_t) s] * Ks_f[(size_t) s];
+                scores_eq1[(size_t) s + (size_t) N_kv * (size_t) t] = acc * scale;
             }
-            printf("\n");
         }
+
+        int mism_eq1 = 0;
+        float max_abs_eq1 = 0.0f;
+        for (size_t i = 0; i < scores_trip.size(); ++i) {
+            float da = fabsf(scores_eq1[i] - scores_trip[i]);
+            if (da > 5e-2f) ++mism_eq1;
+            if (da > max_abs_eq1) max_abs_eq1 = da;
+        }
+        printf("[IDX_TRIPLET_EQ1_FULL] mism=%d max_abs=%.6f\n", mism_eq1, max_abs_eq1);
     }
+
     printf("[IDX_TRIPLET_VS_FUSED] mism=%d max_abs=%.6f\n", mism, max_abs);
     printf("TEST %s\n", mism == 0 ? "PASS" : "FAIL");
 
