@@ -812,18 +812,33 @@ ggml_tensor * llama::sparse_attn_topk::derive_kv_windows(ggml_context * ctx, ggm
     // Compute starts=0 and ends per token as last unmasked+1
     ggml_tensor * starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
     ggml_tensor * ends   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
-    // Copy mask to host buffer and compute ends
-    std::vector<float> mask_host((size_t)N_kv * T);
-    ggml_backend_tensor_get(kq_mask, mask_host.data(), 0, ggml_nbytes(kq_mask));
     // Fill starts with zeros
-    for (int64_t t = 0; t < T; ++t) { ((int32_t*)starts->data)[t] = 0; }
-    // ends per column
     for (int64_t t = 0; t < T; ++t) {
-        const float * col = (const float *)((const char*)kq_mask->data + (size_t)t*kq_mask->nb[1]);
-        int e = find_last_unmasked(col, (int)N_kv, kq_mask->nb[0]);
-        ((int32_t*)ends->data)[t] = e;
+        ((int32_t*) starts->data)[t] = 0;
     }
-    *out_starts = starts; *out_ends = ends;
+
+    // If the mask is device-backed, copy the first N_kv*T entries to a host
+    // buffer as row-major [N_kv, T]. Otherwise, read directly from the host
+    // tensor using its nb[] strides.
+    if (kq_mask->buffer && !ggml_backend_buffer_is_host(kq_mask->buffer)) {
+        std::vector<float> mask_host((size_t) N_kv * T);
+        const size_t bytes = (size_t) N_kv * T * sizeof(float);
+        ggml_backend_tensor_get(kq_mask, mask_host.data(), 0, bytes);
+        for (int64_t t = 0; t < T; ++t) {
+            const float * col = mask_host.data() + (size_t) t * N_kv;
+            int e = find_last_unmasked(col, (int) N_kv, sizeof(float));
+            ((int32_t*) ends->data)[t] = e;
+        }
+    } else {
+        for (int64_t t = 0; t < T; ++t) {
+            const float * col = (const float *) ((const char *) kq_mask->data + (size_t) t * kq_mask->nb[1]);
+            int e = find_last_unmasked(col, (int) N_kv, kq_mask->nb[0]);
+            ((int32_t*) ends->data)[t] = e;
+        }
+    }
+
+    *out_starts = starts;
+    *out_ends   = ends;
     return starts;
 }
 } // namespace llama

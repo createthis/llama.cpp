@@ -237,6 +237,11 @@ target_include_directories(test-indexer-scores-tile PRIVATE ${PROJECT_SOURCE_DIR
 llama_build_and_test(test-sparse-attn.cpp)
 target_include_directories(test-sparse-attn PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
 
+# Synthetic KV windowing / mask semantics test for DeepSeek V3.2
+llama_build_and_test(test-sparse-kv-windowing.cpp)
+
+llama_build_and_test(test-sparse-kv-partition.cpp)
+
 # Reproducer for no_alloc sparse indexer crash
 llama_build_and_test(test-sparse-attn-noalloc.cpp)
 
