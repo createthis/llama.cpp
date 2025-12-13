@@ -199,13 +199,29 @@ __global__ void k_fp8_compute_row_scales(const float *row_amax, int rows, float 
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= rows) return;
     float a = row_amax[i];
+    // Rowwise FP8 scale for IndexK, matching vLLM indexer_k_quant_and_cache:
+    // scale = max(amax, 1e-4) / 448; if UE8M0 -> exp2(ceil(log2(scale))).
     if (a < 1e-4f) a = 1e-4f;
     float s = a / 448.0f;
-    // DeepSeek V3.2 (vLLM default): UE8M0 scale format (power-of-two).
     s = exp2f(ceilf(log2f(s)));
     sf[i] = s;
     inv_sf[i] = 1.0f / s;
+
 }
+// Compute per-row FP8 scales for Q (per-token-group quant), matching vLLM:
+// y_s = max(absmax, 1e-10) / 448; if UE8M0 -> exp2(ceil(log2(max(|y_s|,1e-10))))
+__global__ void k_fp8_compute_row_scales_q(const float *row_amax, int rows, float *sf, float *inv_sf) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= rows) return;
+    float a = row_amax[i];
+    const float eps = 1e-10f;
+    if (a < eps) a = eps;
+    float s = a / 448.0f;
+    s = exp2f(ceilf(log2f(fmaxf(fabsf(s), eps))));
+    sf[i] = s;
+    inv_sf[i] = 1.0f / s;
+}
+
 
 // Row-major float32 -> FP8 E4M3 with per-row scaling
 __global__ void k_rowmajor_f32_to_fp8_e4m3_rowwise_scaled(const float *src, int rows, int cols,
@@ -1050,7 +1066,7 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
 
     // Per-row K scale (amax/448) for 16-row tile, loaded from global K_sf_g
     __shared__ float K_sf[16];
-    __shared__ float Q_scale;    // per-(token, head-group) FP8 Q scale (UE8M0)
+    __shared__ float Q_scale_h[16]; // per-(token, head) FP8 Q scale (UE8M0)
     int lane = threadIdx.x & 31;
     if (lane < 16) {
         int kv_idx = k0 + lane;
@@ -1075,34 +1091,34 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
         wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
         wmma::fill_fragment(c_frag, 0.0f);
 
-        // Compute FP8 Q scale for this (token, head-group) to avoid saturation when casting Q to FP8.
-        // Simplified vLLM behavior: one UE8M0 scale for the current 16-head group.
+        // Compute per-head FP8 Q scales for this token.
+        // vLLM: per_token_group_quant_fp8(q, group_size=D, eps=1e-10, use_ue8m0=True)
+        // i.e. scale = 2^ceil(log2(max(abs(q), eps)/448)). This scale can be < 1.
+        const float eps_q = 1e-10f;
+        int lane = threadIdx.x & 31;
+        int head_lane = lane & 15; // 0..15
+        int half = lane >> 4;      // 0..1 (two lanes per head)
+        int h = h0 + head_lane;
         float q_amax = 0.0f;
-        for (int idx = (threadIdx.x & 31); idx < 16 * D; idx += 32) {
-            int hj = idx / D;
-            int d  = idx - hj * D;
-            int h  = h0 + hj;
-            float f = 0.0f;
-            if (h < H && d < D) {
-                f = Q[(size_t)d + (size_t)D * (size_t)(t0 * H + h)];
+        if (h < H) {
+            const int D_half = D / 2;
+            int d_start = half * D_half;
+            int d_end   = d_start + D_half;
+            #pragma unroll 1
+            for (int d = d_start; d < d_end; ++d) {
+                float f = Q[(size_t)d + (size_t)D * (size_t)(t0 * H + h)];
+                q_amax = fmaxf(q_amax, fabsf(f));
             }
-            q_amax = fmaxf(q_amax, fabsf(f));
         }
-        for (int off = 16; off > 0; off >>= 1) {
-            q_amax = fmaxf(q_amax, __shfl_down_sync(0xFFFFFFFF, q_amax, off));
-        }
-        if ((threadIdx.x & 31) == 0) {
+        // Combine the two halves per head: lanes 0..15 <-> 16..31
+        q_amax = fmaxf(q_amax, __shfl_xor_sync(0xFFFFFFFF, q_amax, 16));
+        if (half == 0) {
             float a = q_amax;
-            if (a < 1e-4f) a = 1e-4f;
+            if (a < eps_q) a = eps_q;
             float s = a / 448.0f;
-            // Only apply scaling when Q would saturate FP8 (s > 1). Scaling up small values
-            // increases quantization error for typical [-1,1] ranges and hurts accuracy.
-            if (s <= 1.0f) {
-                Q_scale = 1.0f;
-            } else {
-                s = exp2f(ceilf(log2f(s))); // UE8M0
-                Q_scale = s;
-            }
+            // Match vLLM per-token-group FP8 quant: UE8M0 + eps=1e-10
+            s = exp2f(ceilf(log2f(fmaxf(fabsf(s), eps_q))));
+            Q_scale_h[head_lane] = s;
         }
         __syncthreads();
 
@@ -1132,9 +1148,10 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
                 __half v = __float2half_rn(0.0f);
                 if (tok < Tc && h < H && d0 + di < D) {
                     float f = Q[(size_t)(d0 + di) + (size_t)D * (size_t)(tok*H + h)];
-                    float fq = f / Q_scale;
+                    float qs = Q_scale_h[cj];
+                    float fq = f / qs;
                     uint8_t code = f32_to_fp8e4m3(fq);
-                    float dec = fp8e4m3_to_f32(code) * Q_scale;
+                    float dec = fp8e4m3_to_f32(code) * qs;
                     v = __float2half_rn(dec);
                 }
                 B_sh[cj * 16 + di] = v;
@@ -1242,7 +1259,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
     if (!use_wmma) {
         size_t work = (size_t)Tc * (size_t)kv_end;
         // prefer WMMA when legal: standard (H<=16) or head-grouped (H%16==0)
-        if (D % 16 == 0 && ((((H <= 16) && ((16 % H) == 0)) || ((H % 16) == 0))) && work >= 16384 && !do_not_use_wmma) {
+        if (D % 16 == 0 && ((((H <= 16) && ((16 % H) == 0)) || ((H % 16) == 0))) && work >= 4096 && !do_not_use_wmma) {
             use_wmma = 1;
         }
     }
@@ -1594,12 +1611,35 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                   for (int h0 = 0; h0 < maxh; ++h0) fprintf(stderr, " % .6f", hWrm[h0]);
                   fprintf(stderr, "\n");
               }
-              // Q: direct FP8 cast (no per-row scaling, as in TileLang test)
+              // Q: vLLM-style per-token-group FP8 quantization (group_size==D)
+              // and bake q_scale into weights (Weights *= q_scale).
+              ggml_cuda_pool_alloc<float> __Qamax(__pool, (size_t)(Tc*H));
+              ggml_cuda_pool_alloc<float> __Qsf  (__pool, (size_t)(Tc*H));
+              ggml_cuda_pool_alloc<float> __QsfInv(__pool, (size_t)(Tc*H));
+              float *dQamax  = __Qamax.get();
+              float *dQsf    = __Qsf.get();
+              float *dQsfInv = __QsfInv.get();
               {
-                  size_t Qtotal = (size_t)(Tc*H) * (size_t)D;
-                  dim3 gdQfp8((unsigned)((Qtotal + tbH.x - 1)/tbH.x));
-                  k_rowmajor_f32_to_fp8_e4m3<<<gdQfp8, tbH, 0, stream>>>(dQrm, (int)(Tc*H), D, dQfp8);
+                  int rowsQ = (int)(Tc*H);
+                  int colsQ = (int)D;
+                  int threadsA = 256;
+                  int blocksA  = (rowsQ + threadsA - 1) / threadsA;
+                  k_rowmajor_f32_rowwise_absmax<<<blocksA, threadsA, 0, stream>>>(dQrm, rowsQ, colsQ, dQamax);
                   CUDA_CHECK(cudaGetLastError());
+                  k_fp8_compute_row_scales_q<<<blocksA, threadsA, 0, stream>>>(dQamax, rowsQ, dQsf, dQsfInv);
+                  CUDA_CHECK(cudaGetLastError());
+                  size_t Qtotal = (size_t)rowsQ * (size_t)colsQ;
+                  dim3 gdQfp8((unsigned)((Qtotal + tbH.x - 1)/tbH.x));
+                  k_rowmajor_f32_to_fp8_e4m3_rowwise_scaled<<<gdQfp8, tbH, 0, stream>>>(dQrm, rowsQ, colsQ, dQsfInv, dQfp8);
+                  CUDA_CHECK(cudaGetLastError());
+
+                  // Bake q_scale into weights: Wrm_scaled = Wrm * Qsf
+                  ggml_cuda_pool_alloc<float> __WrmScaled(__pool, (size_t)(Tc*H));
+                  float *dWrmScaled = __WrmScaled.get();
+                  dim3 gW((unsigned)(((size_t)(Tc*H) + tbH.x - 1)/tbH.x));
+                  k_elemwise_mul<<<gW, tbH, 0, stream>>>(dWrm, dQsf, dWrmScaled, rowsQ);
+                  CUDA_CHECK(cudaGetLastError());
+                  dWrm = dWrmScaled;
               }
               // K: compute per-row amax, scales, and quantize with per-row scaling
               {

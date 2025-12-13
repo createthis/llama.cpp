@@ -125,6 +125,7 @@ extern "C" void ggml_cuda_sparse_mla_decode_flashmla_sm100(
 
 #include <cuda_fp8.h>
 #include <cstring>
+#include <cfloat>
 
 // DeepSeek V3.2 FP8 KV pack (fp8_ds_mla-style) CUDA helpers
 // Layout per entry (656 bytes):
@@ -177,7 +178,7 @@ __global__ static void ggml_cuda_kv_dsmla_pack_kernel(
                 if (v > amax) amax = v;
             }
             float scale = amax / 448.0f;
-            if (scale < 1e-4f) scale = 1e-4f;
+            if (scale < FLT_MIN) scale = FLT_MIN;
             tile_scales[tile] = scale;
         }
 

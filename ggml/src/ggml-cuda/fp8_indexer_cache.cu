@@ -66,7 +66,8 @@ __global__ void k_indexer_fp8_quant_and_cache_kernel(
     }
 #endif
     float scale = fmaxf(amax, 1e-4f) / 448.0f;
-    // Match vLLM DeepSeek V3.2 default (ue8m0): round scale up to the next power-of-two.
+    // Match vLLM indexer_k_quant_and_cache: ue8m0 uses exp2(ceil(log2(scale))).
+    // Note: vLLM clamps amax to 1e-4 before dividing by 448.
     scale = exp2f(ceilf(log2f(scale)));
     // Base offset of this block in kv_cache
     const int64_t block_base =

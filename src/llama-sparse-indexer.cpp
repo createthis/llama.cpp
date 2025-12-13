@@ -95,13 +95,30 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
         }
     }
 
-    // Precompute FP8-dequantized Q: Qq = dequant(quant(Q))
+
+    // vLLM-style per-token-group FP8 quantization for Q with group_size==D (128).
+    // For each (tc, h), compute UE8M0 scale sf_q = 2^ceil(log2(max(abs(q), eps)/448)),
+    // quantize q/sf_q to FP8 and keep it in Qq. During dot, multiply by sf_q.
+
+    const float eps_q = 1e-10f;
+    std::vector<float> Q_sf((size_t)Tc * (size_t)H, 1.0f);
     std::vector<float> Qq(Q.size());
     for (int64_t tc = 0; tc < Tc; ++tc) {
         for (int64_t h = 0; h < H; ++h) {
+            float amax = 0.0f;
             for (int64_t d = 0; d < D; ++d) {
                 size_t idx_q = (size_t)d + (size_t)D * ((size_t)tc * (size_t)H + (size_t)h);
-                Qq[idx_q] = f32_to_e4m3_to_f32(Q[idx_q]);
+                float v = std::fabs(Q[idx_q]);
+                if (v > amax) amax = v;
+            }
+            if (amax < eps_q) amax = eps_q;
+            float sf = amax / 448.0f;
+            // Match vLLM CUDA kernel: exp2(ceil(log2(fmax(|sf|,1e-10))))
+            sf = std::exp2(std::ceil(std::log2(std::max(std::fabs(sf), 1e-10f))));
+            Q_sf[(size_t)tc * (size_t)H + (size_t)h] = sf;
+            for (int64_t d = 0; d < D; ++d) {
+                size_t idx_q = (size_t)d + (size_t)D * ((size_t)tc * (size_t)H + (size_t)h);
+                Qq[idx_q] = f32_to_e4m3_to_f32(Q[idx_q] / sf);
             }
         }
     }
@@ -139,7 +156,7 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
         }
         if (maxv < 1e-4f) maxv = 1e-4f;
         float sf = maxv / 448.0f;
-        // UE8M0 scale format (power-of-two), matching CUDA FP8 rowwise scaling.
+        // UE8M0 scale format (power-of-two), matching vLLM indexer_k_quant_and_cache.
         sf = std::exp2(std::ceil(std::log2(sf)));
         K_sf[i] = sf;
     }
@@ -170,6 +187,8 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
                 for (int64_t d = 0; d < D; ++d) {
                     dot += qv[d] * kvp[d];
                 }
+                // Apply per-head q_scale (equivalent to vLLM baking into weights)
+                dot *= Q_sf[(size_t)tc * (size_t)H + (size_t)h];
                 if (dot < 0.0f) dot = 0.0f; // ReLU
                 acc += dot * W[(size_t)h + (size_t)H * (size_t)tc];
             }
@@ -395,10 +414,6 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
         cb(q_sample, "indexer_q_sample", layer_idx);
     }
 
-    // NOTE: vLLM bakes the FP8 Q scaling into the weights when using FP8 tensor-core kernels.
-    // Our current CUDA indexer paths quantize Q without an explicit per-row scale, so do not
-    // apply a q_scale proxy here.
-
     // Build base weights from projection on cur
     ggml_tensor * idx_weights = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_weights_proj, cur); // [H, T]
 
@@ -429,7 +444,8 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     }
 
     fflush(stdout);
-    // Scale weights by 1/sqrt(H_index) and 1/sqrt(D_index) to match vLLM (softmax_scale * n_head**-0.5).
+    // vLLM weights: weights_proj(hidden_states) * q_scale * (1/sqrt(D_index)) * (1/sqrt(H_index)).
+    // We handle q_scale inside the WMMA HGRP kernel / CPU reference by scaling the dot product per head.
     idx_weights = ggml_scale(ctx, idx_weights, 1.0f / sqrtf((float) H_index));
     idx_weights = ggml_scale(ctx, idx_weights, 1.0f / sqrtf((float) D_index));
 
