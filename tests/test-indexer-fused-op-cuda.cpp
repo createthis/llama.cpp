@@ -170,7 +170,7 @@ int main() {
     bool use_fp8_ref = true;
 
     int D=128, H=64, Tc=2, kv=4096, end=kv/4;
-    if (tl_fp8_env && std::atoi(tl_fp8_env) != 0 && 0) {
+    if (tl_fp8_env && std::atoi(tl_fp8_env) != 0) {
       D=64;
       H=4;
     }

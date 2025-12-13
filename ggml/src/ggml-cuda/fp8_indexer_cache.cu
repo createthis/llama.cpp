@@ -1,5 +1,6 @@
 #include "common.cuh"
 #include <cuda_fp16.h>
+#include <cmath>
 // FP8 indexer K cache quantization for DeepSeek V3.2.
 // Layout matches vLLM's DeepseekV32IndexerCache indexer_k_quant_and_cache:
 //   kv_cache: [num_blocks, cache_block_size, cache_stride]
@@ -65,6 +66,8 @@ __global__ void k_indexer_fp8_quant_and_cache_kernel(
     }
 #endif
     float scale = fmaxf(amax, 1e-4f) / 448.0f;
+    // Match vLLM DeepSeek V3.2 default (ue8m0): round scale up to the next power-of-two.
+    scale = exp2f(ceilf(log2f(scale)));
     // Base offset of this block in kv_cache
     const int64_t block_base =
         block_idx * (int64_t) cache_block_size * cache_stride;

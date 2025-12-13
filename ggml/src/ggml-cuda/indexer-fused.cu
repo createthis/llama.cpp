@@ -89,6 +89,7 @@ static inline bool dg_fp8_encode_tma_3d(
 
 #include <mma.h>
 #include <stdint.h>
+#include <cmath>
 #include <stdio.h>
 #include <vector>
 #include "../../include/ggml-cuda-indexer.h"
@@ -200,6 +201,8 @@ __global__ void k_fp8_compute_row_scales(const float *row_amax, int rows, float 
     float a = row_amax[i];
     if (a < 1e-4f) a = 1e-4f;
     float s = a / 448.0f;
+    // DeepSeek V3.2 (vLLM default): UE8M0 scale format (power-of-two).
+    s = exp2f(ceilf(log2f(s)));
     sf[i] = s;
     inv_sf[i] = 1.0f / s;
 }
@@ -1047,6 +1050,7 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
 
     // Per-row K scale (amax/448) for 16-row tile, loaded from global K_sf_g
     __shared__ float K_sf[16];
+    __shared__ float Q_scale;    // per-(token, head-group) FP8 Q scale (UE8M0)
     int lane = threadIdx.x & 31;
     if (lane < 16) {
         int kv_idx = k0 + lane;
@@ -1059,10 +1063,10 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
     }
     __syncthreads();
 
-    __shared__ __half A_sh[16*16]; // row-major K tile (FP8-decoded, scaled later)
-    __shared__ __half B_sh[16*16]; // col-major Q tile (FP8-quantized then decoded)
-    __shared__ float  C_sh[16*16]; // accumulator dump
-    __shared__ float  S_acc[16];   // accumulate per kv row
+    __shared__ __align__(16) __half A_sh[16*16]; // row-major K tile (FP8-decoded)
+    __shared__ __align__(16) __half B_sh[16*16]; // col-major Q tile (FP8-quantized then decoded)
+    __shared__ __align__(16) float  C_sh[16*16]; // accumulator dump
+    __shared__ __align__(16) float  S_acc[16];   // accumulate per kv row
 
     if (threadIdx.x < 16) S_acc[threadIdx.x] = 0.0f;
     __syncthreads();
@@ -1070,6 +1074,37 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
     for (int h0 = 0; h0 < H; h0 += 16) {
         wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
         wmma::fill_fragment(c_frag, 0.0f);
+
+        // Compute FP8 Q scale for this (token, head-group) to avoid saturation when casting Q to FP8.
+        // Simplified vLLM behavior: one UE8M0 scale for the current 16-head group.
+        float q_amax = 0.0f;
+        for (int idx = (threadIdx.x & 31); idx < 16 * D; idx += 32) {
+            int hj = idx / D;
+            int d  = idx - hj * D;
+            int h  = h0 + hj;
+            float f = 0.0f;
+            if (h < H && d < D) {
+                f = Q[(size_t)d + (size_t)D * (size_t)(t0 * H + h)];
+            }
+            q_amax = fmaxf(q_amax, fabsf(f));
+        }
+        for (int off = 16; off > 0; off >>= 1) {
+            q_amax = fmaxf(q_amax, __shfl_down_sync(0xFFFFFFFF, q_amax, off));
+        }
+        if ((threadIdx.x & 31) == 0) {
+            float a = q_amax;
+            if (a < 1e-4f) a = 1e-4f;
+            float s = a / 448.0f;
+            // Only apply scaling when Q would saturate FP8 (s > 1). Scaling up small values
+            // increases quantization error for typical [-1,1] ranges and hurts accuracy.
+            if (s <= 1.0f) {
+                Q_scale = 1.0f;
+            } else {
+                s = exp2f(ceilf(log2f(s))); // UE8M0
+                Q_scale = s;
+            }
+        }
+        __syncthreads();
 
         // Iterate K dimension in 16-slices
         for (int d0 = 0; d0 < D; d0 += 16) {
@@ -1097,8 +1132,9 @@ __global__ void k_indexer_logits_wmma16_f32_hgrp(
                 __half v = __float2half_rn(0.0f);
                 if (tok < Tc && h < H && d0 + di < D) {
                     float f = Q[(size_t)(d0 + di) + (size_t)D * (size_t)(tok*H + h)];
-                    uint8_t code = f32_to_fp8e4m3(f);
-                    float dec = fp8e4m3_to_f32(code);
+                    float fq = f / Q_scale;
+                    uint8_t code = f32_to_fp8e4m3(fq);
+                    float dec = fp8e4m3_to_f32(code) * Q_scale;
                     v = __float2half_rn(dec);
                 }
                 B_sh[cj * 16 + di] = v;

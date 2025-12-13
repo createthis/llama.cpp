@@ -435,14 +435,15 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
         fflush(stdout);
     }
 
-    // K-scale proxy: RMS over D for each KV column
-    ggml_tensor * k_sqr = ggml_sqr(ctx, k_indexer);                  // [D, N_kv]
-    ggml_tensor * k_sum = ggml_sum_rows(ctx, k_sqr);                  // [1, N_kv]
-    ggml_tensor * k_mean = ggml_scale(ctx, k_sum, 1.0f / (float) D);  // [1, N_kv]
-    ggml_tensor * k_scale_vec = ggml_sqrt(ctx, k_mean);               // [1, N_kv]
-    ggml_tensor * k_scale_2d = ggml_transpose(ctx, k_scale_vec);      // [N_kv, 1]
+    // K-scale: the fused CUDA indexer kernels already apply the per-row FP8 dequant scales (K_sf).
+    // DeepSeek V3.2 does not have an additional learned per-KV scale here, so pass ones.
+    ggml_tensor * one = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    ggml_set_input(one);
+    ggml_set_name(one, "idxkv_one");
+    ggml_tensor * k_scale_2d = ggml_repeat_4d(ctx, one, N_kv, 1, 1, 1);
+    k_scale_2d = ggml_reshape_2d(ctx, k_scale_2d, N_kv, 1);
     k_scale_2d = ggml_cont(ctx, k_scale_2d);
-    cb(k_scale_2d, "idxkv_k_scale_proxy", -1);
+    cb(k_scale_2d, "idxkv_k_scale_ones", -1);
 
     ggml_tensor * result = nullptr; // [k, T]
     for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {

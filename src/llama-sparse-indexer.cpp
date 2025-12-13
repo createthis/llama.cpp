@@ -138,7 +138,10 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
             if (v > maxv) maxv = v;
         }
         if (maxv < 1e-4f) maxv = 1e-4f;
-        K_sf[i] = maxv / 448.0f;
+        float sf = maxv / 448.0f;
+        // UE8M0 scale format (power-of-two), matching CUDA FP8 rowwise scaling.
+        sf = std::exp2(std::ceil(std::log2(sf)));
+        K_sf[i] = sf;
     }
 
     // Precompute FP8-dequantized K with per-row scaling: Kh = dequant(quant(K / K_sf[row]))
@@ -392,15 +395,9 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
         cb(q_sample, "indexer_q_sample", layer_idx);
     }
 
-
-    // Approximate q_scale via per-(head, token) RMS of q_indexer across D_index
-    // q_indexer: [D_index, H_index, T]
-    ggml_tensor * q_sqr = ggml_sqr(ctx, q_indexer);                                  // [D_index, H, T]
-    ggml_tensor * q_sum = ggml_sum_rows(ctx, q_sqr);                                  // [1, H, T]
-    ggml_tensor * q_mean= ggml_scale(ctx, q_sum, 1.0f / (float) D_index);             // [1, H, T]
-    ggml_tensor * q_rms = ggml_sqrt(ctx, q_mean);                                     // [1, H, T]
-    if (dbg) printf("[SPARSE-IDX-QRMS] L%d: computed q_rms over D_index; D_index=%" PRId64 " H=%" PRId64 " T=%" PRId64 "\n",
-           layer_idx, D_index, H_index, n_tokens);
+    // NOTE: vLLM bakes the FP8 Q scaling into the weights when using FP8 tensor-core kernels.
+    // Our current CUDA indexer paths quantize Q without an explicit per-row scale, so do not
+    // apply a q_scale proxy here.
 
     // Build base weights from projection on cur
     ggml_tensor * idx_weights = ggml_mul_mat(ctx, model.layers[layer_idx].attn_indexer_weights_proj, cur); // [H, T]
@@ -432,13 +429,9 @@ IndexerKVTriplet sparse_attn_indexer::compute_indexer_triplet(
     }
 
     fflush(stdout);
-    // Scale weights by 1/sqrt(H_index) and 1/sqrt(D_index), then multiply by q_rms
+    // Scale weights by 1/sqrt(H_index) and 1/sqrt(D_index) to match vLLM (softmax_scale * n_head**-0.5).
     idx_weights = ggml_scale(ctx, idx_weights, 1.0f / sqrtf((float) H_index));
     idx_weights = ggml_scale(ctx, idx_weights, 1.0f / sqrtf((float) D_index));
-
-    // Broadcast q_scale proxy [1,H,T] to [H,T] and multiply
-    ggml_tensor * q_scale_proxy = ggml_reshape_2d(ctx, q_rms, H_index, n_tokens);     // [H, T]
-    idx_weights = ggml_mul(ctx, idx_weights, q_scale_proxy);                          // [H, T]
 
     cb(idx_weights, "indexer_weights", layer_idx);
     ggml_tensor * Kindexer_cache = mctx ? mctx->get_k_indexer_full(ctx, layer_idx)
