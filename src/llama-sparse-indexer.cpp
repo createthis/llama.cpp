@@ -173,7 +173,6 @@ ggml_tensor * sparse_attn_indexer::idx_compute_scores_tile(
         }
     }
 
-
     // Compute FP8-like logits into host buffer using precomputed Qq and Kh
     std::vector<float> out((size_t)kv * (size_t)Tc, 0.0f);
     for (int64_t tc = 0; tc < Tc; ++tc) {

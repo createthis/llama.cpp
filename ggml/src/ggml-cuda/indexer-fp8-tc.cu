@@ -20,9 +20,9 @@
 #include <cstdint>
 #include <cmath>
 
-// Local FP8 E4M3 decode helper using PTX, mirroring the helper used
-// in indexer-fused.cu. This is device-only and does not rely on
-// TileLang.
+// Local FP8 E4M3 decode helper using native PTX, matching ggml-fp8 semantics.
+// We reuse the same implementation as the main indexer-fused.cu path so that
+// CPU idx_compute_scores_tile and this FP8_TC kernel see identical dequant.
 static __device__ __forceinline__ float fp8e4m3_to_f32(uint8_t code) {
     uint16_t bits = code;
     uint32_t packed;
@@ -51,6 +51,7 @@ __global__ void k_indexer_logits_fp8_tc_hgrp_naive(
     const unsigned char * __restrict__ K_fp8,
     const float         * __restrict__ K_sf,
     const unsigned char * __restrict__ Q_fp8,
+    const float         * __restrict__ Q_sf,
     const float         * __restrict__ W,
     const float         * __restrict__ k_scale,
     int D, int H, int Tc, int kv,
@@ -81,7 +82,9 @@ __global__ void k_indexer_logits_fp8_tc_hgrp_naive(
 
     float acc = 0.0f;
 
-    // Per-row K scale and k_scale
+    // Per-row K scale and k_scale; match CPU idx_compute_scores_tile which
+    // multiplies KS[i] * K_sf[i] once at the end. Here we keep K_sf as a pure
+    // FP8 dequant scale and fold ks into the final accumulator.
     float ksf = K_sf ? K_sf[kv_idx] : 1.0f;
     float ks  = k_scale ? k_scale[kv_idx] : 1.0f;
 
@@ -92,14 +95,18 @@ __global__ void k_indexer_logits_fp8_tc_hgrp_naive(
         size_t q_row = (size_t)tok * (size_t)H + (size_t)h;
         const unsigned char * q_row_ptr = Q_fp8 + q_row * (size_t)D;
         const unsigned char * k_row_ptr = K_fp8 + (size_t)kv_idx * (size_t)D;
+        float qscale = Q_sf ? Q_sf[q_row] : 1.0f;
 
         for (int d = 0; d < D; ++d) {
             uint8_t qc = q_row_ptr[d];
             uint8_t kc = k_row_ptr[d];
             float qv = fp8e4m3_to_f32(qc);
-            float kv = fp8e4m3_to_f32(kc) * ksf;
+            float kv = fp8e4m3_to_f32(kc);
             dot += qv * kv;
         }
+
+        // Apply per-(tok,head) Q scale (vLLM UE8M0 style)
+        dot *= qscale;
 
         // ReLU(dot)
         if (dot < 0.0f) dot = 0.0f;
@@ -109,8 +116,8 @@ __global__ void k_indexer_logits_fp8_tc_hgrp_naive(
         acc += dot * w;
     }
 
-    // Apply k_scale per kv row
-    acc *= ks;
+    // Apply combined k_scale * K_sf per kv row to mirror CPU reference
+    acc *= ks * ksf;
 
     Out[(size_t)kv_idx + (size_t)kv * (size_t)tok] = acc;
 }
@@ -127,7 +134,10 @@ extern "C" void ggml_cuda_indexer_logits_fp8_tc_hgrp_launch(
     const int * starts, const int * ends,
     float * Out) {
 
-    (void)Q_sf; // reserved for future per-row Q scaling
+    // Q_sf: optional per-row Q scales (baked into W upstream for TL FP8 path).
+    // For the FP8_TC scalar path we expect W to already include Q scaling,
+    // so Q_sf is currently unused but kept for API symmetry.
+    (void)Q_sf;
 
     if (!K_fp8 || !Q_fp8 || !W || !k_scale || D <= 0 || H <= 0 || Tc <= 0 || kv <= 0) {
         return;
@@ -148,6 +158,7 @@ extern "C" void ggml_cuda_indexer_logits_fp8_tc_hgrp_launch(
         K_fp8,
         K_sf,
         Q_fp8,
+        Q_sf,
         W,
         k_scale,
         D, H, Tc, kv,

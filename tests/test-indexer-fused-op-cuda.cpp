@@ -170,6 +170,9 @@ int main() {
     bool use_fp8_ref = true;
 
     int D=128, H=64, Tc=2, kv=4096, end=kv/4;
+    if (const char *s = std::getenv("LLAMA_INDEXER_FP8_TC_SMALL")) {
+        if (std::atoi(s) != 0) { D = 64; H = 4; Tc = 1; kv = 64; end = kv; }
+    }
     if (tl_fp8_env && std::atoi(tl_fp8_env) != 0) {
       D=64;
       H=4;
