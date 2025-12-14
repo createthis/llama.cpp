@@ -1836,11 +1836,28 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
             }
             const float        *K_sf_g = have_fp8_k ? dKsf  : nullptr;
             const unsigned char*K_fp8  = have_fp8_k ? dKfp8 : nullptr;
-            LAUNCH_PROFILE_KERNEL("PROFILE_WMMA_HGRP_ONLY", WMMA_HGRP_ONLY, stream, ([&](){
-                        k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(
-                            dQ, K_fp8, K_sf_g, dW, dKS, D, H, Tc, kv_end,
-                            dStarts_dev, dEnds_dev, dOut);
-                        })(), D, H, Tc, kv_end);
+            const char * fp8_tc_env = getenv("LLAMA_INDEXER_FP8_TC");
+            bool use_fp8_tc = (fp8_tc_env && *fp8_tc_env && atoi(fp8_tc_env) != 0);
+            if (use_fp8_tc && K_fp8 && K_sf_g && H == 64 && (D == 64 || D == 128)) {
+                LAUNCH_PROFILE_KERNEL("PROFILE_FP8_TC_HGRP", FP8_TC_HGRP, stream, ([&](){
+                            ggml_cuda_indexer_logits_fp8_tc_hgrp_launch(ctx,
+                                                                        K_fp8,
+                                                                        K_sf_g,
+                                                                        (const unsigned char *) dQ,
+                                                                        nullptr,
+                                                                        dW,
+                                                                        dKS,
+                                                                        D, H, Tc, kv_end,
+                                                                        dStarts_dev, dEnds_dev,
+                                                                        dOut);
+                            })(), D, H, Tc, kv_end);
+            } else {
+                LAUNCH_PROFILE_KERNEL("PROFILE_WMMA_HGRP_ONLY", WMMA_HGRP_ONLY, stream, ([&](){
+                            k_indexer_logits_wmma16_f32_hgrp<<<grid, block, 0, stream>>>(
+                                dQ, K_fp8, K_sf_g, dW, dKS, D, H, Tc, kv_end,
+                                dStarts_dev, dEnds_dev, dOut);
+                            })(), D, H, Tc, kv_end);
+            }
 
         } else if (H <= 16 && (16 % H) == 0) {
 

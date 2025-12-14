@@ -79,6 +79,21 @@ void ggml_cuda_mask_window_ends_device_to_host(struct ggml_backend_cuda_context 
 void ggml_cuda_mask_window_ends_device_to_host_simple(const float * dMask, int N_kv, int T, int * hEnds);
 void ggml_cuda_mask_window_starts_device_to_host_simple(const float * dMask, int N_kv, int T, int * hStarts);
 
+
+// Optional FP8 tensor-core lightning indexer launcher (DeepSeek V3.2)
+// Expects FP8 K/Q and scales already prepared; computes logits [kv, Tc]
+void ggml_cuda_indexer_logits_fp8_tc_hgrp_launch(
+    struct ggml_backend_cuda_context & ctx,
+    const unsigned char * K_fp8,   // [kv, D] FP8 E4M3 codes
+    const float * K_sf,            // [kv] per-row K scale (UE8M0)
+    const unsigned char * Q_fp8,   // [Tc*H, D] FP8 E4M3 codes
+    const float * Q_sf,            // [Tc*H] per-row Q scale (UE8M0)
+    const float * W,               // [H, Tc]
+    const float * k_scale,         // [kv]
+    int D, int H, int Tc, int kv,
+    const int * starts, const int * ends,
+    float * Out);
+
 #ifdef __cplusplus
 }
 #endif
