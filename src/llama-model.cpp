@@ -13970,12 +13970,20 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                 top_k = std::min<int64_t>(top_k, available_kv);
                             }
 
+                            ggml_tensor * k_indexer_fp8_sidecar = nullptr;
+                            int32_t idx_quant_bs = 0, idx_cache_block_size = 0, idx_cache_stride = 0;
+                            if (mctx_cur2 && mctx_cur2->is_arch_deepseek_v3_2() && mctx_cur2->has_k_indexer_fp8(il)) {
+                                k_indexer_fp8_sidecar = mctx_cur2->get_k_indexer_fp8_raw(ctx0, il);
+                                if (k_indexer_fp8_sidecar) {
+                                    mctx_cur2->get_k_indexer_fp8_layout(il, idx_quant_bs, idx_cache_block_size, idx_cache_stride);
+                                }
+                            }
                             ggml_tensor * kvaware_indices = llama::sparse_attn_indexer::build_kvaware_topk_indices(
                                 ctx0, model, il, cur, n_tokens, mctx_cur2, inp_attn->get_k_idxs(), KQmask2, top_k,
                                 inp_pos, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,
                                 cb_wrapper, gf, sched, backend_cpu,
-                                /*k_indexer_fp8_sidecar=*/nullptr,
-                                /*quant_bs=*/0, /*cache_block_size=*/0, /*cache_stride=*/0);
+                                /*k_indexer_fp8_sidecar=*/k_indexer_fp8_sidecar,
+                                /*quant_bs=*/idx_quant_bs, /*cache_block_size=*/idx_cache_block_size, /*cache_stride=*/idx_cache_stride);
                             cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
                                 ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, kv_blob, cb_wrapper);
                             // Sanity checks for MLA sparse attention output vs expected V-dim (kv_lora_rank)
@@ -14124,12 +14132,20 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
 
                                 top_k = std::min<int64_t>(top_k, available_kv);
                             }
+                            ggml_tensor * k_indexer_fp8_sidecar = nullptr;
+                            int32_t idx_quant_bs = 0, idx_cache_block_size = 0, idx_cache_stride = 0;
+                            if (mctx_cur2 && mctx_cur2->is_arch_deepseek_v3_2() && mctx_cur2->has_k_indexer_fp8(il)) {
+                                k_indexer_fp8_sidecar = mctx_cur2->get_k_indexer_fp8_raw(ctx0, il);
+                                if (k_indexer_fp8_sidecar) {
+                                    mctx_cur2->get_k_indexer_fp8_layout(il, idx_quant_bs, idx_cache_block_size, idx_cache_stride);
+                                }
+                            }
                             ggml_tensor * kvaware_indices = llama::sparse_attn_indexer::build_kvaware_topk_indices(
                                 ctx0, model, il, cur, n_tokens, mctx_cur2, inp_attn->get_k_idxs(), KQmask2, top_k,
                                 inp_pos, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,
                                 cb_wrapper, gf, sched, backend_cpu,
-                                /*k_indexer_fp8_sidecar=*/nullptr,
-                                /*quant_bs=*/0, /*cache_block_size=*/0, /*cache_stride=*/0);
+                                /*k_indexer_fp8_sidecar=*/k_indexer_fp8_sidecar,
+                                /*quant_bs=*/idx_quant_bs, /*cache_block_size=*/idx_cache_block_size, /*cache_stride=*/idx_cache_stride);
                             cur = llama::sparse_mla_fwd::apply_sparse_attention_kvaware(
                                 ctx0, Qcur, Kcache, Vcache, kvaware_indices, n_tokens, top_k, kq_scale, KQmask2, hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f, kv_blob, cb_wrapper);
                             // Sanity checks for MHA sparse attention output vs expected V-dim (n_embd_head_v)
