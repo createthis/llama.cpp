@@ -13970,9 +13970,12 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
                                 top_k = std::min<int64_t>(top_k, available_kv);
                             }
 
+                            const char *env_fp8_indexer_cache = getenv("LLAMA_FP8_INDEXER_CACHE");
+                            bool use_fp8_indexer_cache = (env_fp8_indexer_cache && atoi(env_fp8_indexer_cache) != 0);
+
                             ggml_tensor * k_indexer_fp8_sidecar = nullptr;
                             int32_t idx_quant_bs = 0, idx_cache_block_size = 0, idx_cache_stride = 0;
-                            if (mctx_cur2 && mctx_cur2->is_arch_deepseek_v3_2() && mctx_cur2->has_k_indexer_fp8(il)) {
+                            if (use_fp8_indexer_cache && mctx_cur2 && mctx_cur2->is_arch_deepseek_v3_2() && mctx_cur2->has_k_indexer_fp8(il)) {
                                 k_indexer_fp8_sidecar = mctx_cur2->get_k_indexer_fp8_raw(ctx0, il);
                                 if (k_indexer_fp8_sidecar) {
                                     mctx_cur2->get_k_indexer_fp8_layout(il, idx_quant_bs, idx_cache_block_size, idx_cache_stride);
@@ -14132,9 +14135,12 @@ struct llm_build_deepseek3_2 : public llm_graph_context {
 
                                 top_k = std::min<int64_t>(top_k, available_kv);
                             }
+                            const char *env_fp8_indexer_cache = getenv("LLAMA_FP8_INDEXER_CACHE");
+                            bool use_fp8_indexer_cache = (env_fp8_indexer_cache && atoi(env_fp8_indexer_cache) != 0);
+
                             ggml_tensor * k_indexer_fp8_sidecar = nullptr;
                             int32_t idx_quant_bs = 0, idx_cache_block_size = 0, idx_cache_stride = 0;
-                            if (mctx_cur2 && mctx_cur2->is_arch_deepseek_v3_2() && mctx_cur2->has_k_indexer_fp8(il)) {
+                            if (use_fp8_indexer_cache && mctx_cur2 && mctx_cur2->is_arch_deepseek_v3_2() && mctx_cur2->has_k_indexer_fp8(il)) {
                                 k_indexer_fp8_sidecar = mctx_cur2->get_k_indexer_fp8_raw(ctx0, il);
                                 if (k_indexer_fp8_sidecar) {
                                     mctx_cur2->get_k_indexer_fp8_layout(il, idx_quant_bs, idx_cache_block_size, idx_cache_stride);
