@@ -42,12 +42,21 @@ lcov-report/
 
 # Build Artifacts
 
+llama.pc
+DartConfiguration.tcl
+CMakeCache.txt
 tags
 .build/
 build*
 release
 debug
 !build-info.cmake
+tests/CTestTestfile.cmake
+tests/cmake_install.cmake
+**/*.cmake
+tests/*.cmake
+**/Makefile
+**/CMakeFiles
 !build-info.cpp.in
 !build-info.sh
 !build.zig
