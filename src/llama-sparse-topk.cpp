@@ -1,4 +1,5 @@
 #include "llama-sparse-topk.h"
+#include "llama-sparse-indexer.h"
 #include <algorithm>
 #include <vector>
 #include <cstdint>
@@ -188,8 +189,7 @@ static void radix_topk_custom(ggml_tensor * dst, int ith, int nth, void * userda
 
 namespace llama {
 
-using std::function;
-
+  using std::function;
 
   ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
       ggml_context * ctx,
@@ -304,94 +304,20 @@ using std::function;
           size_t q_off = t0 * H * Q2d_full->nb[1];
           ggml_tensor * Q_tile_all = ggml_view_2d(ctx, Q2d_full, D, H * Tc, Q2d_full->nb[1], q_off);
 
-          // Accumulate per-head contributions into [N_kv, Tc]
-          ggml_tensor * scores_tc = nullptr; // unused placeholder
-          // Compute logits for all heads in one GEMM: [N_kv, H*Tc]
-          ggml_tensor * logits_all = ggml_mul_mat(ctx, k_indexer, Q_tile_all);
-          if (dbg && t0 == 0) {
-              cb(logits_all, "idxkv_logits_all", -1);
-          }
-          // Reshape and apply ReLU: [N_kv, H, Tc]
-          ggml_tensor * logits_resh = ggml_reshape_3d(ctx, logits_all, N_kv, H, Tc);
-          ggml_tensor * logits_act  = ggml_relu(ctx, logits_resh);
-          // Weights slice [H, Tc] and broadcast-mul, then sum over H → [N_kv, Tc]
-          ggml_tensor * w_slice = ggml_view_2d(ctx, weights, H, Tc, weights->nb[1], t0*weights->nb[1]);
-
-          // Per-head weighted sum path to avoid giant broadcast tensors
-          {
-              ggml_tensor * scores_acc = nullptr;
-              for (int64_t h_idx = 0; h_idx < H; ++h_idx) {
-                  size_t off_h = (size_t)h_idx * logits_act->nb[1];
-                  ggml_tensor * logits_h = ggml_view_2d(ctx, logits_act, N_kv, Tc, logits_act->nb[2], off_h);
-
-                  size_t w_off_h = (size_t)h_idx * w_slice->nb[0];
-                  ggml_tensor * w_row = ggml_view_2d(ctx, w_slice, 1, Tc, w_slice->nb[1], w_off_h);
-                  ggml_tensor * w_row_b = ggml_repeat(ctx, w_row, logits_h);
-                  ggml_tensor * contrib_h = ggml_mul(ctx, logits_h, w_row_b);
-                  scores_acc = scores_acc ? ggml_add(ctx, scores_acc, contrib_h) : contrib_h;
-              }
-              scores_tc = scores_acc;
-          }
-
-
-
-          // Safe K-scale proxy application after head reduction (always apply)
-          {
-              ggml_tensor * k_scale_bcast = ggml_repeat(ctx, k_scale_2d, scores_tc); // [N_kv, Tc]
-              scores_tc = ggml_mul(ctx, scores_tc, k_scale_bcast);
-          }
-
-          // Debug (cb): per-tile scalar sums (no deref)
-          if (dbg) {
-              ggml_tensor * idxkv_scores_sum = ggml_sum(ctx, scores_tc);
-              ggml_tensor * idxkv_scores_ssq = ggml_sum(ctx, ggml_sqr(ctx, scores_tc));
-              ggml_tensor * idxkv_scores_post_abs_sum = nullptr;
-              if (t0 == 0) {
-                  idxkv_scores_post_abs_sum = ggml_sum(ctx, ggml_abs(ctx, scores_tc));
-                  cb(idxkv_scores_post_abs_sum, "idxkv_scores_post_abs_sum", -1);
-                  if (gf) {
-                      ggml_set_output(idxkv_scores_post_abs_sum);
-                      ggml_build_forward_expand(gf, idxkv_scores_post_abs_sum);
-                  }
-              }
-              cb(idxkv_scores_sum,  "idxkv_scores_sum",  -1);
-              cb(idxkv_scores_ssq,  "idxkv_scores_ssq",  -1);
-          }
-
-          scores_tc = ggml_cont(ctx, scores_tc);
-
-          // mask tile if available
-          if (mask_full) {
-              ggml_tensor * mask_tc = ggml_view_2d(ctx, mask_full, N_kv, Tc, mask_full->nb[1], t0 * mask_full->nb[1]);
-              mask_tc = ggml_cont(ctx, mask_tc);
-              if (mask_tc->type != scores_tc->type) {
-                  mask_tc = ggml_cast(ctx, mask_tc, scores_tc->type);
-                  mask_tc = ggml_cont(ctx, mask_tc);
-              }
-              if (dbg) cb(mask_tc,  "idxkv_mask_tc",  -1);
-
-              // Ensure both operands have row-contiguous layout for safe broadcast add
-              GGML_ASSERT(scores_tc->nb[0] == (size_t) ggml_type_size(scores_tc->type));
-              GGML_ASSERT(mask_tc->nb[0]   == (size_t) ggml_type_size(mask_tc->type));
-              if (dbg && t0 == 0) {
-                  printf("[TOPK-INDEXER-DBG] (INDEXER) add mask: scores_tc ne=[%" PRId64 ",%" PRId64 "] nb=[%zu,%zu] type=%d | mask_tc ne=[%" PRId64 ",%" PRId64 "] nb=[%zu,%zu] type=%d\n",
-                         scores_tc->ne[0], scores_tc->ne[1], scores_tc->nb[0], scores_tc->nb[1], (int) scores_tc->type,
-                         mask_tc->ne[0], mask_tc->ne[1], mask_tc->nb[0], mask_tc->nb[1], (int) mask_tc->type);
-                  fflush(stdout);
-              }
-              scores_tc = ggml_add(ctx, scores_tc, mask_tc);
-              // Clamp after mask to avoid inf in diagnostics and stabilize top-k
-              scores_tc = ggml_clamp(ctx, scores_tc, -1e30f, 1e30f);
-
-              if (t0 == 0) {
-                  ggml_tensor * idxkv_scores_post_mask_abs_sum = ggml_sum(ctx, ggml_abs(ctx, scores_tc));
-                  cb(idxkv_scores_post_mask_abs_sum, "idxkv_scores_post_mask_abs_sum", -1);
-                  if (gf) {
-                      ggml_set_output(idxkv_scores_post_mask_abs_sum);
-                      ggml_build_forward_expand(gf, idxkv_scores_post_mask_abs_sum);
-                  }
-              }
-          }
+          ggml_tensor * scores_tc = llama::sparse_attn_indexer::idx_compute_scores_tile(
+              ctx,
+              Q_tile_all,
+              k_indexer,
+              weights,
+              k_scale_2d,
+              mask_full,
+              D,
+              H,
+              Tc,
+              N_kv,
+              t0,
+              cb,
+              gf);
 
           // top-k for this tile -> [k, Tc]
           // Ensure top-k runs on CPU to avoid CUDA backend returning invalid indices for generic shapes
