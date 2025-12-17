@@ -236,3 +236,6 @@ llama_build_and_test(test-sparse-attn-noalloc.cpp)
 
 # Radix top-k unit test for sparse indexer
 llama_build_and_test(test-sparse-topk-radix.cpp)
+
+# Sparse MLA decode (CPU) vs naive reference
+llama_build_and_test(test-sparse-mla-decode.cpp)
