@@ -13,7 +13,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <climits>
+#include <mutex>
 namespace {
+
+static std::mutex g_radix_debug_mutex;
 
 static inline uint32_t float_to_key_desc(float x) {
     uint32_t u;
@@ -161,8 +164,9 @@ static void radix_topk_custom(ggml_tensor * dst, int ith, int nth, void * userda
         // Output first KK indices (order arbitrary)
         for (int64_t i = 0; i < KK; ++i) out_idx[i] = selected[i];
 
-        // Debug: compare with partial_sort for a few rows
-        if (r < 8) {
+        // Debug: compare with partial_sort for a few rows and print scores/thresholds
+        if (r < 8 && dbg) {
+            std::lock_guard<std::mutex> lock(g_radix_debug_mutex);
             std::vector<int32_t> ref(N);
             for (int64_t i = 0; i < N; ++i) ref[i] = (int32_t)i;
             auto cmp = [&](int32_t a, int32_t b){
@@ -172,14 +176,61 @@ static void radix_topk_custom(ggml_tensor * dst, int ith, int nth, void * userda
                 return a < b;
             };
             std::partial_sort(ref.begin(), ref.begin() + KK, ref.end(), cmp);
-            if (dbg) {
-                printf("[radix debug] row=%lld top: ", (long long)r);
-                for (int ii = 0; ii < (int)std::min<int64_t>(8, KK); ++ii) printf("%d ", out_idx[ii]);
-                printf("| ref: ");
-                for (int ii = 0; ii < (int)std::min<int64_t>(8, KK); ++ii) printf("%d ", ref[ii]);
-                printf("\n");
-                fflush(stdout);
+
+            // collect full row values for threshold computation
+            std::vector<float> vals(N);
+            for (int64_t i = 0; i < N; ++i) {
+                vals[i] = *(const float *)(row0 + (size_t)i*src_nb0);
             }
+            std::vector<float> vals_sorted = vals;
+            if (KK > 0) {
+                std::nth_element(vals_sorted.begin(), vals_sorted.begin() + (KK - 1), vals_sorted.end(),
+                                 [](float a, float b){ return a > b; });
+            }
+            float thresh = KK > 0 ? vals_sorted[KK - 1] : 0.0f;
+
+            float min_sel =  std::numeric_limits<float>::infinity();
+            float max_sel = -std::numeric_limits<float>::infinity();
+            for (int64_t i = 0; i < KK; ++i) {
+                float v = vals[out_idx[i]];
+                if (v < min_sel) min_sel = v;
+                if (v > max_sel) max_sel = v;
+            }
+
+            float max_dropped = -std::numeric_limits<float>::infinity();
+            if (KK < N) {
+                std::vector<char> in_sel(N, 0);
+                for (int64_t i = 0; i < KK; ++i) {
+                    int idx = out_idx[i];
+                    if (0 <= idx && idx < N) in_sel[idx] = 1;
+                }
+                for (int64_t i = 0; i < N; ++i) {
+                    if (!in_sel[i]) {
+                        float v = vals[i];
+                        if (v > max_dropped) max_dropped = v;
+                    }
+                }
+            }
+
+            const int show = (int) std::min<int64_t>(8, KK);
+            printf("[radix debug] row=%lld indices & values (top vs ref):\n", (long long) r);
+            for (int ii = 0; ii < show; ++ii) {
+                int idx_top = out_idx[ii];
+                float v_top = (0 <= idx_top && idx_top < N) ? vals[idx_top] : 0.0f;
+                int idx_ref = ref[ii];
+                float v_ref = (0 <= idx_ref && idx_ref < N) ? vals[idx_ref] : 0.0f;
+                printf("  top[%d] = %d -> %.6f | ref[%d] = %d -> %.6f\n",
+                       ii, idx_top, v_top, ii, idx_ref, v_ref);
+            }
+
+            // print threshold and selection quality summary
+            printf("[radix debug] row=%lld thresh=%.6f min_sel=%.6f max_sel=%.6f",
+                   (long long) r, thresh, min_sel, max_sel);
+            if (KK < N) {
+                printf(" max_dropped=%.6f", max_dropped);
+            }
+            printf("\n");
+            fflush(stdout);
         }
     }
 }
