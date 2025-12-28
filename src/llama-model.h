@@ -5,6 +5,7 @@
 #include "llama-graph.h"
 #include "llama-hparams.h"
 #include "llama-memory.h"
+#include "llama-kv-cache-fp8.h"
 #include "llama-vocab.h"
 
 #include <map>
@@ -437,6 +438,9 @@ struct llama_model {
     struct ggml_tensor * per_layer_proj_norm  = nullptr;
 
     std::vector<llama_layer> layers;
+    // DeepSeek V3.2: optional FP8 K-side KV cache (DS3.2-specific experiment)
+    std::unique_ptr<llama_kv_cache_fp8> kv_fp8_ds32;
+
 
     llama_model_params params;
 

@@ -93,6 +93,14 @@ extern "C" void ggml_cuda_sparse_mla_decode_device(ggml_backend_cuda_context & c
     const float * q, const float * k, const float * v, const int32_t * topk,
     int D, int Hq, int Hkv, int Dv, int Nkv, int K, float kq_scale, float softcap, float * out);
 
+// Optional FlashMLA sparse FP8 decode entry point (SM100), vendored from vLLM/FlashMLA.
+// This is experimental and currently only wired for DeepSeek V3.2 MLA decode single-token path.
+extern "C" void ggml_cuda_sparse_mla_decode_flashmla_sm100(
+    ggml_backend_cuda_context & ctx,
+    const float * q, const float * k, const float * v, const int32_t * topk,
+    const unsigned char * kv_blob,
+    int D, int Hq, int Hkv, int Dv, int Nkv, int K, float kq_scale, float softcap, float * out);
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -113,6 +121,152 @@ extern "C" void ggml_cuda_sparse_mla_decode_device(ggml_backend_cuda_context & c
 #include <string>
 #include <vector>
 #include "../../include/ggml-cuda-indexer.h"
+
+
+#include <cuda_fp8.h>
+#include <cstring>
+#include <cfloat>
+
+// DeepSeek V3.2 FP8 KV pack (fp8_ds_mla-style) CUDA helpers
+// Layout per entry (656 bytes):
+//   [0..511]   : 512 x FP8 E4M3 codes (latent)
+//   [512..527] : 4 x FP32 tile scales (per 128-dim tile)
+//   [528..655] : 64 x BF16 RoPE values
+
+static __device__ inline uint16_t ggml_cuda_fp32_to_bf16_bits(float x) {
+    // Round-to-nearest-even BF16 conversion
+    uint32_t u = __float_as_uint(x);
+    uint32_t lsb = (u >> 16) & 1u;
+    uint32_t rounding_bias = 0x7FFFu + lsb;
+    u += rounding_bias;
+    return (uint16_t)(u >> 16);
+}
+
+__global__ static void ggml_cuda_kv_dsmla_pack_kernel(
+        const float   * __restrict__ k_lr,   // [D_total, 1, n_tokens]
+        const int64_t * __restrict__ k_idx,  // [n_tokens]
+        uint8_t       * __restrict__ blob,   // [entry_bytes, kv_size, n_stream]
+        int64_t D_total,
+        int64_t D_latent,
+        int64_t D_rope,
+        int64_t entry_bytes,
+        int64_t kv_size,
+        int64_t n_stream,
+        int64_t n_tokens,
+        size_t  nb1,
+        size_t  nb2) {
+    const int64_t lane = blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t stride = blockDim.x * gridDim.x;
+    const int tile_size = 128;
+    const int n_tiles = 4; // D_latent / 128 for DeepSeek V3.2
+
+    for (int64_t t = lane; t < n_tokens; t += stride) {
+        // Source slice for token t
+        const float * base   = k_lr + t * D_total;
+        const float * latent = base;
+        const float * rope   = base + D_latent;
+
+        // Compute per-tile scales (amax/448, clamped to 1e-4)
+        float tile_scales[n_tiles];
+        #pragma unroll
+        for (int tile = 0; tile < n_tiles; ++tile) {
+            float amax = 0.0f;
+            const float * tile_ptr = latent + tile * tile_size;
+            #pragma unroll 1
+            for (int i = 0; i < tile_size; ++i) {
+                float v = fabsf(tile_ptr[i]);
+                if (v > amax) amax = v;
+            }
+            float scale = amax / 448.0f;
+            if (scale < FLT_MIN) scale = FLT_MIN;
+            tile_scales[tile] = scale;
+        }
+
+        // Decode global KV index -> (stream, cell)
+        int64_t gi = k_idx[t];
+        if (gi < 0) continue;
+        int64_t strm = gi / kv_size;
+        int64_t cell = gi % kv_size;
+        if (strm < 0 || strm >= n_stream || cell < 0 || cell >= kv_size) continue;
+
+        uint8_t * dst = blob + cell * nb1 + strm * nb2;
+
+        // Pack latent as FP8 E4M3 using per-tile scales
+        #pragma unroll 1
+        for (int d = 0; d < D_latent; ++d) {
+            int tile = d / tile_size;
+            float scale = tile_scales[tile];
+            float scaled = latent[d] / scale;
+            __nv_fp8_storage_t v = __nv_cvt_float_to_fp8(scaled, __NV_SATFINITE, __NV_E4M3);
+            dst[d] = (uint8_t) v;
+        }
+
+        // Store tile scales as 4 x FP32 at offset 512
+        float * scales_dst = reinterpret_cast<float *>(dst + 512);
+        #pragma unroll
+        for (int tile = 0; tile < n_tiles; ++tile) {
+            scales_dst[tile] = tile_scales[tile];
+        }
+
+        // Pack RoPE tail as 64 x BF16 at offset 528
+        uint16_t * rope_dst = reinterpret_cast<uint16_t *>(dst + 528);
+        #pragma unroll 1
+        for (int i = 0; i < D_rope; ++i) {
+            rope_dst[i] = ggml_cuda_fp32_to_bf16_bits(rope[i]);
+        }
+    }
+}
+
+static void ggml_cuda_kv_dsmla_pack(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    ggml_tensor * k_lr = dst->src[0];   // [D_total,1,n_tokens]
+    ggml_tensor * k_idx = dst->src[1]; // [n_tokens]
+    ggml_tensor * blob  = dst->src[2]; // [entry_bytes, kv_size, n_stream]
+
+    GGML_ASSERT(k_lr && k_idx && blob);
+    GGML_ASSERT(k_lr->type  == GGML_TYPE_F32);
+    GGML_ASSERT(k_idx->type == GGML_TYPE_I64);
+    GGML_ASSERT(blob->type  == GGML_TYPE_I8);
+
+    const int64_t D_total  = k_lr->ne[0];
+    const int64_t n_tokens = k_lr->ne[2];
+    const int64_t D_latent = 512;
+    const int64_t D_rope   = 64;
+    const int64_t entry_bytes = blob->ne[0];
+    const int64_t kv_size     = blob->ne[1];
+    const int64_t n_stream    = blob->ne[2];
+
+    GGML_ASSERT(D_total == D_latent + D_rope);
+    GGML_ASSERT(entry_bytes == 656);
+
+    // Require contiguous layout for k_latent_rope so we can use a simple stride
+    GGML_ASSERT(ggml_is_contiguous(k_lr));
+    GGML_ASSERT(k_lr->ne[1] == 1);
+
+    const float   * dKLR  = (const float *)   k_lr->data;
+    const int64_t * dIdx  = (const int64_t *) k_idx->data;
+    uint8_t       * dBlob = (uint8_t *)       blob->data;
+
+    const size_t nb1 = blob->nb[1];
+    const size_t nb2 = blob->nb[2];
+
+    if (n_tokens <= 0) {
+        return;
+    }
+
+    int block_size = 128;
+    int grid_size  = (int)((n_tokens + block_size - 1) / block_size);
+    if (grid_size < 1) grid_size = 1;
+    if (grid_size > 1024) grid_size = 1024;
+
+    ggml_cuda_kv_dsmla_pack_kernel<<<grid_size, block_size, 0, ctx.stream()>>>(
+        dKLR, dIdx, dBlob,
+        D_total, D_latent, D_rope,
+        entry_bytes, kv_size, n_stream,
+        n_tokens,
+        nb1, nb2);
+
+    CUDA_CHECK(cudaGetLastError());
+}
 
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
@@ -2558,6 +2712,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_OPT_STEP_SGD:
             ggml_cuda_opt_step_sgd(ctx, dst);
             break;
+        case GGML_OP_KV_DSMLA_PACK:
+            ggml_cuda_kv_dsmla_pack(ctx, dst);
+            break;
         case GGML_OP_SPARSE_TOPK_RADIX:
             {
                 ggml_tensor * scores = dst->src[0];
@@ -2969,14 +3126,75 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 ggml_cuda_pool_alloc<float> vtmp(ctx.pool(ggml_cuda_get_device()), (size_t)Dv*Hkv*Nkv);
                 const to_fp32_cuda_t to_v = ggml_get_to_fp32_cuda(vc->type);
                 if (to_v) { to_v((const void *)vc->data, (float *)vtmp.get(), (size_t)Dv*Hkv*Nkv, ctx.stream()); }
-                else { CUDA_CHECK(cudaMemcpyAsync((void*)vtmp.get(), vc->data, sizeof(float)*(size_t)Dv*Hkv*Nkv, cudaMemcpyDeviceToDevice, ctx.stream())); }
+                else {
+                    CUDA_CHECK(cudaMemcpyAsync((void*)vtmp.get(), vc->data, sizeof(float)*(size_t)Dv*Hkv*Nkv, cudaMemcpyDeviceToDevice, ctx.stream()));
+                }
                 auto * __prof_env3 = getenv("LLAMA_SPARSE_PROF");
-                cudaEvent_t __m0, __m1; bool __do_prof3 = false; float __ms3 = 0.0f;
-                if (__prof_env3 && *__prof_env3) { cudaEventCreate(&__m0); cudaEventCreate(&__m1); __do_prof3 = true; cudaEventRecord(__m0, ctx.stream()); }
-                ggml_cuda_sparse_mla_decode_device(ctx, (const float*)qtmp.get(), (const float*)ktmp.get(), (const float*)vtmp.get(), (const int32_t*)idx->data,
-                                                   Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
+                auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
+                cudaEvent_t __m0, __m1;
+                bool __do_prof3 = false;
+                float __ms3 = 0.0f;
+                if (__prof_env3 && *__prof_env3) {
+                    cudaEventCreate(&__m0);
+                    cudaEventCreate(&__m1);
+                    __do_prof3 = true;
+                    cudaEventRecord(__m0, ctx.stream());
+                }
+
+                const char * flashmla_env = getenv("LLAMA_SPARSE_MLA_FLASHMLA");
+                bool use_flashmla = (flashmla_env && atoi(flashmla_env) != 0);
+                // First experimental wiring: only for single-token decode on DeepSeek V3.2 shapes.
+                bool can_use_flashmla = use_flashmla && (Hkv == 1) && (idx->ne[1] == 1) && (q2d->ne[2] == 1) && (q2d->ne[3] == 1);
+                const unsigned char * kv_blob = nullptr;
+                if (dst->src[4] && dst->src[4]->type == GGML_TYPE_I8) {
+                    kv_blob = (const unsigned char *) dst->src[4]->data;
+                }
+                if (can_use_flashmla && kv_blob) {
+                    ggml_cuda_sparse_mla_decode_flashmla_sm100(
+                        ctx,
+                        (const float*)qtmp.get(),
+                        (const float*)ktmp.get(),
+                        (const float*)vtmp.get(),
+                        (const int32_t*)idx->data,
+                        kv_blob,
+                        Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
+                } else {
+                    ggml_cuda_sparse_mla_decode_device(
+                        ctx,
+                        (const float*)qtmp.get(),
+                        (const float*)ktmp.get(),
+                        (const float*)vtmp.get(),
+                        (const int32_t*)idx->data,
+                        Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
+                }
                 CUDA_CHECK(cudaGetLastError());
-                if (__do_prof3) { cudaEventRecord(__m1, ctx.stream()); cudaEventSynchronize(__m1); cudaEventElapsedTime(&__ms3, __m0, __m1); cudaEventDestroy(__m0); cudaEventDestroy(__m1); static int __cnt_mla = 0; static double __sum_mla = 0.0; __sum_mla += __ms3; __cnt_mla++; if (__cnt_mla % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d avg_ms=%.3f over 50 calls\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__sum_mla/50.0)); __sum_mla = 0.0; } }
+                if (__do_prof3) {
+                    cudaEventRecord(__m1, ctx.stream());
+                    cudaEventSynchronize(__m1);
+                    cudaEventElapsedTime(&__ms3, __m0, __m1);
+                    cudaEventDestroy(__m0);
+                    cudaEventDestroy(__m1);
+                    static int __cnt_mla = 0;
+                    static double __sum_mla = 0.0;
+                    __sum_mla += __ms3;
+                    __cnt_mla++;
+                    if (__prof_each_env && *__prof_each_env) {
+                        if (use_flashmla) {
+                            fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE_FLASHMLA D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d ms=%.3f\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__ms3));
+                        } else {
+                            fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d ms=%.3f\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__ms3));
+                        }
+                    } else {
+                        if (__cnt_mla % 50 == 0) {
+                            if (use_flashmla) {
+                                fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE_FLASHMLA D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d avg_ms=%.3f over 50 calls\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__sum_mla/50.0));
+                            } else {
+                                fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d avg_ms=%.3f over 50 calls\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__sum_mla/50.0));
+                            }
+                            __sum_mla = 0.0;
+                        }
+                    }
+                }
             }
             break;
 
@@ -3878,6 +4096,19 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 if (a->ne[2] != 1 || a->ne[3] != 1) return false;
                 if (op->ne[2] != 1 || op->ne[3] != 1) return false;
                 return ggml_is_contiguous(a);
+            } break;
+        case GGML_OP_KV_DSMLA_PACK:
+            {
+                const struct ggml_tensor * k_lr  = op->src[0];
+                const struct ggml_tensor * k_idx = op->src[1];
+                const struct ggml_tensor * blob  = op->src[2];
+                if (!k_lr || !k_idx || !blob) return false;
+                if (k_lr->type  != GGML_TYPE_F32) return false;
+                if (k_idx->type != GGML_TYPE_I64) return false;
+                if (blob->type  != GGML_TYPE_I8)  return false;
+                if (!ggml_is_contiguous(k_lr)) return false;
+                if (k_lr->ne[1] != 1) return false;
+                return true;
             } break;
         case GGML_OP_GLU:
             switch (ggml_get_glu_op(op)) {

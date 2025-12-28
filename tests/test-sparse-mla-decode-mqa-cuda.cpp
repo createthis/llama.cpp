@@ -54,8 +54,8 @@ int main(){
     printf("CUDA not enabled; skipping sparse mla decode MQA test\n");
     return 0;
 #else
-    // MQA/GQA repro: Hq != Hkv
-    const int D=128, Hq=8, Hkv=1, Dv=128, N=1024, Ksel=64;
+    // MQA/GQA repro: Hq != Hkv; DeepSeek V3.2 MLA head sizes (D=576, Dv=512)
+    const int D=576, Hq=8, Hkv=1, Dv=512, N=1024, Ksel=64;
     float kq_scale = 1.0f; float softcap = 0.0f;
     std::mt19937 rng(123); std::uniform_real_distribution<float> dist(-1.0f,1.0f);
 

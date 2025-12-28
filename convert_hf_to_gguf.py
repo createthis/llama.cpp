@@ -854,6 +854,12 @@ class TextModel(ModelBase):
             res = "deepseek-r1-qwen"
         if chkhsh == "877081d19cf6996e2c4ff0e1236341e9b7bde288f5311a56a937f0afbbb3aeb5":
             # ref: https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Exp
+            res = "deepseek-v3.2-exp"
+        if chkhsh == "877081d19cf6996e2c4ff0e1236341e9b7bde288f5311a56a937f0afbbb3aeb5":
+            # ref: https://huggingface.co/deepseek-ai/DeepSeek-V3.2
+            res = "deepseek-v3.2"
+        if chkhsh == "b4b8ca1f9769494fbd956ebc4c249de6131fb277a4a3345a7a92c7dd7a55808d":
+            # ref: https://huggingface.co/deepseek-ai/DeepSeek-V3.2
             res = "deepseek-v3.2"
         if chkhsh == "ccc2ef013c104be7bae2965776d611e1d7a8a2a9c547dd93a682c9a9fc80352e":
             # ref: https://huggingface.co/Xenova/gpt-4o

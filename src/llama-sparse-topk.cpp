@@ -194,6 +194,12 @@ static void radix_topk_custom(ggml_tensor * dst, int ith, int nth, void * userda
 
 namespace llama {
 
+static indexer_fused_hook_t g_indexer_fused_hook = nullptr;
+
+void set_indexer_fused_hook(indexer_fused_hook_t hook) {
+    g_indexer_fused_hook = hook;
+}
+
 static inline int find_last_unmasked(const float * col, int N, size_t nb0) {
     // col is [N] as a column with row stride nb0; return last index+1 where value > -1e29
     for (int i = N-1; i >= 0; --i) {
@@ -429,14 +435,15 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
         fflush(stdout);
     }
 
-    // K-scale proxy: RMS over D for each KV column
-    ggml_tensor * k_sqr = ggml_sqr(ctx, k_indexer);                  // [D, N_kv]
-    ggml_tensor * k_sum = ggml_sum_rows(ctx, k_sqr);                  // [1, N_kv]
-    ggml_tensor * k_mean = ggml_scale(ctx, k_sum, 1.0f / (float) D);  // [1, N_kv]
-    ggml_tensor * k_scale_vec = ggml_sqrt(ctx, k_mean);               // [1, N_kv]
-    ggml_tensor * k_scale_2d = ggml_transpose(ctx, k_scale_vec);      // [N_kv, 1]
+    // K-scale: the fused CUDA indexer kernels already apply the per-row FP8 dequant scales (K_sf).
+    // DeepSeek V3.2 does not have an additional learned per-KV scale here, so pass ones.
+    ggml_tensor * one = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    ggml_set_input(one);
+    ggml_set_name(one, "idxkv_one");
+    ggml_tensor * k_scale_2d = ggml_repeat_4d(ctx, one, N_kv, 1, 1, 1);
+    k_scale_2d = ggml_reshape_2d(ctx, k_scale_2d, N_kv, 1);
     k_scale_2d = ggml_cont(ctx, k_scale_2d);
-    cb(k_scale_2d, "idxkv_k_scale_proxy", -1);
+    cb(k_scale_2d, "idxkv_k_scale_ones", -1);
 
     ggml_tensor * result = nullptr; // [k, T]
     for (int64_t t0 = 0; t0 < T; t0 += TILE_T) {
@@ -527,7 +534,27 @@ ggml_tensor * sparse_attn_topk::select_topk_tokens_indexer_kvaware(
                     scores_tc = build_indexer_fused_logits(ctx, q_tile2d, k_slice, w_slice, ks_head);
                 }
 
-                if (dbg && t0 == 0) {
+                // Optional fused-glue hook for debugging/testing the fused indexer inputs
+                if (g_indexer_fused_hook) {
+                    ggml_tensor * hooked = g_indexer_fused_hook(
+                        ctx,
+                        q_tile2d,
+                        k_slice,
+                        w_slice,
+                        ks_head,
+                        k_indexer_fp8_sidecar,
+                        t0,
+                        Tc,
+                        /*kv_start=*/0,
+                        kv_end,
+                        quant_bs,
+                        cache_block_size,
+                        cache_stride);
+                    (void) hooked;
+                }
+
+                // Disabled in production builds: CPU reference indexer scores cause segfault when tensors lack host data
+                if (false && dbg && t0 == 0) {
                     ggml_tensor * ref_scores = llama::sparse_attn_indexer::idx_compute_scores_tile(ctx, q3d, k_indexer_f16, weights, k_scale_2d, D, H, Tc, kv_end, t0);
                     ggml_tensor * ref_head = ggml_view_2d(ctx, ref_scores, std::min<int64_t>(kv_end, (int64_t)8), std::min<int64_t>(Tc, (int64_t)4), ref_scores->nb[1], 0);
                     cb(ref_head, "idxkv_scores_ref_head", -1);
@@ -786,18 +813,33 @@ ggml_tensor * llama::sparse_attn_topk::derive_kv_windows(ggml_context * ctx, ggm
     // Compute starts=0 and ends per token as last unmasked+1
     ggml_tensor * starts = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
     ggml_tensor * ends   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
-    // Copy mask to host buffer and compute ends
-    std::vector<float> mask_host((size_t)N_kv * T);
-    ggml_backend_tensor_get(kq_mask, mask_host.data(), 0, ggml_nbytes(kq_mask));
     // Fill starts with zeros
-    for (int64_t t = 0; t < T; ++t) { ((int32_t*)starts->data)[t] = 0; }
-    // ends per column
     for (int64_t t = 0; t < T; ++t) {
-        const float * col = (const float *)((const char*)kq_mask->data + (size_t)t*kq_mask->nb[1]);
-        int e = find_last_unmasked(col, (int)N_kv, kq_mask->nb[0]);
-        ((int32_t*)ends->data)[t] = e;
+        ((int32_t*) starts->data)[t] = 0;
     }
-    *out_starts = starts; *out_ends = ends;
+
+    // If the mask is device-backed, copy the first N_kv*T entries to a host
+    // buffer as row-major [N_kv, T]. Otherwise, read directly from the host
+    // tensor using its nb[] strides.
+    if (kq_mask->buffer && !ggml_backend_buffer_is_host(kq_mask->buffer)) {
+        std::vector<float> mask_host((size_t) N_kv * T);
+        const size_t bytes = (size_t) N_kv * T * sizeof(float);
+        ggml_backend_tensor_get(kq_mask, mask_host.data(), 0, bytes);
+        for (int64_t t = 0; t < T; ++t) {
+            const float * col = mask_host.data() + (size_t) t * N_kv;
+            int e = find_last_unmasked(col, (int) N_kv, sizeof(float));
+            ((int32_t*) ends->data)[t] = e;
+        }
+    } else {
+        for (int64_t t = 0; t < T; ++t) {
+            const float * col = (const float *) ((const char *) kq_mask->data + (size_t) t * kq_mask->nb[1]);
+            int e = find_last_unmasked(col, (int) N_kv, kq_mask->nb[0]);
+            ((int32_t*) ends->data)[t] = e;
+        }
+    }
+
+    *out_starts = starts;
+    *out_ends   = ends;
     return starts;
 }
 } // namespace llama

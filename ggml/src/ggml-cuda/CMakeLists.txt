@@ -48,6 +48,7 @@ if (CUDAToolkit_FOUND)
     list(APPEND GGML_SOURCES_CUDA "vllm_topk_per_row.cu")
     list(APPEND GGML_SOURCES_CUDA "fp8_indexer_cache.cu")
     list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "ggml-cuda-deepgemm\.cu$")
+    list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "indexer-fp8-tc\.cu$")
     list(APPEND GGML_SOURCES_CUDA "topk-radix.cu" indexer-fused.cu sparse-mla-decode.cu)
 
     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
@@ -77,6 +78,28 @@ if (CUDAToolkit_FOUND)
 
     list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "mqa_attn_return_logits_kernel\\.cu$")
 
+    
+
+    # FlashMLA sparse FP8 MLA decode (SM100/SM120) as an OBJECT library (experimental)
+    add_library(flashmla_sparse_kernels OBJECT
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/flashmla/smxx/get_mla_metadata.cu
+    )
+    # Compile these kernels for SM120A (Blackwell / TCGen05), same as DeepGEMM and lightning kernels.
+    set_property(TARGET flashmla_sparse_kernels PROPERTY CUDA_ARCHITECTURES "120a")
+    set_property(TARGET flashmla_sparse_kernels PROPERTY POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(flashmla_sparse_kernels PRIVATE
+        ${CMAKE_SOURCE_DIR}/ggml/include
+        ${CMAKE_SOURCE_DIR}/ggml/src
+        ${CMAKE_SOURCE_DIR}/ggml/src/ggml-cuda
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/flashmla
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/flashmla/sm100
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/flashmla/smxx
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/cutlass/include
+    )
+    target_compile_options(flashmla_sparse_kernels PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --expt-extended-lambda --use_fast_math>)
+    target_sources(ggml-cuda PRIVATE $<TARGET_OBJECTS:flashmla_sparse_kernels>)
+
     # DeepGEMM FP8 paged MQA logits (SM100-style) as a separate OBJECT library
     add_library(deepgemm_kernels OBJECT
         ${CMAKE_CURRENT_SOURCE_DIR}/ggml-cuda-deepgemm.cu
@@ -96,6 +119,24 @@ if (CUDAToolkit_FOUND)
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     # Inject the compiled objects into ggml-cuda
     target_sources(ggml-cuda PRIVATE $<TARGET_OBJECTS:deepgemm_kernels>)
+
+    # Dedicated FP8 TC indexer kernel (DeepSeek V3.2) as an OBJECT library,
+    # compiled only for Blackwell/TCGen05-style architectures (SM120A).
+    add_library(indexer_fp8_tc_kernels OBJECT
+        ${CMAKE_CURRENT_SOURCE_DIR}/indexer-fp8-tc.cu
+    )
+    set_property(TARGET indexer_fp8_tc_kernels PROPERTY CUDA_ARCHITECTURES "120a")
+    set_property(TARGET indexer_fp8_tc_kernels PROPERTY POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(indexer_fp8_tc_kernels PRIVATE
+        ${CMAKE_SOURCE_DIR}/ggml/include
+        ${CMAKE_SOURCE_DIR}/ggml/src
+        ${CMAKE_SOURCE_DIR}/ggml/src/ggml-cuda
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/tilelang/fp8_lightning_indexer
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendors/cutlass/include
+    )
+    target_compile_options(indexer_fp8_tc_kernels PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --expt-extended-lambda --use_fast_math>)
+    target_sources(ggml-cuda PRIVATE $<TARGET_OBJECTS:indexer_fp8_tc_kernels>)
 
     # Build the Lightning Indexer kernel as its own OBJECT library so we can
     # give it a different CUDA arch than the rest of the project.

@@ -227,6 +227,8 @@ target_link_libraries(${TEST_TARGET} PRIVATE llama)
 llama_build_and_test(test-alloc.cpp)
 target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
 
+# FP8 KV DSMLA roundtrip test for DeepSeek V3.2
+llama_build_and_test(test-fp8-kv-dsmla.cpp)
 
 # Unit test for sparse_attn_indexer::idx_compute_scores_tile
 llama_build_and_test(test-indexer-scores-tile.cpp)
@@ -234,6 +236,11 @@ target_include_directories(test-indexer-scores-tile PRIVATE ${PROJECT_SOURCE_DIR
 # Sparse attention tests
 llama_build_and_test(test-sparse-attn.cpp)
 target_include_directories(test-sparse-attn PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
+
+# Synthetic KV windowing / mask semantics test for DeepSeek V3.2
+llama_build_and_test(test-sparse-kv-windowing.cpp)
+
+llama_build_and_test(test-sparse-kv-partition.cpp)
 
 # Reproducer for no_alloc sparse indexer crash
 llama_build_and_test(test-sparse-attn-noalloc.cpp)
@@ -251,7 +258,9 @@ if (GGML_CUDA)
     llama_build_and_test(test-sparse-topk-radix-stress-cuda.cpp)
     llama_build_and_test(test-sparse-topk-op-cuda.cpp)
     llama_build_and_test(test-indexer-fused-op-cuda.cpp)
+    llama_build_and_test(test-indexer-qscale-saturation-cuda.cpp)
     llama_build_and_test(test-indexer-k-cache-fp8.cpp)
+    llama_build_and_test(test-indexer-fp8-fused-glue.cpp)
     find_package(CUDAToolkit)
     llama_build_and_test(test-fp8-e4m3-cutlass-vs-cpu.cpp)
     target_include_directories(test-fp8-e4m3-cutlass-vs-cpu PRIVATE
@@ -263,6 +272,13 @@ if (GGML_CUDA)
 endif()
 
 llama_build_and_test(test-sparse-mla-decode-cuda.cpp)
+llama_build_and_test(test-sparse-mla-fused-glue.cpp)
+
+# DeepSeek V3.2 indexer DSA equation vs naive CPU reference
+llama_build_and_test(test-indexer-dsa-cpu.cpp)
+
+# Multi-token sparse MLA glue math test (non-fused path, CPU)
+llama_build_and_test(test-sparse-mla-glue-ds32.cpp)
 
 
 if (GGML_CUDA)

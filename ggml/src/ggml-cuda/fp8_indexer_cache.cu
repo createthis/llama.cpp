@@ -1,5 +1,6 @@
 #include "common.cuh"
 #include <cuda_fp16.h>
+#include <cmath>
 // FP8 indexer K cache quantization for DeepSeek V3.2.
 // Layout matches vLLM's DeepseekV32IndexerCache indexer_k_quant_and_cache:
 //   kv_cache: [num_blocks, cache_block_size, cache_stride]
@@ -34,60 +35,71 @@ __global__ void k_indexer_fp8_quant_and_cache_kernel(
     int quant_bs,
     int cache_block_size,
     int cache_stride) {
-    constexpr int VEC_SIZE = 4; // we process 4 floats (16B) at a time
-    const int64_t token_idx = blockIdx.x;
-    const int64_t head_dim_idx =
-        (blockIdx.y * blockDim.y * blockDim.x +
-         threadIdx.y * blockDim.x + threadIdx.x) * VEC_SIZE;
-    if (head_dim_idx >= head_dim) return;
+    // One warp processes one (token, quant_block) along head_dim.
+    // quant_bs is in bytes (== elements) for FP8 codes.
+    constexpr int VEC_SIZE = 4; // 4 floats per lane
+
+    const int64_t token_idx = (int64_t) blockIdx.x;
     const int64_t slot = slot_map[token_idx];
-    if (slot < 0) return; // padded token
+    if (slot < 0) return;
+
     const int64_t block_idx    = slot / cache_block_size;
     const int64_t block_offset = slot % cache_block_size;
-    // Load a vector of VEC_SIZE values from K
-    const int64_t k_offset_vec = (token_idx * (int64_t) head_dim + head_dim_idx) / VEC_SIZE;
-    float2 packed = reinterpret_cast<const float2*>(k)[k_offset_vec];
-    float *vals = reinterpret_cast<float*>(&packed);
-    // Compute local amax over this vector
+
+    const int64_t blocks_per_row = (head_dim + quant_bs - 1) / quant_bs;
+    const int64_t qblk = (int64_t) blockIdx.y;
+    if (qblk >= blocks_per_row) return;
+
+    const int64_t block_start = qblk * (int64_t) quant_bs;
+    const int64_t lane = (int64_t) (threadIdx.x & 31);
+
+    float v[VEC_SIZE] = {0.f, 0.f, 0.f, 0.f};
+    #pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+        const int64_t in_block = lane * VEC_SIZE + i;
+        const int64_t d = block_start + in_block;
+        if (in_block < quant_bs && d < head_dim) {
+            v[i] = k[token_idx * (int64_t) head_dim + d];
+        }
+    }
+
     float amax = 0.0f;
     #pragma unroll
     for (int i = 0; i < VEC_SIZE; ++i) {
-        amax = fmaxf(amax, fabsf(vals[i]));
+        amax = fmaxf(amax, fabsf(v[i]));
     }
+
 #if __CUDA_ARCH__ >= 700
-    // Warp-wide reduction of amax within this quant block.
     for (int mask = 16; mask > 0; mask >>= 1) {
-    #ifdef USE_ROCM
+#ifdef USE_ROCM
         amax = fmaxf(amax, __shfl_xor_sync(uint64_t(-1), amax, mask));
-    #else
+#else
         amax = fmaxf(amax, __shfl_xor_sync(unsigned(-1), amax, mask));
-    #endif
+#endif
     }
 #endif
+
     float scale = fmaxf(amax, 1e-4f) / 448.0f;
-    // Base offset of this block in kv_cache
-    const int64_t block_base =
-        block_idx * (int64_t) cache_block_size * cache_stride;
-    // FP8 values region: [cache_block_size * head_dim] bytes per block
-    const int64_t vals_base = block_base + block_offset * (int64_t) head_dim;
-    const int64_t dst_offset = vals_base + head_dim_idx;
+    scale = exp2f(ceilf(log2f(scale)));
+
+    const int64_t block_base = block_idx * (int64_t) cache_block_size * cache_stride;
+    const int64_t vals_base  = block_base + block_offset * (int64_t) head_dim;
+
     #pragma unroll
     for (int i = 0; i < VEC_SIZE; ++i) {
-        if (head_dim_idx + i < head_dim) {
-            float v = vals[i];
-            float scaled = v / scale;
-            uint8_t code = f32_to_fp8e4m3(scaled);
-            kv_cache[dst_offset + i] = code;
+        const int64_t in_block = lane * VEC_SIZE + i;
+        const int64_t d = block_start + in_block;
+        if (in_block < quant_bs && d < head_dim) {
+            kv_cache[vals_base + d] = f32_to_fp8e4m3(v[i] / scale);
         }
     }
-    // Write FP32 scale for this quant block. The block index along head_dim is
-    // (block_offset * head_dim + head_dim_idx) / quant_bs.
-    if (threadIdx.x == 0 && threadIdx.y == 0) {
-        const int64_t block_linear = block_offset * (int64_t) head_dim + head_dim_idx;
-        const int64_t scale_block_idx = block_linear / quant_bs;
+
+    if (lane == 0) {
         const int64_t scales_base = block_base + (int64_t) cache_block_size * head_dim;
-        const int64_t scale_byte_offset = scales_base + scale_block_idx * 4; // 4 bytes per FP32 scale
-        *reinterpret_cast<float*>(&kv_cache[scale_byte_offset]) = scale;
+        const int64_t scale_block_idx = block_offset * blocks_per_row + qblk;
+        const int64_t scale_byte_offset = scales_base + scale_block_idx * 4;
+        *reinterpret_cast<float *>(&kv_cache[scale_byte_offset]) = scale;
+
     }
 }
 } // namespace ggml_cuda_fp8_indexer
@@ -102,10 +114,8 @@ extern "C" void ggml_cuda_indexer_k_cache_fp8_quantize(
     int cache_block_size,
     int cache_stride) {
     cudaStream_t stream = ctx.stream();
-    constexpr int VEC_SIZE = 4;
-    dim3 grid(num_tokens,
-              (head_dim + quant_bs * VEC_SIZE - 1) / (quant_bs * VEC_SIZE));
-    dim3 block(32, VEC_SIZE);
+    dim3 grid(num_tokens, (head_dim + quant_bs - 1) / quant_bs);
+    dim3 block(32, 1);
     ggml_cuda_fp8_indexer::k_indexer_fp8_quant_and_cache_kernel<<<grid, block, 0, stream>>>(
         dK, dKvCache, dSlotMap, head_dim, quant_bs, cache_block_size, cache_stride);
 }

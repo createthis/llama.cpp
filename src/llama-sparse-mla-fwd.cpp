@@ -5,6 +5,13 @@
 #include <cinttypes>
 namespace llama {
 using std::function;
+
+static sparse_mla_fused_hook_t g_sparse_mla_fused_hook = nullptr;
+
+void set_sparse_mla_fused_hook(sparse_mla_fused_hook_t hook) {
+    g_sparse_mla_fused_hook = hook;
+}
+
   ggml_tensor * sparse_mla_fwd::apply_sparse_attention_kvaware(
       ggml_context * ctx,
       ggml_tensor * q_cur,
@@ -16,6 +23,7 @@ using std::function;
       float kq_scale,
       ggml_tensor * kq_mask,
       float attn_softcap,
+      ggml_tensor * kv_dsmla_blob,
       const function<void(ggml_tensor *, const char *, int)> & cb) {
       (void)n_tokens;
       int64_t Dk   = k_cache->ne[0];
@@ -72,6 +80,26 @@ using std::function;
           ggml_tensor * idx0_1d = ggml_reshape_1d(ctx, idx0_2d, top_k);
           // Call fused decode: returns [Dv, Hq]
           ggml_tensor * out2d = ggml_sparse_mla_decode_fused(ctx, q_t_2d2, k_cache, V_gather_src, idx0_1d, kq_scale, attn_softcap);
+          // Attach optional DS-MLA FP8 KV blob for FlashMLA-backed decode
+          if (kv_dsmla_blob) {
+              out2d->src[4] = kv_dsmla_blob;
+          }
+          if (g_sparse_mla_fused_hook) {
+              ggml_tensor * replaced = g_sparse_mla_fused_hook(
+                  ctx,
+                  out2d,
+                  q_t_2d2,
+                  k_cache,
+                  v_cache,
+                  V_gather_src,
+                  idx0_1d,
+                  kq_scale,
+                  attn_softcap,
+                  kv_dsmla_blob);
+              if (replaced) {
+                  out2d = replaced;
+              }
+          }
           ggml_tensor * out3d = ggml_reshape_3d(ctx, out2d, Dv, Hq, 1);
           cb(out3d, "kvaware_sparse_attn_out", -1);
           return out3d;
