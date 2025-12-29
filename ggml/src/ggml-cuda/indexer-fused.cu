@@ -95,7 +95,16 @@ static inline bool dg_fp8_encode_tma_3d(
 #include "../../include/ggml-cuda-indexer.h"
 
 struct fp8_e4_t;
-extern "C" int call(fp8_e4_t* __restrict__ IndexQ, fp8_e4_t* __restrict__ IndexK, float* __restrict__ IndexKScale, float* __restrict__ Logits, float* __restrict__ Weights, int* __restrict__ CuSeqLenKS, int* __restrict__ CuSeqLenKE, int seq_len_kv, int seq_len, cudaStream_t stream);
+extern "C" int call(const fp8_e4_t* IndexQ,
+                    const fp8_e4_t* IndexK,
+                    const float* IndexKScale,
+                    float* Logits,
+                    const float* Weights,
+                    const int* CuSeqLenKS,
+                    const int* CuSeqLenKE,
+                    int seq_len_kv, int seq_len,
+                    int num_q_heads,
+                    cudaStream_t stream=cudaStreamDefault);
 extern "C" int init();
 extern "C" const char* get_last_error();
 
@@ -113,22 +122,31 @@ static __device__ __forceinline__ void cp_async_16B_issue_all(void* __restrict__
 #ifndef LAUNCH_PROFILE_KERNEL
 #define LAUNCH_PROFILE_KERNEL(TAG_STR, TAGNAME, STREAM, LAUNCH_STMT, D_, H_, Tc_, KV_) do { \
     if (__prof_env && *__prof_env) { \
-        cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1); \
-        cudaEventRecord(__e0, STREAM); \
-        LAUNCH_STMT; \
-        cudaEventRecord(__e1, STREAM); \
-        cudaEventSynchronize(__e1); \
-        float __ms = 0.0f; cudaEventElapsedTime(&__ms, __e0, __e1); \
-        cudaEventDestroy(__e0); cudaEventDestroy(__e1); \
-        static int __cnt_##TAGNAME = 0; \
-        static double __sum_##TAGNAME = 0.0; \
-        __sum_##TAGNAME += __ms; \
-        __cnt_##TAGNAME++; \
-        if (__prof_each_env && *__prof_each_env) { \
-            fprintf(stderr, "[" TAG_STR "] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d ms=%.3f\n", D_, H_, Tc_, KV_, __ms); \
-        } else if (__cnt_##TAGNAME % 50 == 0) { \
-            fprintf(stderr, "[" TAG_STR "] TILELANG_INDEXER D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n", D_, H_, Tc_, KV_, (float)(__sum_##TAGNAME/50.0)); \
-            __sum_##TAGNAME = 0.0; \
+        cudaStreamCaptureStatus __cap_status = cudaStreamCaptureStatusNone; \
+        unsigned long long __cap_id = 0; \
+        cudaError_t __cap_err = cudaStreamGetCaptureInfo_v2( \
+            STREAM, &__cap_status, &__cap_id, nullptr, nullptr, nullptr); \
+        bool __capturing = (__cap_err == cudaSuccess && __cap_status != cudaStreamCaptureStatusNone); \
+        if (__capturing) { \
+            LAUNCH_STMT; \
+        } else { \
+            cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1); \
+            cudaEventRecord(__e0, STREAM); \
+            LAUNCH_STMT; \
+            cudaEventRecord(__e1, STREAM); \
+            cudaEventSynchronize(__e1); \
+            float __ms = 0.0f; cudaEventElapsedTime(&__ms, __e0, __e1); \
+            cudaEventDestroy(__e0); cudaEventDestroy(__e1); \
+            static int __cnt_##TAGNAME = 0; \
+            static double __sum_##TAGNAME = 0.0; \
+            __sum_##TAGNAME += __ms; \
+            __cnt_##TAGNAME++; \
+            if (__prof_each_env && *__prof_each_env) { \
+                fprintf(stderr, "[" TAG_STR "] INDEXER D=%d H=%d Tc=%d kv=%d ms=%.3f\n", D_, H_, Tc_, KV_, __ms); \
+            } else if (__cnt_##TAGNAME % 50 == 0) { \
+                fprintf(stderr, "[" TAG_STR "] INDEXER D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n", D_, H_, Tc_, KV_, (float)(__sum_##TAGNAME/50.0)); \
+                __sum_##TAGNAME = 0.0; \
+            } \
         } \
     } else { \
         LAUNCH_STMT; \
@@ -1503,6 +1521,18 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         ggml_cuda_pool & __pool = ctx.pool(ggml_cuda_get_device());
           bool use_tma_fp8 = false;
           if (const char *e = getenv("LLAMA_TL_FP8"); e && atoi(e) != 0) use_tma_fp8 = true;
+          // If the current CUDA stream is participating in graph capture, the
+          // TileLang FP8 path is not capture-safe (it uses driver APIs and
+          // dynamic shared-memory configuration). In that case, fall back to
+          // the non-FP8 TL kernel to avoid illegal memory access or
+          // cudaErrorStreamCaptureUnsupported during graph execution.
+          cudaStreamCaptureStatus cap_status = cudaStreamCaptureStatusNone;
+          unsigned long long cap_id = 0;
+          if (cudaStreamGetCaptureInfo_v2(stream, &cap_status, &cap_id, nullptr, nullptr, nullptr) == cudaSuccess) {
+              if (cap_status == cudaStreamCaptureStatusActive || cap_status == cudaStreamCaptureStatusInvalidated) {
+                  use_tma_fp8 = false;
+              }
+          }
           // Prepare starts/ends (CuSeqLenKS/KE). If provided by caller via GGML op src[4]/src[5],
           // use them; otherwise synthesize [0, kv_end) per token.
           ggml_cuda_pool_alloc<int> __KS_i(__pool, (size_t)Tc);
@@ -1684,7 +1714,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                                                    dIdxKScale,
                                                    dLogits, dWrm,
                                                    dKS_i, dKE_i,
-                                                   kv_end, Tc, stream);
+                                                   kv_end, Tc, H, stream);
                           })(), D, H, Tc, kv_end);
               if (__tl_call_status != 0) {
                   const char * __err = get_last_error();
@@ -1766,7 +1796,17 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
               k_transpose_TcKv_to_KvTc<<<tgrid, tblock, 0, stream>>>(dLogits, Tc, kv_end, dOut);
               CUDA_CHECK(cudaGetLastError());
           }
-          cudaStreamSynchronize(stream);
+          // Avoid cudaStreamSynchronize when the stream is being captured for
+          // a CUDA graph; this is not graph-safe and triggers
+          // cudaErrorStreamCaptureUnsupported. The graph scheduler will
+          // handle stream synchronization at the graph level.
+          cudaStreamCaptureStatus cap_status_sync = cudaStreamCaptureStatusNone;
+          unsigned long long cap_id_sync = 0;
+          if (cudaStreamGetCaptureInfo_v2(stream, &cap_status_sync, &cap_id_sync,
+                                          nullptr, nullptr, nullptr) != cudaSuccess ||
+              cap_status_sync == cudaStreamCaptureStatusNone) {
+              cudaStreamSynchronize(stream);
+          }
           if (dStarts_tmp) cudaFree(dStarts_tmp);
           if (dEnds_tmp) cudaFree(dEnds_tmp);
           return;
