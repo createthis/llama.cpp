@@ -1521,18 +1521,6 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
         ggml_cuda_pool & __pool = ctx.pool(ggml_cuda_get_device());
           bool use_tma_fp8 = false;
           if (const char *e = getenv("LLAMA_TL_FP8"); e && atoi(e) != 0) use_tma_fp8 = true;
-          // If the current CUDA stream is participating in graph capture, the
-          // TileLang FP8 path is not capture-safe (it uses driver APIs and
-          // dynamic shared-memory configuration). In that case, fall back to
-          // the non-FP8 TL kernel to avoid illegal memory access or
-          // cudaErrorStreamCaptureUnsupported during graph execution.
-          cudaStreamCaptureStatus cap_status = cudaStreamCaptureStatusNone;
-          unsigned long long cap_id = 0;
-          if (cudaStreamGetCaptureInfo_v2(stream, &cap_status, &cap_id, nullptr, nullptr, nullptr) == cudaSuccess) {
-              if (cap_status == cudaStreamCaptureStatusActive || cap_status == cudaStreamCaptureStatusInvalidated) {
-                  use_tma_fp8 = false;
-              }
-          }
           // Prepare starts/ends (CuSeqLenKS/KE). If provided by caller via GGML op src[4]/src[5],
           // use them; otherwise synthesize [0, kv_end) per token.
           ggml_cuda_pool_alloc<int> __KS_i(__pool, (size_t)Tc);
@@ -1748,7 +1736,7 @@ extern "C" void ggml_cuda_indexer_logits_fused_device(ggml_backend_cuda_context 
                   std::vector<float> hQrm((size_t)(Tc*H)*(size_t)D);
                   cudaMemcpy(hQrm.data(), dQrm, hQrm.size()*sizeof(float), cudaMemcpyDeviceToHost);
                   int maxd = D < 8 ? D : 8;
-                  fprintf(stderr, "[TL_FP8_DBG] Qrm[0,0..%d]:", maxd-1);
+                  fprintf(stderr, "[TL_FP8_DBG] Qrm2[0,0..%d]:", maxd-1);
                   for (int d0 = 0; d0 < maxd; ++d0) fprintf(stderr, " % .6f", hQrm[d0]);
                   fprintf(stderr, "\n");
               }
