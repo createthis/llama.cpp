@@ -837,6 +837,33 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
     if (copy_event != nullptr) {
         CUDA_CHECK(cudaEventDestroy(copy_event));
     }
+    if (vllm_topk_ws.d_row_starts) {
+        CUDA_CHECK(cudaFree(vllm_topk_ws.d_row_starts));
+        vllm_topk_ws.d_row_starts = nullptr;
+    }
+    if (vllm_topk_ws.d_row_ends) {
+        CUDA_CHECK(cudaFree(vllm_topk_ws.d_row_ends));
+        vllm_topk_ws.d_row_ends = nullptr;
+    }
+    if (vllm_topk_ws.d_tmp_idx) {
+        CUDA_CHECK(cudaFree(vllm_topk_ws.d_tmp_idx));
+        vllm_topk_ws.d_tmp_idx = nullptr;
+    }
+    for (int * p : vllm_topk_ws.stale_row_starts) {
+        CUDA_CHECK(cudaFree(p));
+    }
+    for (int * p : vllm_topk_ws.stale_row_ends) {
+        CUDA_CHECK(cudaFree(p));
+    }
+    for (int * p : vllm_topk_ws.stale_tmp_idx) {
+        CUDA_CHECK(cudaFree(p));
+    }
+    vllm_topk_ws.stale_row_starts.clear();
+    vllm_topk_ws.stale_row_ends.clear();
+    vllm_topk_ws.stale_tmp_idx.clear();
+    vllm_topk_ws.cap_rows = 0;
+    vllm_topk_ws.cap_tmp_idx = 0;
+
     for (int i = 0; i < GGML_CUDA_MAX_DEVICES; ++i) {
         for (int j = 0; j < GGML_CUDA_MAX_STREAMS; ++j) {
             if (streams[i][j] != nullptr) {
@@ -2871,11 +2898,14 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     // are mapped into rowStarts/rowEnds on the host.
                     bool use_vllm_topk = (use_vllm && atoi(use_vllm) != 0 && k <= KMAX);
                     if (use_vllm_topk) {
-                        ggml_cuda_pool & pool = ctx.pool(ggml_cuda_get_device());
                         const int KMAX = 2048;
-                        ggml_cuda_pool_alloc<int> rowStarts(pool, (size_t)T);
-                        ggml_cuda_pool_alloc<int> rowEnds  (pool, (size_t)T);
-                        ggml_cuda_pool_alloc<int> tmpIdx   (pool, (size_t)KMAX * (size_t)T);
+                        size_t rows = (size_t) T;
+                        size_t tmp_ints = (size_t) KMAX * (size_t) T;
+                        CUDA_CHECK(ctx.ensure_vllm_topk_rows(rows));
+                        CUDA_CHECK(ctx.ensure_vllm_topk_tmp(tmp_ints));
+                        int * dRowStarts = ctx.vllm_topk_ws.d_row_starts;
+                        int * dRowEnds   = ctx.vllm_topk_ws.d_row_ends;
+                        int * dTmpIdx    = ctx.vllm_topk_ws.d_tmp_idx;
                         // Map tl_starts/tl_ends per column into rowStarts/rowEnds; fall back to [0,N) when absent.
                         std::vector<int> hRowStarts(T), hRowEnds(T);
 #ifndef NDEBUG
@@ -2901,26 +2931,26 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                                            hRowStarts.empty()?0:hRowStarts[0],
                                            hRowEnds.empty()?0:hRowEnds[0],
                                            (const void *) scores->data,
-                                           (const void *) rowStarts.get(),
-                                           (const void *) rowEnds.get(),
-                                           (const void *) tmpIdx.get());
+                                           (const void *) dRowStarts,
+                                           (const void *) dRowEnds,
+                                           (const void *) dTmpIdx);
                         }
-                        CUDA_CHECK(cudaMemcpyAsync(rowStarts.get(), hRowStarts.data(), sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
-                        CUDA_CHECK(cudaMemcpyAsync(rowEnds.get(),   hRowEnds.data(),   sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
+                        CUDA_CHECK(cudaMemcpyAsync(dRowStarts, hRowStarts.data(), sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
+                        CUDA_CHECK(cudaMemcpyAsync(dRowEnds,   hRowEnds.data(),   sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
                         LAUNCH_PROFILE_KERNEL_TOPK("SPARSE_TOPK_RADIX2_VLLM", TOPK_ONLY, ctx.stream(), ([&](){
                                     ggml_cuda_topk_per_row(ctx,
                                             (const float *) scores->data,
-                                            rowStarts.get(),
-                                            rowEnds.get(),
+                                            dRowStarts,
+                                            dRowEnds,
                                             T,
                                             N,
                                             1,
-                                            tmpIdx.get(),
+                                            dTmpIdx,
                                             k);
                                     })(), N, T, k);
                         // copy first k indices per column from tmpIdx [KMAX,T] to dst [k,T]
                         CUDA_CHECK(cudaMemcpy2DAsync((void *) dst->data, (size_t) k * sizeof(int),
-                                    (const void *) tmpIdx.get(), (size_t) KMAX * sizeof(int),
+                                    (const void *) dTmpIdx, (size_t) KMAX * sizeof(int),
                                     (size_t) k * sizeof(int), (size_t) T,
                                     cudaMemcpyDeviceToDevice, ctx.stream()));
                     } else {

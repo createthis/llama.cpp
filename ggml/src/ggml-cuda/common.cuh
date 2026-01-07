@@ -987,6 +987,53 @@ struct ggml_backend_cuda_context {
     cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
 
     std::unique_ptr<ggml_cuda_graph> cuda_graph;
+    struct vllm_topk_workspace {
+        int * d_row_starts = nullptr;
+        int * d_row_ends   = nullptr;
+        int * d_tmp_idx    = nullptr;
+        size_t cap_rows    = 0;
+        size_t cap_tmp_idx = 0;
+        // Old allocations kept alive until context destruction to remain
+        // valid for any CUDA graphs that may have captured them.
+        std::vector<int *> stale_row_starts;
+        std::vector<int *> stale_row_ends;
+        std::vector<int *> stale_tmp_idx;
+    } vllm_topk_ws;
+
+    cudaError_t ensure_vllm_topk_rows(size_t rows) {
+        if (vllm_topk_ws.cap_rows >= rows || rows == 0) return cudaSuccess;
+        int dev = device;
+        ggml_cuda_set_device(dev);
+        int * new_row_starts = nullptr;
+        int * new_row_ends   = nullptr;
+        CUDA_CHECK(cudaMalloc(&new_row_starts, rows * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&new_row_ends,   rows * sizeof(int)));
+        if (vllm_topk_ws.d_row_starts) {
+            vllm_topk_ws.stale_row_starts.push_back(vllm_topk_ws.d_row_starts);
+        }
+        if (vllm_topk_ws.d_row_ends) {
+            vllm_topk_ws.stale_row_ends.push_back(vllm_topk_ws.d_row_ends);
+        }
+        vllm_topk_ws.d_row_starts = new_row_starts;
+        vllm_topk_ws.d_row_ends   = new_row_ends;
+        vllm_topk_ws.cap_rows     = rows;
+        return cudaSuccess;
+    }
+
+    cudaError_t ensure_vllm_topk_tmp(size_t size_ints) {
+        if (vllm_topk_ws.cap_tmp_idx >= size_ints || size_ints == 0) return cudaSuccess;
+        int dev = device;
+        ggml_cuda_set_device(dev);
+        int * new_tmp = nullptr;
+        CUDA_CHECK(cudaMalloc(&new_tmp, size_ints * sizeof(int)));
+        if (vllm_topk_ws.d_tmp_idx) {
+            vllm_topk_ws.stale_tmp_idx.push_back(vllm_topk_ws.d_tmp_idx);
+        }
+        vllm_topk_ws.d_tmp_idx   = new_tmp;
+        vllm_topk_ws.cap_tmp_idx = size_ints;
+        return cudaSuccess;
+    }
+
 
     explicit ggml_backend_cuda_context(int device) :
         device(device),
