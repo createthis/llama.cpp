@@ -48,6 +48,115 @@
 #include "ggml-cuda/topk-moe.cuh"
 #include "ggml-cuda/topk-radix.cuh"
 
+
+#ifndef LAUNCH_PROFILE_KERNEL
+#define LAUNCH_PROFILE_KERNEL(TAG_STR, TAGNAME, STREAM, LAUNCH_STMT, D_, H_, Tc_, KV_) do { \
+    if (__prof_env && *__prof_env) { \
+        cudaStreamCaptureStatus __cap_status = cudaStreamCaptureStatusNone; \
+        unsigned long long __cap_id = 0; \
+        cudaError_t __cap_err = cudaStreamGetCaptureInfo_v2( \
+            STREAM, &__cap_status, &__cap_id, nullptr, nullptr, nullptr); \
+        bool __capturing = (__cap_err == cudaSuccess && __cap_status != cudaStreamCaptureStatusNone); \
+        if (__capturing) { \
+            LAUNCH_STMT; \
+        } else { \
+            cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1); \
+            cudaEventRecord(__e0, STREAM); \
+            LAUNCH_STMT; \
+            cudaEventRecord(__e1, STREAM); \
+            cudaEventSynchronize(__e1); \
+            float __ms = 0.0f; cudaEventElapsedTime(&__ms, __e0, __e1); \
+            cudaEventDestroy(__e0); cudaEventDestroy(__e1); \
+            static int __cnt_##TAGNAME = 0; \
+            static double __sum_##TAGNAME = 0.0; \
+            __sum_##TAGNAME += __ms; \
+            __cnt_##TAGNAME++; \
+            if (__prof_each_env && *__prof_each_env) { \
+                fprintf(stderr, "[" TAG_STR "] INDEXER2 D=%d H=%d Tc=%d kv=%d ms=%.3f\n", D_, H_, Tc_, KV_, __ms); \
+            } else if (__cnt_##TAGNAME % 50 == 0) { \
+                fprintf(stderr, "[" TAG_STR "] INDEXER2 D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n", D_, H_, Tc_, KV_, (float)(__sum_##TAGNAME/50.0)); \
+                __sum_##TAGNAME = 0.0; \
+            } \
+        } \
+    } else { \
+        LAUNCH_STMT; \
+    } \
+} while(0)
+#endif
+
+#ifndef LAUNCH_PROFILE_KERNEL_TOPK
+#define LAUNCH_PROFILE_KERNEL_TOPK(TAG_STR, TAGNAME, STREAM, LAUNCH_STMT, N_, T_, k_) do { \
+    if (__prof_env && *__prof_env) { \
+        cudaStreamCaptureStatus __cap_status = cudaStreamCaptureStatusNone; \
+        unsigned long long __cap_id = 0; \
+        cudaError_t __cap_err = cudaStreamGetCaptureInfo_v2( \
+            STREAM, &__cap_status, &__cap_id, nullptr, nullptr, nullptr); \
+        bool __capturing = (__cap_err == cudaSuccess && __cap_status != cudaStreamCaptureStatusNone); \
+        if (__capturing) { \
+            LAUNCH_STMT; \
+        } else { \
+            cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1); \
+            cudaEventRecord(__e0, STREAM); \
+            LAUNCH_STMT; \
+            cudaEventRecord(__e1, STREAM); \
+            cudaEventSynchronize(__e1); \
+            float __ms = 0.0f; cudaEventElapsedTime(&__ms, __e0, __e1); \
+            cudaEventDestroy(__e0); cudaEventDestroy(__e1); \
+            static int __cnt_##TAGNAME = 0; \
+            static double __sum_##TAGNAME = 0.0; \
+            __sum_##TAGNAME += __ms; \
+            __cnt_##TAGNAME++; \
+            if (__prof_each_env && *__prof_each_env) { \
+                fprintf(stderr, "[" TAG_STR "] TOPK N=%d T=%d k=%d ms=%.3f\n", N_, T_, k_, __ms); \
+            } else if (__cnt_##TAGNAME % 50 == 0) { \
+                fprintf(stderr, "[" TAG_STR "] TOPK N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N_, T_, k_, (float)(__sum_##TAGNAME/50.0)); \
+                __sum_##TAGNAME = 0.0; \
+            } \
+        } \
+    } else { \
+        LAUNCH_STMT; \
+    } \
+} while(0)
+#endif
+
+#ifndef LAUNCH_PROFILE_KERNEL_MLA
+#define LAUNCH_PROFILE_KERNEL_MLA(TAG_STR, TAGNAME, STREAM, LAUNCH_STMT, Dq_, Hq_, Hkv_, Dv_, Nkv_, K_) do { \
+    if (__prof_env && *__prof_env) { \
+        cudaStreamCaptureStatus __cap_status = cudaStreamCaptureStatusNone; \
+        unsigned long long __cap_id = 0; \
+        cudaError_t __cap_err = cudaStreamGetCaptureInfo_v2( \
+            STREAM, &__cap_status, &__cap_id, nullptr, nullptr, nullptr); \
+        bool __capturing = (__cap_err == cudaSuccess && __cap_status != cudaStreamCaptureStatusNone); \
+        if (__capturing) { \
+            LAUNCH_STMT; \
+        } else { \
+            cudaEvent_t __e0, __e1; cudaEventCreate(&__e0); cudaEventCreate(&__e1); \
+            cudaEventRecord(__e0, STREAM); \
+            LAUNCH_STMT; \
+            cudaEventRecord(__e1, STREAM); \
+            cudaEventSynchronize(__e1); \
+            float __ms = 0.0f; cudaEventElapsedTime(&__ms, __e0, __e1); \
+            cudaEventDestroy(__e0); cudaEventDestroy(__e1); \
+            static int __cnt_##TAGNAME = 0; \
+            static double __sum_##TAGNAME = 0.0; \
+            __sum_##TAGNAME += __ms; \
+            __cnt_##TAGNAME++; \
+            if (__prof_each_env && *__prof_each_env) { \
+                fprintf(stderr, "[" TAG_STR "] MLA D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d ms=%.3f\n", \
+                        Dq_, Hq_, Hkv_, Dv_, Nkv_, K_, __ms); \
+            } else if (__cnt_##TAGNAME % 50 == 0) { \
+                fprintf(stderr, "[" TAG_STR "] MLA D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d avg_ms=%.3f over 50 calls\n", \
+                        Dq_, Hq_, Hkv_, Dv_, Nkv_, K_, (float)(__sum_##TAGNAME/50.0)); \
+                __sum_##TAGNAME = 0.0; \
+            } \
+        } \
+    } else { \
+        LAUNCH_STMT; \
+    } \
+} while(0)
+#endif
+
+
 extern "C" void ggml_cuda_topk_per_row(
     ggml_backend_cuda_context & ctx,
     const float * dLogits,
@@ -728,6 +837,33 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
     if (copy_event != nullptr) {
         CUDA_CHECK(cudaEventDestroy(copy_event));
     }
+    if (vllm_topk_ws.d_row_starts) {
+        CUDA_CHECK(cudaFree(vllm_topk_ws.d_row_starts));
+        vllm_topk_ws.d_row_starts = nullptr;
+    }
+    if (vllm_topk_ws.d_row_ends) {
+        CUDA_CHECK(cudaFree(vllm_topk_ws.d_row_ends));
+        vllm_topk_ws.d_row_ends = nullptr;
+    }
+    if (vllm_topk_ws.d_tmp_idx) {
+        CUDA_CHECK(cudaFree(vllm_topk_ws.d_tmp_idx));
+        vllm_topk_ws.d_tmp_idx = nullptr;
+    }
+    for (int * p : vllm_topk_ws.stale_row_starts) {
+        CUDA_CHECK(cudaFree(p));
+    }
+    for (int * p : vllm_topk_ws.stale_row_ends) {
+        CUDA_CHECK(cudaFree(p));
+    }
+    for (int * p : vllm_topk_ws.stale_tmp_idx) {
+        CUDA_CHECK(cudaFree(p));
+    }
+    vllm_topk_ws.stale_row_starts.clear();
+    vllm_topk_ws.stale_row_ends.clear();
+    vllm_topk_ws.stale_tmp_idx.clear();
+    vllm_topk_ws.cap_rows = 0;
+    vllm_topk_ws.cap_tmp_idx = 0;
+
     for (int i = 0; i < GGML_CUDA_MAX_DEVICES; ++i) {
         for (int j = 0; j < GGML_CUDA_MAX_STREAMS; ++j) {
             if (streams[i][j] != nullptr) {
@@ -2722,13 +2858,16 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 GGML_ASSERT(dst->type == GGML_TYPE_I32);
                 int N = (int)scores->ne[0];
                 int T = (int)ggml_nrows(scores);
+                const char * dbg_topk = getenv("LLAMA_SPARSE_TOPK_DEBUG");
+                if (dbg_topk && *dbg_topk) {
+                    GGML_LOG_ERROR("[SPARSE_TOPK_RADIX] N=%d T=%d k=%d type=%d ne=[%ld,%ld,%ld,%ld]\n",
+                                   N, T, k, (int) scores->type,
+                                   (long) scores->ne[0], (long) scores->ne[1], (long) scores->ne[2], (long) scores->ne[3]);
+                }
                 // profiling wrapper for SPARSE_TOPK_RADIX (selection only)
                 // guarded by env LLAMA_SPARSE_PROF to avoid log spam
                 auto * __prof_env = getenv("LLAMA_SPARSE_PROF");
                 auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
-                cudaStreamCaptureStatus __iscap = cudaStreamCaptureStatusNone;
-                CUDA_CHECK(cudaStreamIsCapturing(ctx.stream(), &__iscap));
-                bool __do_prof = (__prof_env && *__prof_env && __iscap == cudaStreamCaptureStatusNone);
                 cudaError_t __err_kernel = cudaSuccess;
                 // Optional per-column KV windows (starts/ends) passed via src[1]/src[2]
                 const int * tl_starts = nullptr;
@@ -2740,42 +2879,17 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     const to_fp32_cuda_t to_fp32 = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
                     ggml_cuda_pool_alloc<float> tmp(ctx.pool(ggml_cuda_get_device()), (size_t)N*T);
                     to_fp32((const void *)scores->data, (float *)tmp.get(), (size_t)N*T, ctx.stream());
-                    if (__do_prof) {
-                        cudaEvent_t __e0, __e1; cudaError_t __e0c = cudaEventCreate(&__e0); cudaError_t __e1c = cudaEventCreate(&__e1);
-                        bool __ev_ok = (__e0c == cudaSuccess && __e1c == cudaSuccess);
-                        if (__ev_ok) cudaEventRecord(__e0, ctx.stream());
-                        {
-                            const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
-                            if (use_tl && *use_tl) {
-                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data, tl_starts, tl_ends);
-                            } else {
-                                ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
-                            }
-                        }
-                        __err_kernel = cudaGetLastError();
-                        float __ms = 0.0f;
-                        if (__ev_ok) {
-                            cudaEventRecord(__e1, ctx.stream()); cudaEventSynchronize(__e1);
-                            cudaEventElapsedTime(&__ms, __e0, __e1);
-                            cudaEventDestroy(__e0); cudaEventDestroy(__e1);
-                        }
-                        static int __cnt = 0; static double __sum = 0.0; __sum += __ms; __cnt++;
-                        if (__prof_each_env && *__prof_each_env) {
-                            fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX1 N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
-                        } else {
-                            if (__cnt % 50 == 0) { fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX1 N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0)); __sum = 0.0; }
-                        }
+                    const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
+                    if (use_tl && *use_tl) {
+                        LAUNCH_PROFILE_KERNEL_TOPK("SPARSE_TOPK_RADIX1_TL", TOPK_ONLY, ctx.stream(), ([&](){
+                                    ggml_cuda_topk_tilelang_port_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data, tl_starts, tl_ends);
+                                    })(), N, T, k);
                     } else {
-                        {
-                            const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
-                            if (use_tl && *use_tl) {
-                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data, tl_starts, tl_ends);
-                            } else {
-                                ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
-                            }
-                        }
-                        __err_kernel = cudaGetLastError();
+                        LAUNCH_PROFILE_KERNEL_TOPK("SPARSE_TOPK_RADIX1", TOPK_ONLY, ctx.stream(), ([&](){
+                                    ggml_cuda_topk_radix_indices_device(ctx, (const float *)tmp.get(), N, T, k, (int *)dst->data);
+                                    })(), N, T, k);
                     }
+                    __err_kernel = cudaGetLastError();
                 } else {
                     GGML_ASSERT(scores->type == GGML_TYPE_F32);
                     const char * use_vllm = getenv("LLAMA_SPARSE_TOPK_VLLM");
@@ -2783,136 +2897,75 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     // Allow VLLM top-k for any T when k <= KMAX. Per-column windows (tl_starts/tl_ends)
                     // are mapped into rowStarts/rowEnds on the host.
                     bool use_vllm_topk = (use_vllm && atoi(use_vllm) != 0 && k <= KMAX);
-                    if (__do_prof) {
-                        cudaEvent_t __e0, __e1;
-                        cudaEventCreate(&__e0);
-                        cudaEventCreate(&__e1);
-                        cudaEventRecord(__e0, ctx.stream());
-                        {
-                            if (use_vllm_topk) {
-                                ggml_cuda_pool & pool = ctx.pool(ggml_cuda_get_device());
-                                const int KMAX = 2048;
-                                ggml_cuda_pool_alloc<int> rowStarts(pool, (size_t)T);
-                                ggml_cuda_pool_alloc<int> rowEnds  (pool, (size_t)T);
-                                ggml_cuda_pool_alloc<int> tmpIdx   (pool, (size_t)KMAX * (size_t)T);
-                                // Map tl_starts/tl_ends per column into rowStarts/rowEnds; fall back to [0,N) when absent.
-                                std::vector<int> hRowStarts(T), hRowEnds(T);
-                                if (tl_starts || tl_ends) {
-                                    for (int t = 0; t < T; ++t) {
-                                        int s0 = tl_starts ? tl_starts[t] : 0;
-                                        int e0 = tl_ends   ? tl_ends[t]   : N;
-                                        if (s0 < 0) s0 = 0; if (s0 > N) s0 = N;
-                                        if (e0 < 0) e0 = 0; if (e0 > N) e0 = N;
-                                        if (e0 < s0) e0 = s0;
-                                        hRowStarts[t] = s0;
-                                        hRowEnds[t]   = e0;
-                                    }
-                                } else {
-                                    for (int t = 0; t < T; ++t) { hRowStarts[t] = 0; hRowEnds[t] = N; }
-                                }
-                                CUDA_CHECK(cudaMemcpyAsync(rowStarts.get(), hRowStarts.data(), sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
-                                CUDA_CHECK(cudaMemcpyAsync(rowEnds.get(),   hRowEnds.data(),   sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
-                                ggml_cuda_topk_per_row(ctx,
-                                                       (const float *) scores->data,
-                                                       rowStarts.get(),
-                                                       rowEnds.get(),
-                                                       T,
-                                                       N,
-                                                       1,
-                                                       tmpIdx.get(),
-                                                       k);
-                                // copy first k indices per column from tmpIdx [KMAX,T] to dst [k,T]
-                                CUDA_CHECK(cudaMemcpy2DAsync((void *) dst->data, (size_t) k * sizeof(int),
-                                                             (const void *) tmpIdx.get(), (size_t) KMAX * sizeof(int),
-                                                             (size_t) k * sizeof(int), (size_t) T,
-                                                             cudaMemcpyDeviceToDevice, ctx.stream()));
-                            } else {
-                                const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
-                                if (use_tl && *use_tl) {
-                                    ggml_cuda_topk_tilelang_port_device(ctx, (const float *) scores->data, N, T, k, (int *) dst->data, tl_starts, tl_ends);
-                                } else {
-                                    ggml_cuda_topk_radix_indices_device(ctx, (const float *) scores->data, N, T, k, (int *) dst->data);
-                                }
-                            }
-                        }
-                        __err_kernel = cudaGetLastError();
-                        cudaEventRecord(__e1, ctx.stream());
-                        cudaEventSynchronize(__e1);
-                        float __ms = 0.0f;
-                        cudaEventElapsedTime(&__ms, __e0, __e1);
-                        static int __cnt = 0;
-                        static double __sum = 0.0;
-                        __sum += __ms;
-                        __cnt++;
-                        if (__prof_each_env && *__prof_each_env) {
-                            if (use_vllm_topk) {
-                                fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX2_VLLM N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
-                            } else {
-                                fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX2 N=%d T=%d k=%d ms=%.3f\n", N, T, k, (float)(__ms));
-                            }
-                        } else {
-                            if (__cnt % 50 == 0) {
-                                if (use_vllm_topk) {
-                                    fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX2_VLLM N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0));
-                                } else {
-                                    fprintf(stderr, "[PROFILE] SPARSE_TOPK_RADIX2 N=%d T=%d k=%d avg_ms=%.3f over 50 calls\n", N, T, k, (float)(__sum/50.0));
-                                }
-                                __sum = 0.0;
-                            }
-                        }
-                        cudaEventDestroy(__e0);
-                        cudaEventDestroy(__e1);
-                    } else {
-                        const char * use_vllm2 = getenv("LLAMA_SPARSE_TOPK_VLLM");
+                    if (use_vllm_topk) {
                         const int KMAX = 2048;
-                        // Allow VLLM top-k for any T when k <= KMAX. Windows are passed via rowStarts/rowEnds.
-                        bool use_vllm_topk2 = (use_vllm2 && atoi(use_vllm2) != 0 && k <= KMAX);
-                        if (use_vllm_topk2) {
-                            ggml_cuda_pool & pool = ctx.pool(ggml_cuda_get_device());
-                            const int KMAX = 2048;
-                            ggml_cuda_pool_alloc<int> rowStarts(pool, (size_t)T);
-                            ggml_cuda_pool_alloc<int> rowEnds  (pool, (size_t)T);
-                            ggml_cuda_pool_alloc<int> tmpIdx   (pool, (size_t)KMAX * (size_t)T);
-                            // Map tl_starts/tl_ends into rowStarts/rowEnds; default to [0,N) when absent.
-                            std::vector<int> hRowStarts(T), hRowEnds(T);
-                            if (tl_starts || tl_ends) {
-                                for (int t = 0; t < T; ++t) {
-                                    int s0 = tl_starts ? tl_starts[t] : 0;
-                                    int e0 = tl_ends   ? tl_ends[t]   : N;
-                                    if (s0 < 0) s0 = 0; if (s0 > N) s0 = N;
-                                    if (e0 < 0) e0 = 0; if (e0 > N) e0 = N;
-                                    if (e0 < s0) e0 = s0;
-                                    hRowStarts[t] = s0;
-                                    hRowEnds[t]   = e0;
-                                }
-                            } else {
-                                for (int t = 0; t < T; ++t) { hRowStarts[t] = 0; hRowEnds[t] = N; }
+                        size_t rows = (size_t) T;
+                        size_t tmp_ints = (size_t) KMAX * (size_t) T;
+                        CUDA_CHECK(ctx.ensure_vllm_topk_rows(rows));
+                        CUDA_CHECK(ctx.ensure_vllm_topk_tmp(tmp_ints));
+                        int * dRowStarts = ctx.vllm_topk_ws.d_row_starts;
+                        int * dRowEnds   = ctx.vllm_topk_ws.d_row_ends;
+                        int * dTmpIdx    = ctx.vllm_topk_ws.d_tmp_idx;
+                        // Map tl_starts/tl_ends per column into rowStarts/rowEnds; fall back to [0,N) when absent.
+                        std::vector<int> hRowStarts(T), hRowEnds(T);
+#ifndef NDEBUG
+                        int dbg_s0 = -1, dbg_e0 = -1;
+#endif
+                        if (tl_starts || tl_ends) {
+                            for (int t = 0; t < T; ++t) {
+                                int s0 = tl_starts ? tl_starts[t] : 0;
+                                int e0 = tl_ends   ? tl_ends[t]   : N;
+                                if (s0 < 0) s0 = 0; if (s0 > N) s0 = N;
+                                if (e0 < 0) e0 = 0; if (e0 > N) e0 = N;
+                                if (e0 < s0) e0 = s0;
+                                hRowStarts[t] = s0;
+                                hRowEnds[t]   = e0;
                             }
-                            CUDA_CHECK(cudaMemcpyAsync(rowStarts.get(), hRowStarts.data(), sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
-                            CUDA_CHECK(cudaMemcpyAsync(rowEnds.get(),   hRowEnds.data(),   sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
-                            ggml_cuda_topk_per_row(ctx,
-                                                   (const float *) scores->data,
-                                                   rowStarts.get(),
-                                                   rowEnds.get(),
-                                                   T,
-                                                   N,
-                                                   1,
-                                                   tmpIdx.get(),
-                                                   k);
-                            CUDA_CHECK(cudaMemcpy2DAsync((void *) dst->data, (size_t) k * sizeof(int),
-                                                         (const void *) tmpIdx.get(), (size_t) KMAX * sizeof(int),
-                                                         (size_t) k * sizeof(int), (size_t) T,
-                                                         cudaMemcpyDeviceToDevice, ctx.stream()));
                         } else {
-                            const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
-                            if (use_tl && *use_tl) {
-                                ggml_cuda_topk_tilelang_port_device(ctx, (const float *) scores->data, N, T, k, (int *) dst->data, tl_starts, tl_ends);
-                            } else {
-                                ggml_cuda_topk_radix_indices_device(ctx, (const float *) scores->data, N, T, k, (int *) dst->data);
-                            }
+                            for (int t = 0; t < T; ++t) { hRowStarts[t] = 0; hRowEnds[t] = N; }
                         }
-                        __err_kernel = cudaGetLastError();
+                        const char * dbg_topk = getenv("LLAMA_SPARSE_TOPK_DEBUG");
+                        if (dbg_topk && *dbg_topk) {
+                            GGML_LOG_ERROR("[SPARSE_TOPK_VLLM] N=%d T=%d k=%d row0=[%d,%d) scores=%p rowStarts=%p rowEnds=%p tmpIdx=%p\n",
+                                           N, T, k,
+                                           hRowStarts.empty()?0:hRowStarts[0],
+                                           hRowEnds.empty()?0:hRowEnds[0],
+                                           (const void *) scores->data,
+                                           (const void *) dRowStarts,
+                                           (const void *) dRowEnds,
+                                           (const void *) dTmpIdx);
+                        }
+                        CUDA_CHECK(cudaMemcpyAsync(dRowStarts, hRowStarts.data(), sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
+                        CUDA_CHECK(cudaMemcpyAsync(dRowEnds,   hRowEnds.data(),   sizeof(int)*(size_t)T, cudaMemcpyHostToDevice, ctx.stream()));
+                        LAUNCH_PROFILE_KERNEL_TOPK("SPARSE_TOPK_RADIX2_VLLM", TOPK_ONLY, ctx.stream(), ([&](){
+                                    ggml_cuda_topk_per_row(ctx,
+                                            (const float *) scores->data,
+                                            dRowStarts,
+                                            dRowEnds,
+                                            T,
+                                            N,
+                                            1,
+                                            dTmpIdx,
+                                            k);
+                                    })(), N, T, k);
+                        // copy first k indices per column from tmpIdx [KMAX,T] to dst [k,T]
+                        CUDA_CHECK(cudaMemcpy2DAsync((void *) dst->data, (size_t) k * sizeof(int),
+                                    (const void *) dTmpIdx, (size_t) KMAX * sizeof(int),
+                                    (size_t) k * sizeof(int), (size_t) T,
+                                    cudaMemcpyDeviceToDevice, ctx.stream()));
+                    } else {
+                        const char * use_tl = getenv("LLAMA_SPARSE_TOPK_TL");
+                        if (use_tl && *use_tl) {
+                            LAUNCH_PROFILE_KERNEL_TOPK("SPARSE_TOPK_RADIX2_TL", TOPK_ONLY, ctx.stream(), ([&](){
+                                        ggml_cuda_topk_tilelang_port_device(ctx, (const float *) scores->data, N, T, k, (int *) dst->data, tl_starts, tl_ends);
+                                        })(), N, T, k);
+                        } else {
+                            LAUNCH_PROFILE_KERNEL_TOPK("SPARSE_TOPK_RADIX2", TOPK_ONLY, ctx.stream(), ([&](){
+                                        ggml_cuda_topk_radix_indices_device(ctx, (const float *) scores->data, N, T, k, (int *) dst->data);
+                                        })(), N, T, k);
+                        }
                     }
+                    __err_kernel = cudaGetLastError();
                 }
                 // Prefer kernel error captured immediately after launch if set, otherwise last error
                 cudaError_t err_topk = (__err_kernel != cudaSuccess) ? __err_kernel : cudaGetLastError();
@@ -3016,16 +3069,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     skip_k_convert = true;
                 }
 // Optional profiling for fused indexer
-                auto * __prof_env2 = getenv("LLAMA_SPARSE_PROF");
+                auto * __prof_env = getenv("LLAMA_SPARSE_PROF");
                 auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
-                cudaEvent_t __i0, __i1;
-                bool __do_prof2 = false;
-                float __ms2 = 0.0f;
-                if (__prof_env2 && *__prof_env2) {
-                    cudaEventCreate(&__i0);
-                    cudaEventCreate(&__i1);
-                    __do_prof2 = true;
-                }
 
                 // Promote half/bf16 to float for now (Phase 1)
                 ggml_cuda_pool_alloc<float> qf(ctx.pool(ggml_cuda_get_device()), (size_t)D*TcH);
@@ -3047,8 +3092,6 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                                                    sizeof(float)*(size_t)D*kv, cudaMemcpyDeviceToDevice, ctx.stream()));
                     }
                 }
-                // Launch naive device kernel (implemented in indexer-fused.cu) directly writing to dst
-                if (__do_prof2) { cudaEventRecord(__i0, ctx.stream()); }
 
 #ifndef NDEBUG
                 printf("[GGML_OP_INDEXER_FUSED] D=%d H=%d Tc=%d kv=%d TcH=%d\n", D, H, Tc, kv, TcH);
@@ -3058,7 +3101,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 fflush(stdout);
 #endif
                 const float *dK_f32 = skip_k_convert ? nullptr : (const float *) kf.get();
-                ggml_cuda_indexer_logits_fused_device(ctx,
+                LAUNCH_PROFILE_KERNEL("IDX_TILE", CUDA, ctx.stream(), ([&](){
+                            ggml_cuda_indexer_logits_fused_device(ctx,
                                                        (const float *) qf.get(),
                                                        dK_f32,
                                                        (const float *) w2d_c->data,
@@ -3070,28 +3114,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                                                        cache_block_size,
                                                        cache_stride,
                                                        (float *) dst->data);
+                            })(), D, H, Tc, kv);
                 CUDA_CHECK(cudaGetLastError());
-                if (__do_prof2) {
-                    cudaEventRecord(__i1, ctx.stream());
-                    cudaEventSynchronize(__i1);
-                    cudaEventElapsedTime(&__ms2, __i0, __i1);
-                    cudaEventDestroy(__i0);
-                    cudaEventDestroy(__i1);
-                    static int __cnt_idx_cuda = 0;
-                    static double __sum_idx_cuda = 0.0;
-                    __sum_idx_cuda += __ms2;
-                    __cnt_idx_cuda++;
-                    if (__prof_each_env && *__prof_each_env) {
-                        fprintf(stderr, "[PROFILE] IDX_TILE CUDA D=%d H=%d Tc=%d kv=%d ms=%.3f\n", 
-                                D, H, Tc, kv, (float)(__ms2));
-                    } else {
-                        if (__cnt_idx_cuda % 50 == 0) {
-                            fprintf(stderr, "[PROFILE] IDX_TILE CUDA D=%d H=%d Tc=%d kv=%d avg_ms=%.3f over 50 calls\n", 
-                                    D, H, Tc, kv, (float)(__sum_idx_cuda/50.0));
-                            __sum_idx_cuda = 0.0;
-                        }
-                    }
-                }
                 (void)D; (void)H; (void)Tc; (void)kv; (void)TcH; // silence warnings if asserts disabled
             }
             break;
@@ -3129,17 +3153,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 else {
                     CUDA_CHECK(cudaMemcpyAsync((void*)vtmp.get(), vc->data, sizeof(float)*(size_t)Dv*Hkv*Nkv, cudaMemcpyDeviceToDevice, ctx.stream()));
                 }
-                auto * __prof_env3 = getenv("LLAMA_SPARSE_PROF");
+                auto * __prof_env = getenv("LLAMA_SPARSE_PROF");
                 auto * __prof_each_env = getenv("LLAMA_SPARSE_PROF_EACH");
-                cudaEvent_t __m0, __m1;
-                bool __do_prof3 = false;
-                float __ms3 = 0.0f;
-                if (__prof_env3 && *__prof_env3) {
-                    cudaEventCreate(&__m0);
-                    cudaEventCreate(&__m1);
-                    __do_prof3 = true;
-                    cudaEventRecord(__m0, ctx.stream());
-                }
 
                 const char * flashmla_env = getenv("LLAMA_SPARSE_MLA_FLASHMLA");
                 bool use_flashmla = (flashmla_env && atoi(flashmla_env) != 0);
@@ -3150,51 +3165,28 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                     kv_blob = (const unsigned char *) dst->src[4]->data;
                 }
                 if (can_use_flashmla && kv_blob) {
-                    ggml_cuda_sparse_mla_decode_flashmla_sm100(
-                        ctx,
-                        (const float*)qtmp.get(),
-                        (const float*)ktmp.get(),
-                        (const float*)vtmp.get(),
-                        (const int32_t*)idx->data,
-                        kv_blob,
-                        Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
+                    LAUNCH_PROFILE_KERNEL_MLA("SPARSE_MLA_DECODE_FLASHMLA", MLA, ctx.stream(), ([&](){
+                                ggml_cuda_sparse_mla_decode_flashmla_sm100(
+                                        ctx,
+                                        (const float*)qtmp.get(),
+                                        (const float*)ktmp.get(),
+                                        (const float*)vtmp.get(),
+                                        (const int32_t*)idx->data,
+                                        kv_blob,
+                                        Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
+                                })(), Dq, Hq, Hkv, Dv, Nkv, K);
                 } else {
-                    ggml_cuda_sparse_mla_decode_device(
-                        ctx,
-                        (const float*)qtmp.get(),
-                        (const float*)ktmp.get(),
-                        (const float*)vtmp.get(),
-                        (const int32_t*)idx->data,
-                        Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
+                    LAUNCH_PROFILE_KERNEL_MLA("SPARSE_MLA_DECODE", MLA, ctx.stream(), ([&](){
+                                ggml_cuda_sparse_mla_decode_device(
+                                        ctx,
+                                        (const float*)qtmp.get(),
+                                        (const float*)ktmp.get(),
+                                        (const float*)vtmp.get(),
+                                        (const int32_t*)idx->data,
+                                        Dq, Hq, Hkv, Dv, Nkv, K, kq_scale, softcap, (float*)dst->data);
+                                })(), Dq, Hq, Hkv, Dv, Nkv, K);
                 }
                 CUDA_CHECK(cudaGetLastError());
-                if (__do_prof3) {
-                    cudaEventRecord(__m1, ctx.stream());
-                    cudaEventSynchronize(__m1);
-                    cudaEventElapsedTime(&__ms3, __m0, __m1);
-                    cudaEventDestroy(__m0);
-                    cudaEventDestroy(__m1);
-                    static int __cnt_mla = 0;
-                    static double __sum_mla = 0.0;
-                    __sum_mla += __ms3;
-                    __cnt_mla++;
-                    if (__prof_each_env && *__prof_each_env) {
-                        if (use_flashmla) {
-                            fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE_FLASHMLA D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d ms=%.3f\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__ms3));
-                        } else {
-                            fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d ms=%.3f\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__ms3));
-                        }
-                    } else {
-                        if (__cnt_mla % 50 == 0) {
-                            if (use_flashmla) {
-                                fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE_FLASHMLA D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d avg_ms=%.3f over 50 calls\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__sum_mla/50.0));
-                            } else {
-                                fprintf(stderr, "[PROFILE] SPARSE_MLA_DECODE D=%d Hq=%d Hkv=%d Dv=%d Nkv=%d K=%d avg_ms=%.3f over 50 calls\n", Dq, Hq, Hkv, Dv, Nkv, K, (float)(__sum_mla/50.0));
-                            }
-                            __sum_mla = 0.0;
-                        }
-                    }
-                }
             }
             break;
 
@@ -3457,22 +3449,52 @@ static bool is_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, 
     }
 
     // Check if the graph size has changed
-    if (cuda_ctx->cuda_graph->ggml_graph_properties.size() != (size_t)cgraph->n_nodes) {
+    size_t prev_nodes = cuda_ctx->cuda_graph->ggml_graph_properties.size();
+    if (prev_nodes != (size_t)cgraph->n_nodes) {
         cuda_graph_update_required = true;
+        if (getenv("LLAMA_SPARSE_GRAPH_DEBUG") && prev_nodes != 0) {
+            GGML_LOG_ERROR("[CUDA_GRAPH_TOPO] n_nodes changed: prev=%zu new=%d\n", prev_nodes, cgraph->n_nodes);
+        }
         cuda_ctx->cuda_graph->ggml_graph_properties.resize(cgraph->n_nodes);
     }
+
+    const char * dbg_graph = getenv("LLAMA_SPARSE_GRAPH_DEBUG");
 
     // Loop over nodes in GGML graph to determine if CUDA graph update is required
     // and store properties to allow this comparison for the next token
     for (int i = 0; i < cgraph->n_nodes; i++) {
+        ggml_tensor * node = cgraph->nodes[i];
         bool has_matching_properties = true;
         if (!cuda_graph_update_required) {
-            has_matching_properties = ggml_graph_node_has_matching_properties(cgraph->nodes[i], &cuda_ctx->cuda_graph->ggml_graph_properties[i]);
+            has_matching_properties = ggml_graph_node_has_matching_properties(node, &cuda_ctx->cuda_graph->ggml_graph_properties[i]);
         }
         if (!has_matching_properties) {
+            if (dbg_graph && *dbg_graph) {
+                ggml_graph_node_properties * prev = &cuda_ctx->cuda_graph->ggml_graph_properties[i];
+                bool shape_changed = false;
+                for (int d = 0; d < GGML_MAX_DIMS; ++d) {
+                    if (node->ne[d] != prev->ne[d] || node->nb[d] != prev->nb[d]) {
+                        shape_changed = true;
+                        break;
+                    }
+                }
+                if (shape_changed || node->op != prev->node_op) {
+                    GGML_LOG_ERROR("[CUDA_GRAPH_MISMATCH] idx=%d name=%s new_op=%s prev_op=%s\n",
+                                   i,
+                                   node->name ? node->name : "<noname>",
+                                   ggml_op_name(node->op),
+                                   ggml_op_name(prev->node_op));
+                    GGML_LOG_ERROR("[CUDA_GRAPH_MISMATCH] new_ne=[%ld,%ld,%ld,%ld] prev_ne=[%ld,%ld,%ld,%ld]\n",
+                                   (long) node->ne[0], (long) node->ne[1], (long) node->ne[2], (long) node->ne[3],
+                                   (long) prev->ne[0], (long) prev->ne[1], (long) prev->ne[2], (long) prev->ne[3]);
+                    GGML_LOG_ERROR("[CUDA_GRAPH_MISMATCH] new_nb=[%zu,%zu,%zu,%zu] prev_nb=[%zu,%zu,%zu,%zu]\n",
+                                   (size_t) node->nb[0], (size_t) node->nb[1], (size_t) node->nb[2], (size_t) node->nb[3],
+                                   prev->nb[0], prev->nb[1], prev->nb[2], prev->nb[3]);
+                }
+            }
             cuda_graph_update_required = true;
         }
-        set_ggml_graph_node_properties(cgraph->nodes[i], &cuda_ctx->cuda_graph->ggml_graph_properties[i]);
+        set_ggml_graph_node_properties(node, &cuda_ctx->cuda_graph->ggml_graph_properties[i]);
     }
 
     return cuda_graph_update_required;
@@ -3492,6 +3514,17 @@ static void update_cuda_graph_executable(ggml_backend_cuda_context * cuda_ctx) {
     if (stat == cudaErrorGraphExecUpdateFailure) {
 #ifndef NDEBUG
         GGML_LOG_DEBUG("%s: CUDA graph update failed\n", __func__);
+#endif
+
+        // In debug / profiling configurations, dump more detail when available
+#if CUDART_VERSION >= 12000
+        GGML_LOG_ERROR("[CUDA_GRAPH] update failure: errorNode=%p, result=%d, error=%d\n",
+                       (void *) result_info.errorNode, (int) result_info.result, (int) stat);
+        GGML_LOG_ERROR("[CUDA_GRAPH] diag: numNodes=%zu, device=%d\n",
+                       cuda_ctx->cuda_graph->num_nodes, cuda_ctx->device);
+#else
+        GGML_LOG_ERROR("[CUDA_GRAPH] update failure: result=%d, error=%d\n",
+                       (int) result_info, (int) stat);
 #endif
 
         // The pre-existing graph exec cannot be updated due to violated constraints
@@ -3629,6 +3662,11 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
         // Only perform the graph execution if CUDA graphs are not enabled, or we are capturing the graph.
         // With the use of CUDA graphs, the execution will be performed by the graph launch.
         if (!use_cuda_graph || cuda_graph_update_required) {
+#ifndef NDEBUG
+            // Debug: log a summary of the graph immediately before (re)capture/execute.
+            GGML_LOG_DEBUG("[CUDA_GRAPH] eval: use_cuda_graph=%d update_required=%d n_nodes=%d device=%d\n",
+                           (int) use_cuda_graph, (int) cuda_graph_update_required, cgraph->n_nodes, cuda_ctx->device);
+#endif
 
             for (int i = 0; i < cgraph->n_nodes; i++) {
                 ggml_tensor * node = cgraph->nodes[i];

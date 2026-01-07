@@ -563,6 +563,18 @@ extern "C" void ggml_cuda_topk_per_row(
     cudaStream_t stream = ctx.stream();
     size_t smem_bytes = (size_t) topK * sizeof(int32_t);
 
+    if (getenv("LLAMA_SPARSE_TOPK_DEBUG") && num_rows > 0) {
+        GGML_LOG_ERROR("[TOPK_PER_ROW] prefill dLogits=%p dRowStarts=%p dRowEnds=%p num_rows=%d stride0=%d stride1=%d dOutIndices=%p topK=%d\n",
+                       (const void *) dLogits,
+                       (const void *) dRowStarts,
+                       (const void *) dRowEnds,
+                       num_rows,
+                       stride0,
+                       stride1,
+                       (const void *) dOutIndices,
+                       topK);
+    }
+
     // First up to kSortingAlgorithmThreshold rows: insertion-sort final stage
     int numInsertionBlocks = num_rows < kSortingAlgorithmThreshold ? num_rows : kSortingAlgorithmThreshold;
     if (numInsertionBlocks > 0) {
@@ -609,6 +621,18 @@ extern "C" void ggml_cuda_topk_per_row_decode(
     constexpr int kSortingAlgorithmThreshold = 12288;
     cudaStream_t stream = ctx.stream();
     size_t smem_bytes = (size_t) topK * sizeof(int32_t);
+
+    if (getenv("LLAMA_SPARSE_TOPK_DEBUG") && num_rows > 0) {
+        GGML_LOG_ERROR("[TOPK_PER_ROW_DECODE] dLogits=%p dSeqLens=%p next_n=%d num_rows=%d stride0=%d stride1=%d dOutIndices=%p topK=%d\n",
+                       (const void *) dLogits,
+                       (const void *) dSeqLens,
+                       next_n,
+                       num_rows,
+                       stride0,
+                       stride1,
+                       (const void *) dOutIndices,
+                       topK);
+    }
 
     // Derive numColumns from stride0 when rows are contiguous (stride1 == 1).
     // If layout is non-contiguous, fall back to insertion-sort variant.

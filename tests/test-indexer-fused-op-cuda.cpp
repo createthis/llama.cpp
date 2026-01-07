@@ -175,7 +175,6 @@ int main() {
     }
     if (tl_fp8_env && std::atoi(tl_fp8_env) != 0) {
       D=64;
-      H=4;
     }
 
     std::mt19937 rng(123);
